@@ -4,9 +4,10 @@ import { TrackCard } from "../TrackCard";
 import { Search, Loader2, Sparkles, Zap, Clock, Brain } from "lucide-react";
 import * as api from "../../api";
 import clsx from "clsx";
+import type { Track } from "../../types";
 
 interface SemanticResult {
-  track: any;
+  track: Track;
   similarity: number;
   match_reason: string;
 }

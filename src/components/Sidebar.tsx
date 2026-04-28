@@ -48,7 +48,7 @@ const libraryNav: NavItem[] = [
 ];
 
 export function Sidebar({ ytdlpVersion }: SidebarProps) {
-  const { view, setView, playlists, setSelectedPlaylistId, settings, ollamaAvailable, aiProcessing } = useAppStore();
+  const { view, setView, playlists, setSelectedPlaylistId, selectedPlaylistId, settings, ollamaAvailable, aiProcessing } = useAppStore();
 
   const handleNavClick = (navId: View) => {
     setView(navId);
@@ -142,7 +142,7 @@ export function Sidebar({ ytdlpVersion }: SidebarProps) {
                 className={clsx(
                   "w-full px-3 py-2 rounded-lg text-left text-sm transition-colors",
                   "hover:bg-ytm-surface-hover",
-                  view === "playlist" && playlist.id === useAppStore.getState().selectedPlaylistId
+                  view === "playlist" && playlist.id === selectedPlaylistId
                     ? "bg-ytm-surface text-white"
                     : "text-ytm-text-secondary"
                 )}

@@ -153,7 +153,7 @@ export function AIChatView() {
       // Quiz complete
       addChatMessage({
         role: "assistant",
-        content: `🏆 Quiz complete! You scored **${quizScore + (quizAnswer === quizQuestions[quizIndex]?.correct ? 1 : 0)}/${quizQuestions.length}**`,
+        content: `Quiz complete! You scored **${quizScore}/${quizQuestions.length}**`,
         timestamp: new Date().toISOString(),
       });
       setMode("chat");

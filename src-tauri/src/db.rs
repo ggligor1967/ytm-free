@@ -1141,6 +1141,11 @@ impl Database {
         Ok(())
     }
 
+    pub fn clear_embeddings(&self) -> Result<(), DbError> {
+        self.conn.execute("DELETE FROM track_embeddings", [])?;
+        Ok(())
+    }
+
     pub fn count_embeddings(&self) -> Result<i64, DbError> {
         self.conn
             .query_row("SELECT COUNT(*) FROM track_embeddings", [], |row| {

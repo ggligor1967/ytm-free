@@ -222,23 +222,23 @@ function App() {
   const renderView = () => {
     switch (view) {
       case "home":
-        return <HomeView />;
+        return <ErrorBoundary key="home"><HomeView /></ErrorBoundary>;
       case "search":
-        return <SearchView />;
+        return <ErrorBoundary key="search"><SearchView /></ErrorBoundary>;
       case "library":
-        return <LibraryView />;
+        return <ErrorBoundary key="library"><LibraryView /></ErrorBoundary>;
       case "playlists":
-        return <PlaylistsView />;
+        return <ErrorBoundary key="playlists"><PlaylistsView /></ErrorBoundary>;
       case "playlist":
-        return <PlaylistView />;
+        return <ErrorBoundary key="playlist"><PlaylistView /></ErrorBoundary>;
       case "downloads":
-        return <DownloadsView />;
+        return <ErrorBoundary key="downloads"><DownloadsView /></ErrorBoundary>;
       case "favorites":
-        return <FavoritesView />;
+        return <ErrorBoundary key="favorites"><FavoritesView /></ErrorBoundary>;
       case "settings":
-        return <SettingsView />;
+        return <ErrorBoundary key="settings"><SettingsView /></ErrorBoundary>;
       case "import":
-        return <ImportView />;
+        return <ErrorBoundary key="import"><ImportView /></ErrorBoundary>;
       case "smart-playlist":
         return <ErrorBoundary fallbackMessage="Smart Playlist error"><SmartPlaylistView /></ErrorBoundary>;
       case "smart-queue":

@@ -260,9 +260,16 @@ export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: 
                 Add to Playlist
               </button>
               <button
-                onClick={() => {
-                  // Download logic
+                onClick={async () => {
                   setShowMenu(false);
+                  const videoId = "video_id" in track ? track.video_id : track.id;
+                  showToast(`Downloading: ${track.title}...`, "info");
+                  try {
+                    await api.downloadTrack(videoId, track.title, track.artist, track.thumbnail);
+                    showToast(`Downloaded: ${track.title}`, "success");
+                  } catch (err) {
+                    showToast(`Download failed: ${err}`, "error");
+                  }
                 }}
                 className="w-full px-4 py-2 text-left text-sm hover:bg-ytm-surface-hover flex items-center gap-3"
               >
