@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF0000;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#CC0000;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <g transform="translate(128, 128)">
+    <!-- Music note / Play button hybrid -->
+    <path d="M200 0L200 180C200 220 168 256 128 256C88 256 56 220 56 180C56 140 88 104 128 104C144 104 160 112 172 124L172 40L200 0Z" fill="white" fill-opacity="0.9"/>
+    <circle cx="128" cy="180" r="52" fill="white"/>
+    <polygon points="100,140 100,220 160,180" fill="#FF0000"/>
+  </g>
+</svg>

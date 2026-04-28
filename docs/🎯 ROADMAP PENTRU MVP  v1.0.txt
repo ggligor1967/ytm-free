@@ -1,0 +1,72 @@
+🎯 ROADMAP PENTRU MVP / v1.0
+
+  🔴 PRIORITATE 1 - CORE funcțional (Must-have pentru MVP)
+
+  ┌─────┬───────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │  #  │              Sarcina              │                                                      De ce este importantă                                                       │
+  ├─────┼───────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 1   │ Testarea completă a fluxului      │ Proiectul are cod solid, dar lipsește testarea reală: verifică dacă yt-dlp funcționează pe mașina ta, dacă descărcările salvează │
+  │     │ end-to-end                        │  corect, dacă streaming-ul funcționează. Fără aceasta, nimic nu funcționează.                                                    │
+  ├─────┼───────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 2   │ Build și test în producție (npm   │ Verifică dacă aplicația se compilează și rulează ca binary standalone. Găsește problemele de configurare acum, nu după ce        │
+  │     │ run tauri build)                  │ publici.                                                                                                                         │
+  ├─────┼───────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 3   │ Documentație de utilizare (README │ Add: instrucțiuni de instalare pas-cu-pas (verifică yt-dlp instalat), troubleshooting comun (port 3456 ocupat), link către       │
+  │     │  clar)                            │ Ollama pentru AI.                                                                                                                │
+  └─────┴───────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  ---
+  🟡 PRIORITATE 2 - UX & Polish (Ce face aplicația să pară profesională)
+
+  ┌─────┬──────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │  #  │                   Sarcina                    │                                                 De ce este importantă                                                 │
+  ├─────┼──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 4   │ Sistem de notificări (Toast) complet         │ Toast există în cod, dar trebuie verificat că afișează mesaje utile: "Download complete", "Track added to playlist",  │
+  │     │                                              │ etc.                                                                                                                  │
+  ├─────┼──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 5   │ Error handling în toate AI operations        │ Verifică că toate erorile Ollama (timeout, model missing) afișează mesaje clare în UI, nu stack traces Rust.          │
+  ├─────┼──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 6   │ Indicatoare de loading pentru operațiuni     │ Download, smart playlist generation, semantic indexing - toate trebuie să arate progres (spinners, progres bar).      │
+  │     │ lungi                                        │                                                                                                                       │
+  ├─────┼──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 7   │ Settings persistență completă                │ Verifică că toate setările (theme, volume, DJ triggers) rămân salvate după restart.                                   │
+  └─────┴──────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  ---
+  🟢 PRIORITATE 3 - Features Missing (Ce lipsește din planul original)
+
+  ┌─────┬────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │  #  │                Sarcina                 │                                         De ce este importantă                                          │
+  ├─────┼────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 8   │ HomeView "Recommended for You" section │ Pentru a fi un produs complet, home-ul trebuie să aibă o secțiune AI-driven cu sugestii personalizate. │
+  ├─────┼────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 9   │ "More Like This" button în Player      │ Lipsește butonul care folosește insights_more_like_this. Este un feature clasic în streaming apps.     │
+  ├─────┼────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 10  │ SearchView - Filter by metadata        │ Adaugă filtre pe side (genre, mood, decade) pentru rezultatele de căutare.                             │
+  └─────┴────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  ---
+  🔵 PRIORITATE 4 - Optimizări & Scalabilitate
+
+  ┌─────┬──────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │  #  │               Sarcina                │                                             De ce este importantă                                             │
+  ├─────┼──────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 11  │ Semantic Indexing - Batch processing │ Pentru biblioteci mari (>1000 tracks), indexing-ul trebuie să fie în background cu progres vizibil.           │
+  ├─────┼──────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 12  │ Ollama Response Caching              │ Evită apeluri重复 la Ollama pentru aceeași interogare (ex: search "workout" va returna mereu același result). │
+  ├─────┼──────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 13  │ Memory leak prevention               │ Verifică că ANN index nu crește necontrolat - implementează clear/cleanup pentru biblioteci mari.             │
+  └─────┴──────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  ---
+  📋 PLAN ACȚIONABLE - PRIMUA 3 ZILE
+
+  ┌────────┬──────────────────┬─────────────────────────────────────────────────────────────────┐
+  │   Zi   │     Obiectiv     │                           Deliverable                           │
+  ├────────┼──────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Ziua 1 │ Core & Build     │ yt-dlp testat, download funcțional, npm run tauri build reușit  │
+  ├────────┼──────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Ziua 2 │ UX Polish        │ Toast-uri funcționale, error handling curat, loading indicators │
+  ├────────┼──────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Ziua 3 │ Features Missing │ Recommended section + More Like This button                     │
+  └────────┴──────────────────┴─────────────────────────────────────────────────────────────────┘
