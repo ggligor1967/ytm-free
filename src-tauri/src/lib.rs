@@ -1871,6 +1871,13 @@ async fn get_semantic_status(
     })
 }
 
+/// Clear all semantic embeddings
+#[tauri::command]
+async fn semantic_clear_index(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().await;
+    db.clear_embeddings().map_err(|e| e.to_string())
+}
+
 /// Semantic search with metadata filtering (genres, moods, activities)
 #[tauri::command]
 async fn semantic_search_filtered(
@@ -3356,6 +3363,7 @@ pub fn run() {
             semantic_index_all,
             semantic_index_track,
             get_semantic_status,
+            semantic_clear_index,
             create_semantic_playlist,
         ])
         .run(tauri::generate_context!())

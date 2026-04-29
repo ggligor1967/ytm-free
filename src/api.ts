@@ -826,3 +826,7 @@ export async function semanticIndexTrack(
 export async function getSemanticStatus(): Promise<SemanticIndexStatus> {
   return invoke("get_semantic_status");
 }
+
+export async function semanticClearIndex(): Promise<void> {
+  return invoke("semantic_clear_index");
+}

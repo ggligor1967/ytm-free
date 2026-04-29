@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useAppStore } from "../store";
 import * as api from "../api";
 import { useTriggerEngine } from "../hooks/useTriggerEngine";
+import type { Track, SearchResult } from "../types";
 import {
   Play,
   Pause,
@@ -22,6 +23,10 @@ import {
   MonitorPlay,
 } from "lucide-react";
 import clsx from "clsx";
+
+export function getTrackId(track: Track | SearchResult): string {
+  return track.id;
+}
 
 export function Player() {
   const {
@@ -159,8 +164,8 @@ export function Player() {
         const { queue: q, queueIndex: qi } = useAppStore.getState();
         const nextTrack = q[qi + 1];
         if (nextTrack && currentTrack) {
-          const currentId = "video_id" in currentTrack ? currentTrack.id : (currentTrack as any).id;
-          const nextId = "video_id" in nextTrack ? nextTrack.id : (nextTrack as any).id;
+          const currentId = getTrackId(currentTrack);
+          const nextId = getTrackId(nextTrack);
           if (currentId && nextId && shouldDjSpeak()) {
             djPrefetchingRef.current = true;
             api
@@ -419,8 +424,8 @@ export function Player() {
         const nextTrack = q[qi + 1];
         if (nextTrack && currentTrack) {
           try {
-            const currentId = "video_id" in currentTrack ? currentTrack.id : (currentTrack as any).id;
-            const nextId = "video_id" in nextTrack ? nextTrack.id : (nextTrack as any).id;
+            const currentId = getTrackId(currentTrack);
+            const nextId = getTrackId(nextTrack);
             const result = await api.aiDjCommentary(
               currentTrack.title,
               currentTrack.artist,

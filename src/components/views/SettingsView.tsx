@@ -168,10 +168,14 @@ export function SettingsView() {
   const handleClearIndex = async () => {
     if (confirm("Clear all semantic embeddings? You can re-index anytime.")) {
       try {
-        // We don't have a clear endpoint, so we'll just show a message
-        showToast("Index clearing functionality to be implemented");
+        await api.semanticClearIndex();
+        setSemanticStatus(null);
+        setIndexProgress(0);
+        await loadSemanticStatus();
+        showToast("Semantic index cleared successfully!");
       } catch (error) {
         console.error("Failed to clear index:", error);
+        showToast("Failed to clear index: " + (error instanceof Error ? error.message : String(error)));
       }
     }
   };

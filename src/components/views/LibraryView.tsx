@@ -39,14 +39,16 @@ export function LibraryView() {
         // Load metadata for tracks (only if AI tagging enabled)
         if (settings?.auto_tagging_enabled) {
           const metadataMap = new Map<string, TrackMetadataDB>();
-          for (const track of tracks) {
-            try {
-              const meta = await api.ollamaGetTrackMetadata(track.id);
-              if (meta) {
-                metadataMap.set(track.id, meta);
+          const batchSize = 10;
+          for (let i = 0; i < tracks.length; i += batchSize) {
+            const batch = tracks.slice(i, i + batchSize);
+            const results = await Promise.allSettled(
+              batch.map(t => api.ollamaGetTrackMetadata(t.id).then(m => ({ id: t.id, meta: m })))
+            );
+            for (const result of results) {
+              if (result.status === 'fulfilled' && result.value.meta) {
+                metadataMap.set(result.value.id, result.value.meta);
               }
-            } catch (err) {
-              // Skip tracks without metadata
             }
           }
           setMetadata(metadataMap);
@@ -68,13 +70,19 @@ export function LibraryView() {
     const unlistenComplete = listen<{ analyzed: number; errors: number }>("ai-tagging-complete", async (_event) => {
       setTagging(false);
       setTagProgress(null);
-      // Reload metadata after tagging
+      // Reload metadata after tagging (batched)
       const metadataMap = new Map<string, TrackMetadataDB>();
-      for (const track of library) {
-        try {
-          const meta = await api.ollamaGetTrackMetadata(track.id);
-          if (meta) metadataMap.set(track.id, meta);
-        } catch {}
+      const batchSize = 10;
+      for (let i = 0; i < library.length; i += batchSize) {
+        const batch = library.slice(i, i + batchSize);
+        const results = await Promise.allSettled(
+          batch.map(t => api.ollamaGetTrackMetadata(t.id).then(m => ({ id: t.id, meta: m })))
+        );
+        for (const result of results) {
+          if (result.status === 'fulfilled' && result.value.meta) {
+            metadataMap.set(result.value.id, result.value.meta);
+          }
+        }
       }
       setMetadata(metadataMap);
     });
