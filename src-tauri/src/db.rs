@@ -11,7 +11,199 @@ pub enum DbError {
     NotFound(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Migration error: {0}")]
+    Migration(String),
 }
+
+/// A database migration: version, description, and SQL to apply.
+struct Migration {
+    version: u32,
+    description: &'static str,
+    sql: &'static str,
+}
+
+/// Run all pending migrations on a connection.
+/// Creates the `schema_migrations` tracking table if needed.
+pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
+    // Ensure the tracking table exists
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );"
+    ).map_err(|e| DbError::Migration(format!("Failed to create schema_migrations table: {}", e)))?;
+
+    let migrations: Vec<Migration> = vec![
+        Migration {
+            version: 0,
+            description: "initial schema",
+            sql: MIGRATION_0_SQL,
+        },
+        // Version 1: "add analize_audio table" — TO BE IMPLEMENTED
+        // This is where the analize_audio migration will go
+    ];
+
+    // Get the last applied version
+    let last_version: u32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| DbError::Migration(format!("Failed to read migration version: {}", e)))?;
+
+    for migration in &migrations {
+        if migration.version > last_version {
+            conn.execute_batch(migration.sql)
+                .map_err(|e| DbError::Migration(format!(
+                    "Migration {} ({}): {}", migration.version, migration.description, e
+                )))?;
+
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?1, ?2)",
+                params![migration.version, migration.description],
+            ).map_err(|e| DbError::Migration(format!(
+                "Failed to record migration {}: {}", migration.version, e
+            )))?;
+        }
+    }
+
+    Ok(())
+}
+
+const MIGRATION_0_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS tracks (
+    id TEXT PRIMARY KEY,
+    video_id TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    thumbnail TEXT,
+    duration INTEGER,
+    local_path TEXT,
+    is_downloaded INTEGER DEFAULT 0,
+    is_favorite INTEGER DEFAULT 0,
+    play_count INTEGER DEFAULT 0,
+    last_played TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS playlists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    thumbnail TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (playlist_id, track_id),
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    audio_quality TEXT DEFAULT 'best',
+    download_path TEXT,
+    auto_download INTEGER DEFAULT 0,
+    theme TEXT DEFAULT 'dark',
+    volume REAL DEFAULT 1.0,
+    crossfade INTEGER DEFAULT 0,
+    crossfade_duration INTEGER DEFAULT 3,
+    ollama_enabled INTEGER DEFAULT 0,
+    ollama_url TEXT DEFAULT 'http://localhost:11434',
+    ollama_model TEXT DEFAULT 'mistral:7b',
+    smart_search_enabled INTEGER DEFAULT 0,
+    auto_tagging_enabled INTEGER DEFAULT 0,
+    smart_queue_enabled INTEGER DEFAULT 0,
+    daily_mix_enabled INTEGER DEFAULT 0,
+    search_results_count INTEGER DEFAULT 25,
+    dj_mode_enabled INTEGER DEFAULT 0,
+    dj_style TEXT DEFAULT 'classic_fm',
+    dj_language TEXT DEFAULT 'English',
+    dj_frequency INTEGER DEFAULT 1,
+    dj_triggers_enabled TEXT DEFAULT '{"track_start":true,"track_end":true,"queue_empty":true,"long_session":true,"first_track_of_day":true,"milestone":true,"time_announcement":true,"mood_shift":true}',
+    semantic_search_enabled INTEGER DEFAULT 0,
+    embedding_model TEXT DEFAULT 'all-minilm',
+    tts_engine TEXT DEFAULT 'web_speech',
+    dj_voice TEXT DEFAULT '',
+    dj_pitch REAL DEFAULT 1.0,
+    dj_rate REAL DEFAULT 1.05
+);
+
+INSERT OR IGNORE INTO settings (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS track_metadata (
+    track_id TEXT PRIMARY KEY,
+    genre TEXT,
+    sub_genre TEXT,
+    mood TEXT,
+    energy_level INTEGER,
+    tempo TEXT,
+    danceability REAL,
+    vocal_type TEXT,
+    decade TEXT,
+    language TEXT,
+    activity_tags TEXT,
+    occasion_tags TEXT,
+    keywords TEXT,
+    ai_description TEXT,
+    analyzed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    model_used TEXT,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS play_history (
+    id TEXT PRIMARY KEY,
+    track_id TEXT NOT NULL,
+    played_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    duration_listened INTEGER,
+    context TEXT,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ai_cache (
+    id TEXT PRIMARY KEY,
+    prompt_hash TEXT UNIQUE NOT NULL,
+    response TEXT NOT NULL,
+    model TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ttl_seconds INTEGER DEFAULT 86400
+);
+
+CREATE TABLE IF NOT EXISTS track_embeddings (
+    track_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    text_used TEXT NOT NULL,
+    model_used TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracks_video_id ON tracks(video_id);
+CREATE INDEX IF NOT EXISTS idx_tracks_favorite ON tracks(is_favorite);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_genre ON track_metadata(genre);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_mood ON track_metadata(mood);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_energy ON track_metadata(energy_level);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_tempo ON track_metadata(tempo);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_decade ON track_metadata(decade);
+CREATE INDEX IF NOT EXISTS idx_track_metadata_model ON track_metadata(model_used);
+CREATE INDEX IF NOT EXISTS idx_track_embeddings_model ON track_embeddings(model_used);
+CREATE INDEX IF NOT EXISTS idx_track_embeddings_track_id ON track_embeddings(track_id);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
+CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_ai_cache_hash ON ai_cache(prompt_hash);
+"#;
 
 pub struct Database {
     conn: Connection,
@@ -28,7 +220,7 @@ impl Database {
 
         let conn = Connection::open(&db_path)?;
         let db = Self { conn };
-        db.init_tables()?;
+        run_migrations(&db.conn)?;
         Ok(db)
     }
 
@@ -36,7 +228,7 @@ impl Database {
     pub fn in_memory() -> Result<Self, DbError> {
         let conn = Connection::open_in_memory()?;
         let db = Self { conn };
-        db.init_tables()?;
+        run_migrations(&db.conn)?;
         Ok(db)
     }
 
@@ -45,207 +237,6 @@ impl Database {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("ytm-free");
         Ok(data_dir.join("ytm-free.db"))
-    }
-
-    fn init_tables(&self) -> Result<(), DbError> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS tracks (
-                id TEXT PRIMARY KEY,
-                video_id TEXT UNIQUE NOT NULL,
-                title TEXT NOT NULL,
-                artist TEXT NOT NULL,
-                thumbnail TEXT,
-                duration INTEGER,
-                local_path TEXT,
-                is_downloaded INTEGER DEFAULT 0,
-                is_favorite INTEGER DEFAULT 0,
-                play_count INTEGER DEFAULT 0,
-                last_played TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS playlists (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                thumbnail TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS playlist_tracks (
-                playlist_id TEXT NOT NULL,
-                track_id TEXT NOT NULL,
-                position INTEGER NOT NULL,
-                added_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (playlist_id, track_id),
-                FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
-                FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                audio_quality TEXT DEFAULT 'best',
-                download_path TEXT,
-                auto_download INTEGER DEFAULT 0,
-                theme TEXT DEFAULT 'dark',
-                volume REAL DEFAULT 1.0,
-                crossfade INTEGER DEFAULT 0,
-                crossfade_duration INTEGER DEFAULT 3
-            );
-
-            -- Initialize settings if not exists
-            INSERT OR IGNORE INTO settings (id) VALUES (1);
-
-            CREATE INDEX IF NOT EXISTS idx_tracks_video_id ON tracks(video_id);
-            CREATE INDEX IF NOT EXISTS idx_tracks_favorite ON tracks(is_favorite);
-            CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id);
-            
-            -- Smart AI Tables
-            CREATE TABLE IF NOT EXISTS track_metadata (
-                track_id TEXT PRIMARY KEY,
-                genre TEXT,
-                sub_genre TEXT,
-                mood TEXT,
-                energy_level INTEGER,
-                tempo TEXT,
-                danceability REAL,
-                vocal_type TEXT,
-                decade TEXT,
-                language TEXT,
-                activity_tags TEXT,
-                occasion_tags TEXT,
-                keywords TEXT,
-                ai_description TEXT,
-                analyzed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                model_used TEXT,
-                FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS play_history (
-                id TEXT PRIMARY KEY,
-                track_id TEXT NOT NULL,
-                played_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                duration_listened INTEGER,
-                context TEXT,
-                FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS ai_cache (
-                id TEXT PRIMARY KEY,
-                prompt_hash TEXT UNIQUE NOT NULL,
-                response TEXT NOT NULL,
-                model TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                ttl_seconds INTEGER DEFAULT 86400
-            );
-
-            CREATE TABLE IF NOT EXISTS track_embeddings (
-                track_id TEXT PRIMARY KEY,
-                embedding BLOB NOT NULL,
-                text_used TEXT NOT NULL,
-                model_used TEXT NOT NULL,
-                dimensions INTEGER NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_genre ON track_metadata(genre);
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_mood ON track_metadata(mood);
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_energy ON track_metadata(energy_level);
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_tempo ON track_metadata(tempo);
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_decade ON track_metadata(decade);
-            CREATE INDEX IF NOT EXISTS idx_track_metadata_model ON track_metadata(model_used);
-            CREATE INDEX IF NOT EXISTS idx_track_embeddings_model ON track_embeddings(model_used);
-            CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
-            CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
-            CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
-            CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(played_at);
-            CREATE INDEX IF NOT EXISTS idx_ai_cache_hash ON ai_cache(prompt_hash);
-            CREATE INDEX IF NOT EXISTS idx_track_embeddings_track_id ON track_embeddings(track_id);
-            "#,
-        )?;
-
-        // Add Ollama columns to settings (migration for existing databases)
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN ollama_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN ollama_url TEXT DEFAULT 'http://localhost:11434'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN ollama_model TEXT DEFAULT 'mistral:7b'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN smart_search_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN auto_tagging_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN smart_queue_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN daily_mix_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN search_results_count INTEGER DEFAULT 25",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_mode_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_style TEXT DEFAULT 'classic_fm'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_language TEXT DEFAULT 'English'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_frequency INTEGER DEFAULT 1",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_triggers_enabled TEXT DEFAULT '{\"track_start\":true,\"track_end\":true,\"queue_empty\":true,\"long_session\":true,\"first_track_of_day\":true,\"milestone\":true,\"time_announcement\":true,\"mood_shift\":true}'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN semantic_search_enabled INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN embedding_model TEXT DEFAULT 'all-minilm'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN tts_engine TEXT DEFAULT 'web_speech'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_voice TEXT DEFAULT ''",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_pitch REAL DEFAULT 1.0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE settings ADD COLUMN dj_rate REAL DEFAULT 1.05",
-            [],
-        );
-
-        Ok(())
     }
 
     // ========================================================================
@@ -1465,5 +1456,58 @@ mod tests {
             .expect("Failed to delete playlist");
         let deleted = db.get_playlist(&pl.id);
         assert!(matches!(deleted, Err(DbError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_run_migrations_creates_schema_migrations_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let version: u32 = conn
+            .query_row("SELECT version FROM schema_migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+
+        let description: String = conn
+            .query_row("SELECT description FROM schema_migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(description, "initial schema");
+    }
+
+    #[test]
+    fn test_run_migrations_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap(); // second call should not fail
+
+        let count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_run_migrations_creates_all_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let tables: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap()
+                .filter_map(|r| r.ok())
+                .filter(|n| n != "schema_migrations") // exclude the tracking table
+                .collect()
+        };
+
+        assert!(tables.contains(&"tracks".to_string()), "tracks table missing");
+        assert!(tables.contains(&"playlists".to_string()), "playlists table missing");
+        assert!(tables.contains(&"playlist_tracks".to_string()), "playlist_tracks table missing");
+        assert!(tables.contains(&"settings".to_string()), "settings table missing");
+        assert!(tables.contains(&"track_metadata".to_string()), "track_metadata table missing");
+        assert!(tables.contains(&"play_history".to_string()), "play_history table missing");
+        assert!(tables.contains(&"ai_cache".to_string()), "ai_cache table missing");
+        assert!(tables.contains(&"track_embeddings".to_string()), "track_embeddings table missing");
     }
 }

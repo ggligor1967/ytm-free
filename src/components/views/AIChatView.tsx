@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
+import { useOllamaCall } from "../../hooks/useOllamaCall";
 import type { ChatMessage, QuizQuestion } from "../../types";
 import {
   Loader2,
@@ -35,12 +36,16 @@ export function AIChatView() {
   const [quizLoading, setQuizLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const chatCall = useOllamaCall<string>();
+  const triviaCall = useOllamaCall<import("../../types").TriviaResponse>();
+  const quizCall = useOllamaCall<QuizQuestion[]>();
+
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  const sendMessage = async () => {
+  const sendMessage = useCallback(async () => {
     if (!input.trim() || chatLoading) return;
     const userMsg: ChatMessage = {
       role: "user",
@@ -51,27 +56,28 @@ export function AIChatView() {
     setInput("");
     setChatLoading(true);
 
-    try {
-      const response = await api.aiChatSend(userMsg.content, chatMessages);
-      const assistantMsg: ChatMessage = {
-        role: "assistant",
-        content: response,
-        timestamp: new Date().toISOString(),
-      };
-      addChatMessage(assistantMsg);
-    } catch (err) {
-      const errorMsg: ChatMessage = {
-        role: "assistant",
-        content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: new Date().toISOString(),
-      };
-      addChatMessage(errorMsg);
-    } finally {
-      setChatLoading(false);
-    }
-  };
+    chatCall.execute(
+      () => api.aiChatSend(userMsg.content, chatMessages),
+      (response) => {
+        addChatMessage({
+          role: "assistant",
+          content: response,
+          timestamp: new Date().toISOString(),
+        });
+        setChatLoading(false);
+      },
+      (error) => {
+        addChatMessage({
+          role: "assistant",
+          content: `Error: ${error}`,
+          timestamp: new Date().toISOString(),
+        });
+        setChatLoading(false);
+      }
+    );
+  }, [input, chatLoading, chatMessages, addChatMessage, setChatLoading, chatCall]);
 
-  const loadTrivia = async () => {
+  const loadTrivia = useCallback(async () => {
     if (!currentTrack) return;
     setChatLoading(true);
     const title = currentTrack.title;
@@ -82,38 +88,41 @@ export function AIChatView() {
       timestamp: new Date().toISOString(),
     });
 
-    try {
-      const trivia = await api.aiChatTrivia(title, artist);
-      const triviaText = [
-        `🎵 **${title}** by **${artist}**`,
-        "",
-        trivia.album ? `📀 Album: ${trivia.album}` : "",
-        trivia.year_released ? `📅 Year: ${trivia.year_released}` : "",
-        "",
-        ...(trivia.facts || []).map((f: string) => `• ${f}`),
-        "",
-        trivia.fun_fact ? `🎉 Fun fact: ${trivia.fun_fact}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
+    triviaCall.execute(
+      () => api.aiChatTrivia(title, artist),
+      (trivia) => {
+        const triviaText = [
+          `🎵 **${title}** by **${artist}**`,
+          "",
+          trivia.album ? `📀 Album: ${trivia.album}` : "",
+          trivia.year_released ? `📅 Year: ${trivia.year_released}` : "",
+          "",
+          ...(trivia.facts || []).map((f: string) => `• ${f}`),
+          "",
+          trivia.fun_fact ? `🎉 Fun fact: ${trivia.fun_fact}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
 
-      addChatMessage({
-        role: "assistant",
-        content: triviaText,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err) {
-      addChatMessage({
-        role: "assistant",
-        content: `Could not get trivia: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: new Date().toISOString(),
-      });
-    } finally {
-      setChatLoading(false);
-    }
-  };
+        addChatMessage({
+          role: "assistant",
+          content: triviaText,
+          timestamp: new Date().toISOString(),
+        });
+        setChatLoading(false);
+      },
+      (error) => {
+        addChatMessage({
+          role: "assistant",
+          content: `Could not get trivia: ${error}`,
+          timestamp: new Date().toISOString(),
+        });
+        setChatLoading(false);
+      }
+    );
+  }, [currentTrack, addChatMessage, setChatLoading, triviaCall]);
 
-  const startQuiz = async () => {
+  const startQuiz = useCallback(async () => {
     setMode("quiz");
     setQuizLoading(true);
     setQuizQuestions([]);
@@ -121,20 +130,23 @@ export function AIChatView() {
     setQuizAnswer(null);
     setQuizScore(0);
 
-    try {
-      const questions = await api.aiChatQuiz();
-      setQuizQuestions(questions);
-    } catch (err) {
-      addChatMessage({
-        role: "assistant",
-        content: `Quiz error: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: new Date().toISOString(),
-      });
-      setMode("chat");
-    } finally {
-      setQuizLoading(false);
-    }
-  };
+    quizCall.execute(
+      () => api.aiChatQuiz(),
+      (questions) => {
+        setQuizQuestions(questions);
+        setQuizLoading(false);
+      },
+      (error) => {
+        addChatMessage({
+          role: "assistant",
+          content: `Quiz error: ${error}`,
+          timestamp: new Date().toISOString(),
+        });
+        setMode("chat");
+        setQuizLoading(false);
+      }
+    );
+  }, [addChatMessage, quizCall]);
 
   const answerQuiz = (optionIndex: number) => {
     if (quizAnswer !== null) return; // already answered
