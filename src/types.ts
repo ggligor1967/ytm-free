@@ -169,7 +169,7 @@ export interface SmartPlaylistTrackMatch {
   score: number;
 }
 
-export type SmartMethod = 'description' | 'mood' | 'activity' | 'seed' | 'preset' | 'library';
+export type SmartMethod = 'description' | 'mood' | 'activity' | 'seed' | 'preset' | 'library' | 'mood-ai' | 'duration' | 'mood-journey' | 'discovery' | 'merge';
 
 // Smart Queue Types (FAZA 4 - I1-I6)
 export interface CrossfadeSuggestion {

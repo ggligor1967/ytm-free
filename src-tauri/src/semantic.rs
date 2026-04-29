@@ -277,3 +277,219 @@ pub fn parse_json_array(json_str: &str) -> Vec<String> {
     }
     serde_json::from_str::<Vec<String>>(json_str).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SemanticSearchFilter;
+
+    fn make_embedding(values: &[f32]) -> Vec<f32> {
+        values.to_vec()
+    }
+
+    #[test]
+    fn test_cosine_similarity() {
+        // Identical vectors
+        let a = make_embedding(&[1.0, 0.0, 0.0]);
+        let b = make_embedding(&[1.0, 0.0, 0.0]);
+        assert!((ANNIndex::cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+
+        // Orthogonal vectors
+        let c = make_embedding(&[0.0, 1.0, 0.0]);
+        assert!((ANNIndex::cosine_similarity(&a, &c) - 0.0).abs() < 1e-6);
+
+        // Opposite vectors
+        let d = make_embedding(&[-1.0, 0.0, 0.0]);
+        assert!((ANNIndex::cosine_similarity(&a, &d) + 1.0).abs() < 1e-6);
+
+        // Empty vectors
+        let empty1: Vec<f32> = vec![];
+        let empty2: Vec<f32> = vec![];
+        assert!((ANNIndex::cosine_similarity(&empty1, &empty2) - 0.0).abs() < 1e-6);
+
+        // Different lengths
+        let short = make_embedding(&[1.0, 0.0]);
+        let long = make_embedding(&[1.0, 0.0, 0.0]);
+        assert!((ANNIndex::cosine_similarity(&short, &long) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_knn_search() {
+        let mut index = ANNIndex::new();
+
+        index.add(
+            "q1".to_string(),
+            make_embedding(&[1.0, 0.0]),
+            EmbeddingMetadata {
+                track_id: "q1".to_string(),
+                genres: vec!["rock".to_string()],
+                moods: vec!["happy".to_string()],
+                activities: vec![],
+                energy_level: None,
+            },
+        );
+        index.add(
+            "q2".to_string(),
+            make_embedding(&[0.0, 1.0]),
+            EmbeddingMetadata {
+                track_id: "q2".to_string(),
+                genres: vec!["pop".to_string()],
+                moods: vec!["sad".to_string()],
+                activities: vec![],
+                energy_level: None,
+            },
+        );
+        index.add(
+            "q3".to_string(),
+            make_embedding(&[0.707, 0.707]),
+            EmbeddingMetadata {
+                track_id: "q3".to_string(),
+                genres: vec!["jazz".to_string()],
+                moods: vec!["chill".to_string()],
+                activities: vec![],
+                energy_level: None,
+            },
+        );
+
+        // Query close to q1
+        let query = make_embedding(&[0.95, 0.05]);
+        let results = index.search(&query, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "q1", "Nearest neighbor should be q1");
+
+        // Query exactly q2
+        let query_q2 = make_embedding(&[0.0, 1.0]);
+        let results = index.search(&query_q2, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "q2");
+
+        // k larger than available
+        let results = index.search(&query, 10);
+        assert_eq!(results.len(), 3);
+
+        // Search empty index
+        let empty = ANNIndex::new();
+        let results = empty.search(&query, 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filtered_search() {
+        let mut index = ANNIndex::new();
+
+        index.add(
+            "rock1".to_string(),
+            make_embedding(&[1.0, 0.0]),
+            EmbeddingMetadata {
+                track_id: "rock1".to_string(),
+                genres: vec!["rock".to_string()],
+                moods: vec!["energetic".to_string()],
+                activities: vec!["workout".to_string()],
+                energy_level: Some(8),
+            },
+        );
+        index.add(
+            "rock2".to_string(),
+            make_embedding(&[0.9, 0.1]),
+            EmbeddingMetadata {
+                track_id: "rock2".to_string(),
+                genres: vec!["rock".to_string()],
+                moods: vec!["happy".to_string()],
+                activities: vec!["driving".to_string()],
+                energy_level: Some(7),
+            },
+        );
+        index.add(
+            "jazz1".to_string(),
+            make_embedding(&[0.0, 1.0]),
+            EmbeddingMetadata {
+                track_id: "jazz1".to_string(),
+                genres: vec!["jazz".to_string()],
+                moods: vec!["chill".to_string()],
+                activities: vec!["study".to_string()],
+                energy_level: Some(3),
+            },
+        );
+
+        let query = make_embedding(&[1.0, 0.0]);
+
+        // Filter by genre = rock
+        let filter = SemanticSearchFilter {
+            genres: Some(vec!["rock".to_string()]),
+            moods: None,
+            activities: None,
+            min_similarity: None,
+        };
+        let results = index.search_filtered(&query, 10, &filter);
+        assert_eq!(results.len(), 2, "Should return 2 rock tracks");
+        assert!(results.iter().all(|(id, _)| id.starts_with("rock")));
+
+        // Filter by mood = chill (only jazz)
+        let filter = SemanticSearchFilter {
+            genres: None,
+            moods: Some(vec!["chill".to_string()]),
+            activities: None,
+            min_similarity: None,
+        };
+        let results = index.search_filtered(&query, 10, &filter);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "jazz1");
+
+        // Filter with no matches
+        let filter = SemanticSearchFilter {
+            genres: Some(vec!["classical".to_string()]),
+            moods: None,
+            activities: None,
+            min_similarity: None,
+        };
+        let results = index.search_filtered(&query, 10, &filter);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let mut index = ANNIndex::with_lru_eviction(2);
+
+        let meta = || EmbeddingMetadata {
+            track_id: String::new(),
+            genres: vec![],
+            moods: vec![],
+            activities: vec![],
+            energy_level: None,
+        };
+
+        index.add("a".to_string(), make_embedding(&[1.0, 0.0]), meta());
+        index.add("b".to_string(), make_embedding(&[0.0, 1.0]), meta());
+        index.add("c".to_string(), make_embedding(&[0.707, 0.707]), meta());
+
+        assert!(index.len() <= 2, "LRU should evict to stay at max 2");
+        assert!(index.is_lru_enabled());
+        assert_eq!(index.max_embeddings(), 2);
+        assert!(!index.embeddings.contains_key("a"), "Oldest entry 'a' should be evicted");
+    }
+
+    #[test]
+    fn test_clear_and_empty() {
+        let mut index = ANNIndex::new();
+        assert!(index.is_empty());
+        assert_eq!(index.len(), 0);
+
+        let meta = || EmbeddingMetadata {
+            track_id: String::new(),
+            genres: vec![],
+            moods: vec![],
+            activities: vec![],
+            energy_level: None,
+        };
+
+        index.add("x".to_string(), make_embedding(&[1.0, 0.0]), meta());
+        index.add("y".to_string(), make_embedding(&[0.0, 1.0]), meta());
+        assert!(!index.is_empty());
+        assert_eq!(index.len(), 2);
+
+        index.clear();
+        assert!(index.is_empty());
+        assert_eq!(index.len(), 0);
+        assert!((index.estimate_memory_mb() - 0.0).abs() < 1e-6);
+    }
+}

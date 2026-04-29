@@ -25,6 +25,7 @@ import {
   ListMusic,
 } from "lucide-react";
 import clsx from "clsx";
+import { showToast } from "../Toast";
 
 // ============================================================================
 // PRESETS
@@ -52,7 +53,7 @@ const ACTIVITIES = [
 type WizardStep = "method" | "configure" | "preview";
 
 export function SmartPlaylistView() {
-  const { library, setView, setPlaylists, setSelectedPlaylistId, settings, ollamaAvailable } = useAppStore();
+  const { library, setView, setPlaylists, setSelectedPlaylistId, settings, ollamaAvailable, playlists } = useAppStore();
 
   // Wizard state
   const [step, setStep] = useState<WizardStep>("method");
@@ -85,6 +86,54 @@ export function SmartPlaylistView() {
 
   // Error
   const [error, setError] = useState<string | null>(null);
+
+  // ========================================================================
+  // FAZA 3 — Smart Tool state
+  // ========================================================================
+
+  // C2: By Mood AI
+  const [moodAi, setMoodAi] = useState("");
+  const [moodAiResult, setMoodAiResult] = useState<any>(null);
+  const [moodAiLoading, setMoodAiLoading] = useState(false);
+
+  // C3: By Duration
+  const [durationMin, setDurationMin] = useState(60);
+  const [durationTheme, setDurationTheme] = useState("Workout");
+  const [durationResult, setDurationResult] = useState<any>(null);
+  const [durationLoading, setDurationLoading] = useState(false);
+
+  // C4: Mood Journey
+  const [journeyStart, setJourneyStart] = useState("energetic");
+  const [journeyEnd, setJourneyEnd] = useState("calm");
+  const [journeyResult, setJourneyResult] = useState<any>(null);
+  const [journeyLoading, setJourneyLoading] = useState(false);
+
+  // C7: Discovery
+  const [discoveryResult, setDiscoveryResult] = useState<any>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+
+  // C8: AI Name
+  const [namingLoading, setNamingLoading] = useState(false);
+
+  // C9: Cover Idea
+  const [coverResult, setCoverResult] = useState<any>(null);
+  const [coverLoading, setCoverLoading] = useState(false);
+
+  // C10: Reorder
+  const [reorderLoading, setReorderLoading] = useState(false);
+
+  // C11: Merge
+  const [mergePlaylistA, setMergePlaylistA] = useState("");
+  const [mergePlaylistB, setMergePlaylistB] = useState("");
+  const [mergeResult, setMergeResult] = useState<any>(null);
+  const [mergeLoading, setMergeLoading] = useState(false);
+
+  // C12: Split
+  const [splitResult, setSplitResult] = useState<any>(null);
+  const [splitLoading, setSplitLoading] = useState(false);
+
+  // Tracks for the action buttons (C8-C10, C12) — the currently displayed track objects
+  const [displayTracks, setDisplayTracks] = useState<import("../../types").Track[]>([]);
 
   // ========================================================================
   // HANDLERS
@@ -170,6 +219,7 @@ export function SmartPlaylistView() {
       );
 
       setLibraryMatches(matches);
+      setDisplayTracks(matches.map(m => m.track));
 
       // Auto-select all matches with score > 0.5
       const autoSelected = new Set<string>(
@@ -301,6 +351,157 @@ export function SmartPlaylistView() {
   }, [step]);
 
   // ========================================================================
+  // HANDLERS — FAZA 3 Smart Tools
+  // ========================================================================
+
+  /** C2: Generate mood-based playlist */
+  const handleMoodAiGenerate = useCallback(async () => {
+    if (!moodAi) { setError("Please select a mood"); return; }
+    setMoodAiLoading(true);
+    setError(null);
+    try {
+      const result = await api.smartPlaylistByMood(moodAi);
+      setMoodAiResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMoodAiLoading(false);
+    }
+  }, [moodAi]);
+
+  /** C3: Generate duration-based playlist */
+  const handleDurationGenerate = useCallback(async () => {
+    setDurationLoading(true);
+    setError(null);
+    try {
+      const result = await api.smartPlaylistByDuration(durationMin, durationTheme.toLowerCase());
+      setDurationResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDurationLoading(false);
+    }
+  }, [durationMin, durationTheme]);
+
+  /** C4: Generate mood journey */
+  const handleJourneyGenerate = useCallback(async () => {
+    setJourneyLoading(true);
+    setError(null);
+    try {
+      const result = await api.smartPlaylistMoodJourney(journeyStart, journeyEnd);
+      setJourneyResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setJourneyLoading(false);
+    }
+  }, [journeyStart, journeyEnd]);
+
+  /** C7: Discovery mix */
+  const handleDiscoveryGenerate = useCallback(async () => {
+    setDiscoveryLoading(true);
+    setError(null);
+    try {
+      const result = await api.smartPlaylistDiscovery();
+      setDiscoveryResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDiscoveryLoading(false);
+    }
+  }, []);
+
+  /** C8: AI Name the current playlist */
+  const handleAiName = useCallback(async () => {
+    if (selectedTrackIds.size === 0) return;
+    setNamingLoading(true);
+    try {
+      const result = await api.smartPlaylistName(Array.from(selectedTrackIds));
+      const name = result?.best || result?.names?.[0] || result?.name || "";
+      if (name) { setPlaylistName(name); }
+      showToast(`AI named it: "${name}"`, "success");
+    } catch (err) {
+      showToast(`AI naming failed: ${err}`, "error");
+    } finally {
+      setNamingLoading(false);
+    }
+  }, [selectedTrackIds]);
+
+  /** C9: Get cover idea */
+  const handleCoverIdea = useCallback(async () => {
+    if (selectedTrackIds.size === 0) return;
+    setCoverLoading(true);
+    try {
+      const result = await api.smartPlaylistCoverIdea(Array.from(selectedTrackIds));
+      setCoverResult(result);
+    } catch (err) {
+      showToast(`Cover idea failed: ${err}`, "error");
+    } finally {
+      setCoverLoading(false);
+    }
+  }, [selectedTrackIds]);
+
+  /** C10: Smart reorder */
+  const handleReorder = useCallback(async () => {
+    if (selectedTrackIds.size === 0) return;
+    setReorderLoading(true);
+    try {
+      const result = await api.smartPlaylistReorder(Array.from(selectedTrackIds));
+      // Reorder the displayed tracks according to AI response
+      const reorderedIds: string[] = result?.track_ids || [];
+      if (reorderedIds.length > 0) {
+        const reordered = reorderedIds
+          .map(id => displayTracks.find(t => t.id === id))
+          .filter(Boolean) as import("../../types").Track[];
+        if (reordered.length > 0) {
+          setDisplayTracks(reordered);
+        }
+      }
+      showToast("Playlist reordered for better flow", "success");
+    } catch (err) {
+      showToast(`Reorder failed: ${err}`, "error");
+    } finally {
+      setReorderLoading(false);
+    }
+  }, [selectedTrackIds, displayTracks]);
+
+  /** C11: Merge two playlists */
+  const handleMerge = useCallback(async () => {
+    if (!mergePlaylistA || !mergePlaylistB) {
+      setError("Please select both playlists");
+      return;
+    }
+    setMergeLoading(true);
+    setError(null);
+    try {
+      const result = await api.smartPlaylistMerge(
+        [mergePlaylistA],
+        [mergePlaylistB],
+      );
+      setMergeResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMergeLoading(false);
+    }
+  }, [mergePlaylistA, mergePlaylistB]);
+
+  /** C12: Split playlist */
+  const handleSplit = useCallback(async () => {
+    if (selectedTrackIds.size <= 5) return;
+    setSplitLoading(true);
+    try {
+      const result = await api.smartPlaylistSplit(Array.from(selectedTrackIds));
+      setSplitResult(result);
+      showToast("Playlist split into sub-playlists", "success");
+    } catch (err) {
+      showToast(`Split failed: ${err}`, "error");
+    } finally {
+      setSplitLoading(false);
+    }
+  }, [selectedTrackIds]);
+
+  // ========================================================================
   // AI not available
   // ========================================================================
   if (!settings?.ollama_enabled || !ollamaAvailable) {
@@ -425,6 +626,48 @@ export function SmartPlaylistView() {
                 description="Filter your tracks"
                 color="text-blue-400"
                 onClick={() => handleMethodSelect("library")}
+              />
+            </div>
+          </div>
+
+          {/* Smart Tools — FAZA 3 */}
+          <div>
+            <h2 className="text-lg font-semibold mb-3">Smart Tools</h2>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <MethodCard
+                icon={Heart}
+                label="By Mood (AI)"
+                description="AI mood-based playlist"
+                color="text-pink-400"
+                onClick={() => handleMethodSelect("mood-ai")}
+              />
+              <MethodCard
+                icon={Clock}
+                label="By Duration"
+                description="Time-based playlist"
+                color="text-orange-400"
+                onClick={() => handleMethodSelect("duration")}
+              />
+              <MethodCard
+                icon={ArrowRight}
+                label="Mood Journey"
+                description="Mood transition playlist"
+                color="text-indigo-400"
+                onClick={() => handleMethodSelect("mood-journey")}
+              />
+              <MethodCard
+                icon={Sparkles}
+                label="Discovery Mix"
+                description="Discover hidden gems"
+                color="text-teal-400"
+                onClick={() => handleMethodSelect("discovery")}
+              />
+              <MethodCard
+                icon={Disc3}
+                label="Merge Playlists"
+                description="Combine two playlists"
+                color="text-rose-400"
+                onClick={() => handleMethodSelect("merge")}
               />
             </div>
           </div>
@@ -597,6 +840,172 @@ export function SmartPlaylistView() {
               </div>
             )}
 
+            {/* C2: By Mood AI */}
+            {method === "mood-ai" && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Select a mood for the AI playlist</label>
+                <div className="flex flex-wrap gap-2">
+                  {["Energetic", "Calm", "Melancholic", "Happy", "Dark", "Romantic", "Aggressive", "Dreamy"].map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setMoodAi(m.toLowerCase())}
+                      className={clsx(
+                        "px-4 py-2 rounded-full text-sm font-medium transition-colors",
+                        moodAi === m.toLowerCase()
+                          ? "bg-ytm-accent text-white"
+                          : "bg-ytm-bg border border-ytm-border hover:border-ytm-accent"
+                      )}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                {moodAiResult && (
+                  <div className="mt-4 p-3 bg-ytm-bg rounded-lg">
+                    <p className="font-medium">{moodAiResult.name || "Mood Playlist"}</p>
+                    <p className="text-sm text-ytm-text-secondary">{moodAiResult.description || ""}</p>
+                    {moodAiResult.track_ids?.length > 0 && (
+                      <p className="text-xs text-ytm-text-secondary mt-1">{moodAiResult.track_ids.length} tracks</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* C3: By Duration */}
+            {method === "duration" && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Target Duration</label>
+                <div className="flex items-center gap-3 mb-4">
+                  <input
+                    type="range"
+                    min={15}
+                    max={120}
+                    step={5}
+                    value={durationMin}
+                    onChange={(e) => setDurationMin(Number(e.target.value))}
+                    className="flex-1 accent-ytm-accent"
+                  />
+                  <span className="text-sm font-medium w-16 text-center">{durationMin} min</span>
+                </div>
+                <label className="block text-sm font-medium mb-2">Theme</label>
+                <div className="flex flex-wrap gap-2">
+                  {["Workout", "Study", "Road Trip", "Party", "Chill"].map(t => (
+                    <button
+                      key={t}
+                      onClick={() => setDurationTheme(t)}
+                      className={clsx(
+                        "px-4 py-2 rounded-full text-sm font-medium transition-colors",
+                        durationTheme === t
+                          ? "bg-ytm-accent text-white"
+                          : "bg-ytm-bg border border-ytm-border hover:border-ytm-accent"
+                      )}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+                {durationResult && (
+                  <div className="mt-4 p-3 bg-ytm-bg rounded-lg">
+                    <p className="font-medium">{durationResult.name || "Duration Playlist"}</p>
+                    <p className="text-sm text-ytm-text-secondary">{durationResult.description || ""}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* C4: Mood Journey */}
+            {method === "mood-journey" && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Start Mood</label>
+                <select
+                  value={journeyStart}
+                  onChange={(e) => setJourneyStart(e.target.value)}
+                  className="w-full px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent text-sm mb-4"
+                >
+                  {["energetic", "peaceful", "melancholic", "aggressive", "romantic", "dark", "happy", "mysterious", "nostalgic", "uplifting"].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <label className="block text-sm font-medium mb-2">End Mood</label>
+                <select
+                  value={journeyEnd}
+                  onChange={(e) => setJourneyEnd(e.target.value)}
+                  className="w-full px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent text-sm"
+                >
+                  {["calm", "energetic", "melancholic", "aggressive", "romantic", "dark", "happy", "mysterious", "nostalgic", "uplifting"].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <div className="flex items-center gap-2 mt-3 text-sm text-ytm-text-secondary">
+                  <span className="font-medium text-white">{journeyStart}</span>
+                  <span>→</span>
+                  <span className="font-medium text-white">{journeyEnd}</span>
+                </div>
+                {journeyResult && (
+                  <div className="mt-4 p-3 bg-ytm-bg rounded-lg">
+                    <p className="font-medium">{journeyResult.name || "Mood Journey"}</p>
+                    <p className="text-sm text-ytm-text-secondary">{journeyResult.description || ""}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* C7: Discovery — no config needed */}
+            {method === "discovery" && (
+              <div className="text-center py-6">
+                <Sparkles className="w-12 h-12 text-teal-400 mx-auto mb-3" />
+                <p className="text-ytm-text-secondary text-sm mb-2">
+                  Discover hidden gems from your library based on your listening preferences.
+                  AI will suggest tracks and artists you haven't explored yet.
+                </p>
+                {discoveryResult && discoveryResult.search_queries && (
+                  <div className="mt-4 text-left">
+                    <p className="text-sm font-medium mb-2">Suggested searches:</p>
+                    <div className="space-y-1">
+                      {discoveryResult.search_queries.map((q: string, i: number) => (
+                        <p key={i} className="text-xs text-ytm-accent">🔍 {q}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* C11: Merge Playlists */}
+            {method === "merge" && (
+              <div>
+                <label className="block text-sm font-medium mb-2">First Playlist</label>
+                <select
+                  value={mergePlaylistA}
+                  onChange={(e) => setMergePlaylistA(e.target.value)}
+                  className="w-full px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent text-sm mb-4"
+                >
+                  <option value="">Select a playlist...</option>
+                  {(playlists || []).map((p: import("../../types").Playlist) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.track_count} tracks)</option>
+                  ))}
+                </select>
+                <label className="block text-sm font-medium mb-2">Second Playlist</label>
+                <select
+                  value={mergePlaylistB}
+                  onChange={(e) => setMergePlaylistB(e.target.value)}
+                  className="w-full px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent text-sm"
+                >
+                  <option value="">Select a playlist...</option>
+                  {(playlists || []).map((p: import("../../types").Playlist) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.track_count} tracks)</option>
+                  ))}
+                </select>
+                {mergeResult && (
+                  <div className="mt-4 p-3 bg-ytm-bg rounded-lg">
+                    <p className="font-medium">{mergeResult.name || "Merged Playlist"}</p>
+                    <p className="text-sm text-ytm-text-secondary">{mergeResult.description || ""}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Duration target (for all methods) */}
             {method !== "seed" && (
               <div>
@@ -634,31 +1043,98 @@ export function SmartPlaylistView() {
             )}
           </div>
 
-          {/* Generate Button */}
-          <div className="flex justify-end">
-            <button
-              onClick={handleGenerate}
-              disabled={generating || (
-                method === "mood" ? !selectedMood :
-                method === "activity" ? !selectedActivity :
-                method === "seed" ? !seedTrack :
-                !description.trim()
-              )}
-              className="flex items-center gap-2 px-6 py-3 bg-ytm-accent text-white rounded-xl font-medium hover:bg-ytm-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {generating ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  AI is generating...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-5 h-5" />
-                  Generate Playlist
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </button>
+          {/* Generate / Action Buttons */}
+          <div className="space-y-3">
+            {/* Smart Tool inline actions */}
+            {method === "mood-ai" && (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleMoodAiGenerate}
+                  disabled={moodAiLoading || !moodAi}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-pink-600 text-white rounded-xl font-medium hover:bg-pink-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {moodAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Heart className="w-4 h-4" />}
+                  Generate Mood Playlist
+                </button>
+                {moodAiResult && (
+                  <button
+                    onClick={() => { setStep("preview"); setPlan({ name: moodAiResult.name || "Mood Playlist", description: moodAiResult.description || "", genres: [], moods: [moodAi], energy_min: 3, energy_max: 8, decades: [], tempo: null, activities: [], search_queries: [] }); setLibraryMatches([]); setPlaylistName(moodAiResult.name || "Mood Playlist"); setPlaylistDesc(moodAiResult.description || ""); }}
+                    className="text-sm text-ytm-accent hover:underline"
+                  >
+                    Preview & Save →
+                  </button>
+                )}
+              </div>
+            )}
+            {method === "duration" && (
+              <button
+                onClick={handleDurationGenerate}
+                disabled={durationLoading}
+                className="flex items-center gap-2 px-5 py-2.5 bg-orange-600 text-white rounded-xl font-medium hover:bg-orange-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {durationLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
+                Generate Duration Playlist
+              </button>
+            )}
+            {method === "mood-journey" && (
+              <button
+                onClick={handleJourneyGenerate}
+                disabled={journeyLoading}
+                className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {journeyLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+                Create Journey
+              </button>
+            )}
+            {method === "discovery" && (
+              <button
+                onClick={handleDiscoveryGenerate}
+                disabled={discoveryLoading}
+                className="flex items-center gap-2 px-5 py-2.5 bg-teal-600 text-white rounded-xl font-medium hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {discoveryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                Generate Discovery Mix
+              </button>
+            )}
+            {method === "merge" && (
+              <button
+                onClick={handleMerge}
+                disabled={mergeLoading || !mergePlaylistA || !mergePlaylistB}
+                className="flex items-center gap-2 px-5 py-2.5 bg-rose-600 text-white rounded-xl font-medium hover:bg-rose-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {mergeLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Disc3 className="w-4 h-4" />}
+                Merge Playlists
+              </button>
+            )}
+
+            {/* Legacy generate button */}
+            {![null, "mood-ai", "duration", "mood-journey", "discovery", "merge"].includes(method) && (
+              <div className="flex justify-end">
+                <button
+                  onClick={handleGenerate}
+                  disabled={generating || (
+                    method === "mood" ? !selectedMood :
+                    method === "activity" ? !selectedActivity :
+                    method === "seed" ? !seedTrack :
+                    !description.trim()
+                  )}
+                  className="flex items-center gap-2 px-6 py-3 bg-ytm-accent text-white rounded-xl font-medium hover:bg-ytm-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {generating ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      AI is generating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-5 h-5" />
+                      Generate Playlist
+                      <ArrowRight className="w-4 h-4" />
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -900,6 +1376,102 @@ export function SmartPlaylistView() {
               ))}
             </div>
           </div>
+
+          {/* AI Action Buttons (C8-C10, C12) */}
+          {selectedTrackIds.size > 0 && (
+            <div className="bg-ytm-surface rounded-xl p-5">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-ytm-accent" />
+                AI Playlist Actions
+              </h3>
+              <div className="flex flex-wrap gap-3">
+                {/* C8: AI Name */}
+                <button
+                  onClick={handleAiName}
+                  disabled={namingLoading}
+                  className="flex items-center gap-2 px-4 py-2 bg-ytm-accent/10 text-ytm-accent rounded-lg hover:bg-ytm-accent/20 transition-colors disabled:opacity-50 text-sm font-medium"
+                >
+                  {namingLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  AI Name
+                </button>
+
+                {/* C9: Cover Idea */}
+                <button
+                  onClick={handleCoverIdea}
+                  disabled={coverLoading}
+                  className="flex items-center gap-2 px-4 py-2 bg-purple-500/10 text-purple-400 rounded-lg hover:bg-purple-500/20 transition-colors disabled:opacity-50 text-sm font-medium"
+                >
+                  {coverLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Disc3 className="w-4 h-4" />}
+                  Cover Idea
+                </button>
+
+                {/* C10: Smart Reorder */}
+                <button
+                  onClick={handleReorder}
+                  disabled={reorderLoading || selectedTrackIds.size < 2}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-500/10 text-green-400 rounded-lg hover:bg-green-500/20 transition-colors disabled:opacity-50 text-sm font-medium"
+                >
+                  {reorderLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ListMusic className="w-4 h-4" />}
+                  Smart Reorder
+                </button>
+
+                {/* C12: Split (only when >5 tracks) */}
+                {selectedTrackIds.size > 5 && (
+                  <button
+                    onClick={handleSplit}
+                    disabled={splitLoading}
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-500/10 text-indigo-400 rounded-lg hover:bg-indigo-500/20 transition-colors disabled:opacity-50 text-sm font-medium"
+                  >
+                    {splitLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ListMusic className="w-4 h-4" />}
+                    Split Playlist
+                  </button>
+                )}
+              </div>
+
+              {/* Cover Idea Result Modal */}
+              {coverResult && (
+                <div className="mt-4 p-4 bg-ytm-bg rounded-lg border border-purple-500/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-purple-400">Cover Concept</span>
+                    <button onClick={() => setCoverResult(null)} className="text-ytm-text-secondary hover:text-white">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-sm text-ytm-text-secondary mb-2">{coverResult.description || "No description generated"}</p>
+                  {coverResult.style && <p className="text-xs text-ytm-text-secondary">Style: {coverResult.style}</p>}
+                  {coverResult.color_palette?.length > 0 && (
+                    <div className="flex gap-1 mt-2">
+                      {coverResult.color_palette.map((c: string, i: number) => (
+                        <div key={i} className="w-5 h-5 rounded-full border border-white/10" style={{ backgroundColor: c }} title={c} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Split Result */}
+              {splitResult?.playlists?.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <p className="text-sm font-medium text-indigo-400">Suggested Sub-Playlists:</p>
+                  {splitResult.playlists.map((sp: any, i: number) => (
+                    <div key={i} className="p-3 bg-ytm-bg rounded-lg border border-indigo-500/20">
+                      <p className="font-medium text-sm">{sp.name || `Sub-Playlist ${i + 1}`}</p>
+                      <p className="text-xs text-ytm-text-secondary">{sp.description || ""}</p>
+                      <p className="text-xs text-ytm-text-secondary mt-1">{sp.track_ids?.length || 0} tracks</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Mood AI Result: push to preview */}
+              {moodAiResult && moodAiResult.track_ids?.length > 0 && (
+                <div className="mt-4 p-3 bg-ytm-bg rounded-lg">
+                  <p className="text-sm font-medium">{moodAiResult.name || "AI Mood Playlist"}</p>
+                  <p className="text-xs text-ytm-text-secondary">{moodAiResult.track_ids.length} tracks from AI</p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Save Section */}
           <div className="bg-ytm-surface rounded-xl p-5">

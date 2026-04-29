@@ -669,3 +669,123 @@ pub async fn search_youtube_for_track_smart_with_fallback(
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_exportify_csv_standard() {
+        let csv = r#"Track Name,Artist Name(s),Album Name,Duration (ms),Spotify ID
+"Song One","Artist One","Album One",200000,"spotify:id:1"
+"Song Two","Artist Two","Album Two",180000,"spotify:id:2"
+"Song Three","Artist Three","Album Three",240000,"spotify:id:3""#;
+
+        let tracks = parse_exportify_csv(csv).expect("Failed to parse standard CSV");
+        assert_eq!(tracks.len(), 3);
+
+        assert_eq!(tracks[0].track_name, "Song One");
+        assert_eq!(tracks[0].artist_name, "Artist One");
+        assert_eq!(tracks[0].album_name, "Album One");
+        assert_eq!(tracks[0].duration_ms, Some(200000));
+        assert_eq!(tracks[0].spotify_id, Some("spotify:id:1".to_string()));
+
+        assert_eq!(tracks[1].track_name, "Song Two");
+        assert_eq!(tracks[2].track_name, "Song Three");
+    }
+
+    #[test]
+    fn test_parse_empty_csv() {
+        let err = parse_exportify_csv("").unwrap_err();
+        let is_empty = matches!(&err, ImportError::ParseError(msg) if msg == "Empty CSV");
+        assert!(is_empty, "Expected Empty CSV error, got: {:?}", err);
+    }
+
+    #[test]
+    fn test_parse_csv_missing_columns() {
+        let csv = "Name,Value\nSong,123\n";
+        let err = parse_exportify_csv(csv).unwrap_err();
+        let is_not_found = matches!(&err, ImportError::ParseError(msg) if msg.contains("Could not find"));
+        assert!(is_not_found, "Expected column-not-found error, got: {:?}", err);
+    }
+
+    #[test]
+    fn test_parse_csv_partial_data() {
+        let csv = r#"Track Name,Artist Name(s),Album Name,Duration (ms)
+"Song One","Artist One","Album One",300000
+"Song Two","Artist Two",,
+,,"Album Three",
+"#;
+
+        let tracks = parse_exportify_csv(csv).expect("Failed to parse partial CSV");
+        // Row 1: fully populated → included
+        // Row 2: missing album + duration → included with defaults
+        // Row 3: empty track_name and artist_name → skipped
+        assert_eq!(tracks.len(), 2, "Should skip rows with empty track/artist");
+
+        assert_eq!(tracks[0].track_name, "Song One");
+        assert_eq!(tracks[0].album_name, "Album One");
+        assert_eq!(tracks[0].duration_ms, Some(300000));
+
+        assert_eq!(tracks[1].track_name, "Song Two");
+        assert_eq!(tracks[1].album_name, ""); // default
+        assert!(tracks[1].duration_ms.is_none());
+    }
+
+    #[test]
+    fn test_parse_csv_line_quoted_fields() {
+        let line = r#""Song, feat. Artist","Artist, Jr.",1234,"https://open.spotify.com/track/abc""#;
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 4, "Should parse 4 quoted fields");
+        assert_eq!(fields[0], "Song, feat. Artist");
+        assert_eq!(fields[1], "Artist, Jr.");
+        assert_eq!(fields[2], "1234");
+        assert_eq!(fields[3], "https://open.spotify.com/track/abc");
+
+        // Unquoted simple line
+        let simple = parse_csv_line("a,b,c");
+        assert_eq!(simple, vec!["a", "b", "c"]);
+
+        // Empty fields
+        let empty = parse_csv_line("a,,c");
+        assert_eq!(empty, vec!["a", "", "c"]);
+    }
+
+    #[test]
+    fn test_find_column_index() {
+        let headers = &["Track Name", "Artist Name(s)", "Album Name"];
+
+        // Exact case-insensitive match
+        let idx = find_column_index(headers, &["track name", "Name"]);
+        assert_eq!(idx, Some(0));
+
+        // Alternative name
+        let idx = find_column_index(headers, &["Name", "Track Name"]);
+        assert_eq!(idx, Some(0), "Should match second alternative");
+
+        // No match
+        let idx = find_column_index(headers, &["Duration"]);
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn test_spotify_track_serialization() {
+        let track = SpotifyTrack {
+            track_name: "Test Track".to_string(),
+            artist_name: "Test Artist".to_string(),
+            album_name: "Test Album".to_string(),
+            duration_ms: Some(200000),
+            spotify_id: Some("test:id".to_string()),
+        };
+
+        let json = serde_json::to_string(&track).expect("Failed to serialize");
+        assert!(json.contains("Test Track"));
+        assert!(json.contains("200000"));
+
+        let deserialized: SpotifyTrack =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+        assert_eq!(deserialized.track_name, track.track_name);
+        assert_eq!(deserialized.artist_name, track.artist_name);
+        assert_eq!(deserialized.duration_ms, track.duration_ms);
+    }
+}

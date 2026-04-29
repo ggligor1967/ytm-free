@@ -430,6 +430,46 @@ export async function smartPlaylistCoverIdea(
   return invoke("smart_playlist_cover_idea", { trackIds });
 }
 
+/** C2: Generate a mood-based playlist */
+export async function smartPlaylistByMood(mood: string): Promise<any> {
+  return invoke("smart_playlist_by_mood", { mood });
+}
+
+/** C3: Generate a duration-limited playlist */
+export async function smartPlaylistByDuration(durationMin: number, theme: string): Promise<any> {
+  return invoke("smart_playlist_by_duration", { durationMin, theme });
+}
+
+/** C4: Generate a mood-transition journey playlist */
+export async function smartPlaylistMoodJourney(startMood: string, endMood: string): Promise<any> {
+  return invoke("smart_playlist_mood_journey", { startMood, endMood });
+}
+
+/** C7: Discovery playlist — find hidden gems */
+export async function smartPlaylistDiscovery(): Promise<any> {
+  return invoke("smart_playlist_discovery");
+}
+
+/** C8: AI-name a playlist based on its tracks */
+export async function smartPlaylistName(trackIds: string[]): Promise<any> {
+  return invoke("smart_playlist_name", { trackIds });
+}
+
+/** C10: Smart reorder a playlist */
+export async function smartPlaylistReorder(trackIds: string[]): Promise<any> {
+  return invoke("smart_playlist_reorder", { trackIds });
+}
+
+/** C11: Merge two playlists */
+export async function smartPlaylistMerge(playlistATracks: string[], playlistBTracks: string[]): Promise<any> {
+  return invoke("smart_playlist_merge", { playlistATracks, playlistBTracks });
+}
+
+/** C12: Split a playlist into themed sub-playlists */
+export async function smartPlaylistSplit(trackIds: string[]): Promise<any> {
+  return invoke("smart_playlist_split", { trackIds });
+}
+
 // ============================================================================
 // Daily Mix (FAZA 3 - Step 3.5)
 // ============================================================================
