@@ -835,6 +835,7 @@ Return JSON:
     // ========================================================================
 
     /// C2: Generate a mood-based playlist from library
+    #[allow(dead_code)]
     pub fn mood_playlist(mood: &str, library_tracks: &str) -> String {
         format!(
             r#"You are a music curator AI. Create a playlist for the mood "{}".
@@ -855,6 +856,7 @@ Return JSON:
     }
 
     /// C3: Generate a duration-limited playlist
+    #[allow(dead_code)]
     pub fn duration_playlist(duration_min: u32, theme: &str, library_tracks: &str) -> String {
         format!(
             r#"You are a music curator AI. Create a playlist of approximately {} minutes with the theme "{}".
@@ -875,6 +877,7 @@ Return JSON:
     }
 
     /// C4: Generate a mood-transition playlist (e.g., energetic → calm)
+    #[allow(dead_code)]
     pub fn transition_playlist(start_mood: &str, end_mood: &str, library_tracks: &str) -> String {
         format!(
             r#"You are a music curator AI. Create a playlist that transitions from "{}" to "{}".
@@ -898,6 +901,7 @@ Return JSON:
     }
 
     /// C7: Discovery playlist — find hidden gems based on known preferences
+    #[allow(dead_code)]
     pub fn discovery_playlist(known_artists: &str, preferred_genres: &str) -> String {
         format!(
             r#"You are a music discovery AI. Based on the user's taste, suggest NEW artists and tracks they haven't heard.
@@ -918,6 +922,7 @@ Return JSON:
     }
 
     /// C8: Generate a name for a playlist based on its tracks
+    #[allow(dead_code)]
     pub fn name_playlist(track_list: &str) -> String {
         format!(
             r#"You are a creative playlist naming AI. Look at these tracks and create a catchy playlist name.
@@ -936,6 +941,7 @@ Return JSON:
     }
 
     /// C9: Describe a playlist cover / visual theme
+    #[allow(dead_code)]
     pub fn describe_playlist_cover(track_list: &str) -> String {
         format!(
             r##"You are an art director AI. Describe a visual cover concept for this playlist.
@@ -955,6 +961,7 @@ Return JSON:
     }
 
     /// C10: Smart reorder a playlist for optimal flow
+    #[allow(dead_code)]
     pub fn reorder_playlist(tracks_with_metadata: &str) -> String {
         format!(
             r#"You are a DJ AI. Reorder these tracks for the best listening flow.
@@ -974,6 +981,7 @@ Return JSON:
     }
 
     /// C11: Merge two playlists intelligently
+    #[allow(dead_code)]
     pub fn merge_playlists(playlist_a: &str, playlist_b: &str) -> String {
         format!(
             r#"You are a playlist curator AI. Merge these two playlists into one cohesive playlist.
@@ -997,6 +1005,7 @@ Return JSON:
     }
 
     /// C12: Split a large playlist into themed sub-playlists
+    #[allow(dead_code)]
     pub fn split_playlist(tracks_with_metadata: &str) -> String {
         format!(
             r#"You are a playlist organizer AI. Split this large playlist into themed sub-playlists.
@@ -2022,30 +2031,6 @@ Return JSON:
         )
     }
 
-    /// H5: Suggest album groupings
-    pub fn suggest_album_grouping(tracks_by_artist: &str) -> String {
-        format!(
-            r#"You are a music knowledge expert.
-
-Given these tracks by artist, identify which album each track belongs to.
-
-Tracks:
-{}
-
-Return JSON:
-{{
-  "albums": [
-    {{
-      "artist": "Artist Name",
-      "album": "Album Name",
-      "year": 1991,
-      "tracks": ["Track 1", "Track 2"]
-    }}
-  ]
-}}"#,
-            tracks_by_artist
-        )
-    }
 }
 
 // ============================================================================

@@ -43,6 +43,9 @@ coverage/
 scripts/build_output*.txt
 scripts/dump_vcvars.bat
 
+# Diagnostic/chat dumps in source
+src/components/*.md
+
 # Residual / temp files
 Creare migrație baze de date adăugare tabel *.md
 audit-senior-inginer-v3.skill

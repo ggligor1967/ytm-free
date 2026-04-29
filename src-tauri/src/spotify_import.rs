@@ -258,41 +258,6 @@ pub async fn import_from_csv(file_path: &str) -> Result<Vec<ImportResult>, Impor
     Ok(results)
 }
 
-/// Import from CSV content directly (for drag & drop) with parallel processing
-pub async fn import_from_csv_content(content: &str) -> Result<Vec<ImportResult>, ImportError> {
-    let tracks = parse_exportify_csv(content)?;
-    
-    // Use semaphore to limit concurrent requests (max 10)
-    let semaphore = Arc::new(Semaphore::new(10));
-    let mut results = Vec::new();
-    
-    // Process tracks in parallel with controlled concurrency
-    let mut tasks = Vec::new();
-    for track in tracks {
-        let semaphore = Arc::clone(&semaphore);
-        let track = track.clone();
-        
-        let task = tokio::spawn(async move {
-            let permit = match semaphore.acquire().await {
-                Ok(p) => p,
-                Err(_) => return Err(ImportError::SearchError("Semaphore closed".to_string())),
-            };
-            let result = search_youtube_for_track(&track).await;
-            drop(permit);
-            Ok(result)
-        });
-        
-        tasks.push(task);
-    }
-    
-    // Collect results
-    for task in tasks {
-        results.push(task.await.map_err(|e| ImportError::SearchError(format!("Task failed: {}", e)))??);
-    }
-    
-    Ok(results)
-}
-
 /// CSV file info for listing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvFileInfo {

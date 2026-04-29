@@ -58,6 +58,7 @@ pub struct Playlist {
     pub updated_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistTrack {
     pub playlist_id: String,
@@ -163,6 +164,7 @@ impl Default for Settings {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueItem {
     pub track: Track,
@@ -210,16 +212,6 @@ pub struct ListeningStats {
     pub top_artists: Vec<(String, i64)>,    // (artist, count)
     pub top_moods: Vec<(String, i64)>,      // (mood, count)
     pub daily_breakdown: Vec<(String, i64)>, // (date, count)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AICacheEntry {
-    pub id: String,
-    pub prompt_hash: String,
-    pub response: String,
-    pub model: Option<String>,
-    pub created_at: String,
-    pub ttl_seconds: i64,
 }
 
 // ============================================================================
