@@ -20,13 +20,21 @@ pub struct Database {
 impl Database {
     pub fn new() -> Result<Self, DbError> {
         let db_path = Self::get_db_path()?;
-        
+
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(&db_path)?;
+        let db = Self { conn };
+        db.init_tables()?;
+        Ok(db)
+    }
+
+    /// Create an in-memory database (used for testing and ephemeral operations)
+    pub fn in_memory() -> Result<Self, DbError> {
+        let conn = Connection::open_in_memory()?;
         let db = Self { conn };
         db.init_tables()?;
         Ok(db)
@@ -1321,5 +1329,141 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_in_memory_database_creation() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+        let tracks = db.get_all_tracks().expect("Failed to get tracks");
+        assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn test_track_crud() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+
+        // Add a track
+        let track = db
+            .add_track("video1", "Test Song", "Test Artist", "thumb.jpg", None)
+            .expect("Failed to add track");
+        assert_eq!(track.title, "Test Song");
+        assert_eq!(track.artist, "Test Artist");
+
+        // Retrieve by video_id
+        let found = db
+            .get_track_by_video_id("video1")
+            .expect("Failed to get track by video_id");
+        assert_eq!(found.id, track.id);
+
+        // Retrieve by UUID
+        let by_uuid = db
+            .get_track_by_uuid(&track.id)
+            .expect("Failed to get track by UUID");
+        assert_eq!(by_uuid.video_id, "video1");
+
+        // Get all tracks
+        let all = db.get_all_tracks().expect("Failed to get all tracks");
+        assert_eq!(all.len(), 1);
+
+        // Track not found
+        let not_found = db.get_track_by_video_id("nonexistent");
+        assert!(matches!(not_found, Err(DbError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_favorites() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+        db.add_track("v1", "Song A", "Artist A", "a.jpg", None)
+            .expect("Failed to add track");
+
+        // Toggle favorite on
+        let is_fav = db
+            .toggle_favorite("v1")
+            .expect("Failed to toggle favorite");
+        assert!(is_fav);
+
+        // Check favorites list
+        let favs = db.get_favorites().expect("Failed to get favorites");
+        assert_eq!(favs.len(), 1);
+        assert!(favs[0].is_favorite);
+
+        // Toggle favorite off
+        let is_fav = db
+            .toggle_favorite("v1")
+            .expect("Failed to toggle favorite");
+        assert!(!is_fav);
+
+        let favs = db.get_favorites().expect("Failed to get favorites");
+        assert_eq!(favs.len(), 0);
+    }
+
+    #[test]
+    fn test_play_counts() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+        db.add_track("v1", "Song", "Artist", "thumb.jpg", None)
+            .expect("Failed to add track");
+
+        // Initial play count
+        let total = db.get_total_play_count().expect("Failed to get total play count");
+        assert_eq!(total, 0);
+
+        // Update play count
+        db.update_play_count("v1").expect("Failed to update play count");
+        let total = db.get_total_play_count().expect("Failed to get total play count");
+        assert_eq!(total, 1);
+
+        // Verify last_played is set
+        let track = db.get_track_by_video_id("v1").expect("Failed to get track");
+        assert!(track.last_played.is_some());
+        assert_eq!(track.play_count, 1);
+    }
+
+    #[test]
+    fn test_playlist_crud() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+
+        // Create playlist
+        let pl = db
+            .create_playlist("My Playlist", Some("Test playlist"))
+            .expect("Failed to create playlist");
+        assert_eq!(pl.name, "My Playlist");
+        assert_eq!(pl.description, Some("Test playlist".to_string()));
+
+        // Add tracks to playlist
+        db.add_track("v1", "Song 1", "Artist", "thumb.jpg", None)
+            .expect("Failed to add track v1");
+        db.add_track("v2", "Song 2", "Artist", "thumb.jpg", None)
+            .expect("Failed to add track v2");
+
+        let track1 = db.get_track_by_video_id("v1").unwrap();
+        let track2 = db.get_track_by_video_id("v2").unwrap();
+
+        db.add_track_to_playlist(&pl.id, &track1.id)
+            .expect("Failed to add track1 to playlist");
+        db.add_track_to_playlist(&pl.id, &track2.id)
+            .expect("Failed to add track2 to playlist");
+
+        // Get playlist tracks
+        let tracks = db
+            .get_playlist_tracks(&pl.id)
+            .expect("Failed to get playlist tracks");
+        assert_eq!(tracks.len(), 2);
+
+        // Remove track
+        db.remove_track_from_playlist(&pl.id, &track1.id)
+            .expect("Failed to remove track from playlist");
+        let tracks = db.get_playlist_tracks(&pl.id).unwrap();
+        assert_eq!(tracks.len(), 1);
+
+        // Delete playlist
+        db.delete_playlist(&pl.id)
+            .expect("Failed to delete playlist");
+        let deleted = db.get_playlist(&pl.id);
+        assert!(matches!(deleted, Err(DbError::NotFound(_))));
     }
 }

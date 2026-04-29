@@ -1,16 +1,18 @@
 import { useAppStore } from "../../store";
 import { TrackCard } from "../TrackCard";
-import { Clock, TrendingUp, Brain, Loader2, RefreshCw, Play, AlertCircle } from "lucide-react";
+import { Clock, TrendingUp, Brain, Loader2, RefreshCw, Play, AlertCircle, Sparkles } from "lucide-react";
 import * as api from "../../api";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { QuickSmartPlaylist } from "../QuickSmartPlaylist";
+import type { Track } from "../../types";
 
 export function HomeView() {
-  const { 
-    recentlyPlayed, 
-    favorites, 
+  const {
+    recentlyPlayed,
+    favorites,
     ollamaAvailable,
     settings,
+    library,
     dailyMixPlaylist,
     dailyMixTracks,
     dailyMixLoading,
@@ -29,6 +31,10 @@ export function HomeView() {
   } = useAppStore();
 
   const [refreshing, setRefreshing] = useState(false);
+
+  // Recommended for You
+  const [recTracks, setRecTracks] = useState<Track[]>([]);
+  const [recLoading, setRecLoading] = useState(false);
 
   const generateDailyMix = useCallback(async () => {
     setDailyMixLoading(true);
@@ -69,6 +75,44 @@ export function HomeView() {
   };
 
   const isDailyMixEnabled = settings?.ollama_enabled && settings?.daily_mix_enabled && ollamaAvailable;
+
+  // ========================================================================
+  // Recommended for You
+  // ========================================================================
+  const isRecEnabled = settings?.ollama_enabled && ollamaAvailable;
+
+  const fetchRecommendations = useCallback(async () => {
+    setRecLoading(true);
+    try {
+      const result = await api.insightsSurpriseMe();
+      const items = result?.surprises || [];
+      // Match surprise items against library tracks by title/artist
+      const matched: Track[] = [];
+      for (const item of items) {
+        if (matched.length >= 8) break;
+        const found = library.find(
+          (t) =>
+            t.title.toLowerCase().includes(item.title.toLowerCase()) ||
+            item.title.toLowerCase().includes(t.title.toLowerCase())
+        );
+        if (found && !matched.some((m) => m.id === found.id)) {
+          matched.push(found);
+        }
+      }
+      setRecTracks(matched.slice(0, 8));
+    } catch {
+      // Silently fail — section will be hidden
+      setRecTracks([]);
+    } finally {
+      setRecLoading(false);
+    }
+  }, [library]);
+
+  useEffect(() => {
+    if (isRecEnabled) {
+      fetchRecommendations();
+    }
+  }, [isRecEnabled, fetchRecommendations]);
 
   return (
     <div className="space-y-8">
@@ -223,6 +267,79 @@ export function HomeView() {
               </button>
             </div>
           )}
+        </section>
+      )}
+
+      {/* Recommended for You — only when Ollama is available */}
+      {isRecEnabled && (
+        <section data-testid="recommended-section">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-ytm-accent" />
+              <h2 className="text-xl font-bold">Recommended for You</h2>
+            </div>
+            <button
+              onClick={fetchRecommendations}
+              disabled={recLoading}
+              className="p-2 rounded-lg hover:bg-ytm-surface transition-colors disabled:opacity-50"
+              title="Refresh recommendations"
+            >
+              <RefreshCw className={`w-4 h-4 ${recLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+
+          {/* Loading: shimmer skeleton cards */}
+          {recLoading && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="bg-ytm-surface rounded-xl overflow-hidden animate-pulse">
+                  <div className="aspect-square bg-ytm-surface-hover" />
+                  <div className="p-3 space-y-2">
+                    <div className="h-4 bg-ytm-surface-hover rounded w-3/4" />
+                    <div className="h-3 bg-ytm-surface-hover rounded w-1/2" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Cards */}
+          {!recLoading && recTracks.length > 0 && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {recTracks.map((track) => (
+                <div
+                  key={track.id}
+                  onClick={() => {
+                    setQueue([track]);
+                    setQueueIndex(0);
+                    setCurrentTrack(track);
+                    setIsPlaying(true);
+                  }}
+                  className="bg-ytm-surface rounded-xl overflow-hidden hover:bg-ytm-surface-hover transition-colors cursor-pointer group"
+                >
+                  <div className="aspect-square relative overflow-hidden">
+                    <img
+                      src={track.thumbnail}
+                      alt={track.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                    />
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                      <div className="w-12 h-12 bg-ytm-accent rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-3">
+                    <p className="font-medium text-sm truncate">{track.title}</p>
+                    <p className="text-xs text-ytm-text-secondary truncate">{track.artist}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Empty state (no matching library tracks) */}
+          {!recLoading && recTracks.length === 0 && <div />}
         </section>
       )}
 
