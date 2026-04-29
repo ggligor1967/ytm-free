@@ -6,6 +6,31 @@ use thiserror::Error;
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "mistral:7b";
 
+/// Configuration for retry behavior
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub base_timeout_secs: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_timeout_secs: 30,
+        }
+    }
+}
+
+fn generate_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()[..8].to_string()
+}
+
+/// Determine if an error is retryable (timeout or connection error, NOT parse errors)
+fn is_retryable(err: &OllamaError) -> bool {
+    matches!(err, OllamaError::Network(_) | OllamaError::Timeout | OllamaError::NotAvailable)
+}
+
 #[derive(Error, Debug)]
 pub enum OllamaError {
     #[error("Network error: {0}")]
@@ -210,6 +235,53 @@ impl OllamaClient {
         self.generate_with_options_advanced(prompt, temperature, max_tokens, None, None).await
     }
 
+    /// Execute a fallible closure with retry logic (exponential backoff + request ID logging)
+    async fn execute_with_retry<F, Fut, T>(&self, request_id: &str, config: &RetryConfig, f: F) -> Result<T, OllamaError>
+    where
+        F: Fn(u32, std::time::Duration) -> Fut,
+        Fut: std::future::Future<Output = Result<T, OllamaError>>,
+    {
+        let mut last_err = None;
+        for attempt in 1..=config.max_retries {
+            let timeout_secs = config.base_timeout_secs * u64::from(attempt);
+            let timeout = std::time::Duration::from_secs(timeout_secs);
+            tracing::info!(
+                "ollama request {}: attempt={}/{}, timeout={}s",
+                request_id, attempt, config.max_retries, timeout_secs
+            );
+            let start = std::time::Instant::now();
+            match f(attempt, timeout).await {
+                Ok(result) => {
+                    let latency = start.elapsed().as_millis();
+                    tracing::info!(
+                        "ollama response {}: status=ok, latency={}ms",
+                        request_id, latency
+                    );
+                    return Ok(result);
+                }
+                Err(e) if is_retryable(&e) && attempt < config.max_retries => {
+                    let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
+                    tracing::warn!(
+                        "ollama retry {}: attempt={}/{}, error={}, retry_in={}ms",
+                        request_id, attempt, config.max_retries, e, backoff.as_millis()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    last_err = Some(e);
+                }
+                Err(e) => {
+                    if attempt >= config.max_retries && is_retryable(&e) {
+                        tracing::warn!(
+                            "ollama retry {}: attempt={}/{}, error={} — max retries reached",
+                            request_id, attempt, config.max_retries, e
+                        );
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or(OllamaError::NotAvailable))
+    }
+
     /// Generate with custom temperature, max tokens, format, and system prompt
     pub async fn generate_with_options_advanced(
         &self,
@@ -260,84 +332,122 @@ impl OllamaClient {
         Ok(result.response)
     }
 
-    /// Generate JSON response (structured output)
+    /// Generate JSON response (structured output) with retry
     pub async fn generate_json<T: for<'de> Deserialize<'de>>(
         &self,
         prompt: &str,
     ) -> Result<T, OllamaError> {
-        let system_prompt = "You are a JSON API. Return ONLY valid JSON. Never include reasoning, thoughts, or explanations. Output must be parseable JSON.".to_string();
-        let json_prompt = format!(
-            "{}\n\nIMPORTANT: Return ONLY a valid JSON object or array. Do NOT include any text before or after.",
-            prompt
-        );
+        let request_id = generate_request_id();
+        let config = RetryConfig::default();
+        let self_arc = Arc::new(self.clone());
 
-        let response = self.generate_with_options_advanced(&json_prompt, 0.3, 2048, Some("json".to_string()), Some(system_prompt)).await?;
-        
-        // Try to extract JSON from response
-        let json_str = extract_json(&response)?;
-        
+        let response_str = self.execute_with_retry(&request_id, &config, |attempt, timeout| {
+            let client = self_arc.clone();
+            let prompt = prompt.to_string();
+            async move {
+                let adjusted = if attempt > 1 { 0.3 } else { 0.3 };
+                let system_prompt = "You are a JSON API. Return ONLY valid JSON. Never include reasoning, thoughts, or explanations. Output must be parseable JSON.".to_string();
+                let json_prompt = format!(
+                    "{}\n\nIMPORTANT: Return ONLY a valid JSON object or array. Do NOT include any text before or after.",
+                    prompt
+                );
+                // Build a client with the per-attempt timeout
+                let c = Client::builder()
+                    .timeout(timeout)
+                    .build()
+                    .map_err(|e| OllamaError::Network(e.to_string()))?;
+                let request = GenerateRequest {
+                    model: client.model.clone(),
+                    prompt: json_prompt,
+                    stream: false,
+                    format: Some("json".to_string()),
+                    system: Some(system_prompt),
+                    options: Some(GenerateOptions {
+                        temperature: adjusted,
+                        num_predict: 2048,
+                        top_p: 0.9,
+                    }),
+                };
+                let resp = c
+                    .post(format!("{}/api/generate", client.base_url))
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() { OllamaError::Timeout }
+                        else { OllamaError::Network(e.to_string()) }
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(OllamaError::Network(format!("Ollama status: {}", resp.status())));
+                }
+                let result: GenerateResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| OllamaError::Parse(e.to_string()))?;
+                Ok(result.response)
+            }
+        }).await?;
+
+        let json_str = extract_json(&response_str)?;
         serde_json::from_str(&json_str)
             .map_err(|e| OllamaError::Parse(format!("Invalid JSON: {} - Response was: {}", e, json_str)))
     }
 
-    /// Generate JSON response with larger token budget (FAZA 6 - insights/recommendations)
+    /// Generate JSON response with larger token budget (FAZA 6) with retry
     pub async fn generate_json_large<T: for<'de> Deserialize<'de>>(
         &self,
         prompt: &str,
     ) -> Result<T, OllamaError> {
-        let system_prompt = "You are a JSON API. Return ONLY valid JSON. Never include reasoning, thoughts, or explanations. Output must be parseable JSON.".to_string();
-        let json_prompt = format!(
-            "{}\n\nIMPORTANT: Return ONLY a valid JSON object or array. Do NOT include any text before or after.",
-            prompt
-        );
+        let request_id = generate_request_id();
+        let config = RetryConfig { base_timeout_secs: 60, ..Default::default() };
+        let self_arc = Arc::new(self.clone());
 
-        // Use a dedicated client with longer timeout for large generations
-        let long_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| OllamaError::Network(e.to_string()))?;
-
-        let request = GenerateRequest {
-            model: self.model.clone(),
-            prompt: json_prompt,
-            stream: false,
-            format: Some("json".to_string()),
-            system: Some(system_prompt),
-            options: Some(GenerateOptions {
-                temperature: 0.3,
-                num_predict: 4096,
-                top_p: 0.9,
-            }),
-        };
-
-        let response = long_client
-            .post(format!("{}/api/generate", self.base_url))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    OllamaError::Timeout
-                } else {
-                    OllamaError::Network(e.to_string())
+        let response_str = self.execute_with_retry(&request_id, &config, |_attempt, timeout| {
+            let client = self_arc.clone();
+            let prompt = prompt.to_string();
+            async move {
+                let system_prompt = "You are a JSON API. Return ONLY valid JSON. Never include reasoning, thoughts, or explanations. Output must be parseable JSON.".to_string();
+                let json_prompt = format!(
+                    "{}\n\nIMPORTANT: Return ONLY a valid JSON object or array. Do NOT include any text before or after.",
+                    prompt
+                );
+                let c = Client::builder()
+                    .timeout(timeout)
+                    .build()
+                    .map_err(|e| OllamaError::Network(e.to_string()))?;
+                let request = GenerateRequest {
+                    model: client.model.clone(),
+                    prompt: json_prompt,
+                    stream: false,
+                    format: Some("json".to_string()),
+                    system: Some(system_prompt),
+                    options: Some(GenerateOptions {
+                        temperature: 0.3,
+                        num_predict: 4096,
+                        top_p: 0.9,
+                    }),
+                };
+                let resp = c
+                    .post(format!("{}/api/generate", client.base_url))
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() { OllamaError::Timeout }
+                        else { OllamaError::Network(e.to_string()) }
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(OllamaError::Network(format!("Ollama status: {}", resp.status())));
                 }
-            })?;
+                let result: GenerateResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| OllamaError::Parse(e.to_string()))?;
+                Ok(result.response)
+            }
+        }).await?;
 
-        if !response.status().is_success() {
-            return Err(OllamaError::Network(format!(
-                "Ollama returned status: {}",
-                response.status()
-            )));
-        }
-
-        let result: GenerateResponse = response
-            .json()
-            .await
-            .map_err(|e| OllamaError::Parse(e.to_string()))?;
-        
-        let json_str = extract_json(&result.response)?;
-        
-        // Try parsing directly first; if it fails, attempt to repair truncated JSON
+        let json_str = extract_json(&response_str)?;
         match serde_json::from_str(&json_str) {
             Ok(v) => Ok(v),
             Err(e) => {

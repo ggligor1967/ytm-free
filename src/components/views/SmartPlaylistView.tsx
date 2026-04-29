@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
+import { useOllamaCall } from "../../hooks/useOllamaCall";
 import type { SmartPlaylistPlan, SmartPlaylistTrackMatch, SearchResult, Track, SmartMethod } from "../../types";
 import {
   Sparkles,
@@ -94,23 +95,19 @@ export function SmartPlaylistView() {
   // C2: By Mood AI
   const [moodAi, setMoodAi] = useState("");
   const [moodAiResult, setMoodAiResult] = useState<any>(null);
-  const [moodAiLoading, setMoodAiLoading] = useState(false);
 
   // C3: By Duration
   const [durationMin, setDurationMin] = useState(60);
   const [durationTheme, setDurationTheme] = useState("Workout");
   const [durationResult, setDurationResult] = useState<any>(null);
-  const [durationLoading, setDurationLoading] = useState(false);
 
   // C4: Mood Journey
   const [journeyStart, setJourneyStart] = useState("energetic");
   const [journeyEnd, setJourneyEnd] = useState("calm");
   const [journeyResult, setJourneyResult] = useState<any>(null);
-  const [journeyLoading, setJourneyLoading] = useState(false);
 
   // C7: Discovery
   const [discoveryResult, setDiscoveryResult] = useState<any>(null);
-  const [discoveryLoading, setDiscoveryLoading] = useState(false);
 
   // C8: AI Name
   const [namingLoading, setNamingLoading] = useState(false);
@@ -354,61 +351,46 @@ export function SmartPlaylistView() {
   // HANDLERS — FAZA 3 Smart Tools
   // ========================================================================
 
+  const moodAiCall = useOllamaCall<any>();
+  const durationCall = useOllamaCall<any>();
+  const journeyCall = useOllamaCall<any>();
+  const discoveryCall = useOllamaCall<any>();
+
   /** C2: Generate mood-based playlist */
-  const handleMoodAiGenerate = useCallback(async () => {
+  const handleMoodAiGenerate = useCallback(() => {
     if (!moodAi) { setError("Please select a mood"); return; }
-    setMoodAiLoading(true);
     setError(null);
-    try {
-      const result = await api.smartPlaylistByMood(moodAi);
-      setMoodAiResult(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setMoodAiLoading(false);
-    }
+    moodAiCall.execute(
+      () => api.smartPlaylistByMood(moodAi),
+      (r) => setMoodAiResult(r)
+    );
   }, [moodAi]);
 
   /** C3: Generate duration-based playlist */
-  const handleDurationGenerate = useCallback(async () => {
-    setDurationLoading(true);
+  const handleDurationGenerate = useCallback(() => {
     setError(null);
-    try {
-      const result = await api.smartPlaylistByDuration(durationMin, durationTheme.toLowerCase());
-      setDurationResult(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDurationLoading(false);
-    }
+    durationCall.execute(
+      () => api.smartPlaylistByDuration(durationMin, durationTheme.toLowerCase()),
+      (r) => setDurationResult(r)
+    );
   }, [durationMin, durationTheme]);
 
   /** C4: Generate mood journey */
-  const handleJourneyGenerate = useCallback(async () => {
-    setJourneyLoading(true);
+  const handleJourneyGenerate = useCallback(() => {
     setError(null);
-    try {
-      const result = await api.smartPlaylistMoodJourney(journeyStart, journeyEnd);
-      setJourneyResult(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setJourneyLoading(false);
-    }
+    journeyCall.execute(
+      () => api.smartPlaylistMoodJourney(journeyStart, journeyEnd),
+      (r) => setJourneyResult(r)
+    );
   }, [journeyStart, journeyEnd]);
 
   /** C7: Discovery mix */
-  const handleDiscoveryGenerate = useCallback(async () => {
-    setDiscoveryLoading(true);
+  const handleDiscoveryGenerate = useCallback(() => {
     setError(null);
-    try {
-      const result = await api.smartPlaylistDiscovery();
-      setDiscoveryResult(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDiscoveryLoading(false);
-    }
+    discoveryCall.execute(
+      () => api.smartPlaylistDiscovery(),
+      (r) => setDiscoveryResult(r)
+    );
   }, []);
 
   /** C8: AI Name the current playlist */
@@ -1050,10 +1032,10 @@ export function SmartPlaylistView() {
               <div className="flex items-center gap-3">
                 <button
                   onClick={handleMoodAiGenerate}
-                  disabled={moodAiLoading || !moodAi}
+                  disabled={moodAiCall.loading || !moodAi}
                   className="flex items-center gap-2 px-5 py-2.5 bg-pink-600 text-white rounded-xl font-medium hover:bg-pink-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {moodAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Heart className="w-4 h-4" />}
+                  {moodAiCall.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Heart className="w-4 h-4" />}
                   Generate Mood Playlist
                 </button>
                 {moodAiResult && (
@@ -1069,30 +1051,30 @@ export function SmartPlaylistView() {
             {method === "duration" && (
               <button
                 onClick={handleDurationGenerate}
-                disabled={durationLoading}
+                disabled={durationCall.loading}
                 className="flex items-center gap-2 px-5 py-2.5 bg-orange-600 text-white rounded-xl font-medium hover:bg-orange-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {durationLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
+                {durationCall.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
                 Generate Duration Playlist
               </button>
             )}
             {method === "mood-journey" && (
               <button
                 onClick={handleJourneyGenerate}
-                disabled={journeyLoading}
+                disabled={journeyCall.loading}
                 className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {journeyLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+                {journeyCall.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
                 Create Journey
               </button>
             )}
             {method === "discovery" && (
               <button
                 onClick={handleDiscoveryGenerate}
-                disabled={discoveryLoading}
+                disabled={discoveryCall.loading}
                 className="flex items-center gap-2 px-5 py-2.5 bg-teal-600 text-white rounded-xl font-medium hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {discoveryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                {discoveryCall.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                 Generate Discovery Mix
               </button>
             )}
