@@ -1,4 +1,5 @@
-import { useAppStore } from "../../store";
+﻿import { useAppStore } from "../../store";
+import { showToast } from "../Toast";
 import { TrackCard } from "../TrackCard";
 import { Clock, TrendingUp, Brain, Loader2, RefreshCw, Play, AlertCircle, Sparkles } from "lucide-react";
 import * as api from "../../api";
@@ -47,6 +48,7 @@ export function HomeView() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setDailyMixError(msg);
+      showToast(msg);
     } finally {
       setDailyMixLoading(false);
       setRefreshing(false);

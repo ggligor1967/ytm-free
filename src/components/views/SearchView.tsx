@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { useAppStore } from "../../store";
 import { TrackCard } from "../TrackCard";
 import { Search, Loader2, Sparkles, Zap, Clock, Brain } from "lucide-react";
 import * as api from "../../api";
 import clsx from "clsx";
+import { showToast } from "../Toast";
 import type { Track } from "../../types";
 
 interface SemanticResult {
@@ -47,6 +48,7 @@ export function SearchView() {
       setSearchResults(results);
     } catch (error) {
       console.error("Search error:", error);
+      showToast("Search error");
       setSearchResults([]);
     } finally {
       setIsSearching(false);
@@ -64,6 +66,7 @@ export function SearchView() {
       setSemanticResults(results);
     } catch (error) {
       console.error("Semantic search error:", error);
+      showToast("Semantic search error");
       setSemanticResults([]);
     } finally {
       setIsSemanticSearching(false);
@@ -91,6 +94,7 @@ export function SearchView() {
         setAISearchResults(suggestions.filter(s => s !== searchQuery)); // Remove original query
       } catch (error) {
         console.error("AI search enhancement failed:", error);
+      showToast("AI search enhancement failed");
         setAISearchResults([]);
       } finally {
         setIsAISearching(false);
@@ -276,6 +280,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Mood search failed:", error);
+      showToast("Mood search failed");
                       setActivePill(null);
                     }
                   }}
@@ -316,6 +321,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Activity search failed:", error);
+      showToast("Activity search failed");
                       setActivePill(null);
                     }
                   }}
@@ -356,6 +362,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Era search failed:", error);
+      showToast("Era search failed");
                       setActivePill(null);
                     }
                   }}

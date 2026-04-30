@@ -362,7 +362,8 @@ export function SmartPlaylistView() {
     setError(null);
     moodAiCall.execute(
       () => api.smartPlaylistByMood(moodAi),
-      (r) => setMoodAiResult(r)
+      (r) => setMoodAiResult(r),
+      (e) => setError(e)
     );
   }, [moodAi]);
 
@@ -371,7 +372,8 @@ export function SmartPlaylistView() {
     setError(null);
     durationCall.execute(
       () => api.smartPlaylistByDuration(durationMin, durationTheme.toLowerCase()),
-      (r) => setDurationResult(r)
+      (r) => setDurationResult(r),
+      (e) => setError(e)
     );
   }, [durationMin, durationTheme]);
 
@@ -380,7 +382,8 @@ export function SmartPlaylistView() {
     setError(null);
     journeyCall.execute(
       () => api.smartPlaylistMoodJourney(journeyStart, journeyEnd),
-      (r) => setJourneyResult(r)
+      (r) => setJourneyResult(r),
+      (e) => setError(e)
     );
   }, [journeyStart, journeyEnd]);
 
@@ -389,7 +392,8 @@ export function SmartPlaylistView() {
     setError(null);
     discoveryCall.execute(
       () => api.smartPlaylistDiscovery(),
-      (r) => setDiscoveryResult(r)
+      (r) => setDiscoveryResult(r),
+      (e) => setError(e)
     );
   }, []);
 
