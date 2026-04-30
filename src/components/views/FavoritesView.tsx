@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { TrackCard } from "../TrackCard";
 import { Heart, Loader2, Play, Shuffle } from "lucide-react";
+import { showToast } from "../Toast";
 
 export function FavoritesView() {
   const {
@@ -22,6 +23,7 @@ export function FavoritesView() {
         setFavorites(tracks);
       } catch (error) {
         console.error("Failed to load favorites:", error);
+        showToast("Failed to load favorites");
       } finally {
         setLoading(false);
       }

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { TrackCard } from "../TrackCard";
 import { Download, Loader2 } from "lucide-react";
+import { showToast } from "../Toast";
 
 export function DownloadsView() {
   const { downloads, setDownloads } = useAppStore();
@@ -15,6 +16,7 @@ export function DownloadsView() {
         setDownloads(tracks);
       } catch (error) {
         console.error("Failed to load downloads:", error);
+        showToast("Failed to load downloads");
       } finally {
         setLoading(false);
       }

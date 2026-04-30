@@ -1,8 +1,9 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { Plus, ListMusic, MoreVertical, Trash2, Loader2, Sparkles } from "lucide-react";
 import clsx from "clsx";
+import { showToast } from "../Toast";
 
 export function PlaylistsView() {
   const { 
@@ -37,6 +38,7 @@ export function PlaylistsView() {
       setNewDesc("");
     } catch (error) {
       console.error("Failed to create playlist:", error);
+      showToast("Failed to create playlist");
     } finally {
       setLoading(false);
     }
@@ -51,6 +53,7 @@ export function PlaylistsView() {
       setPlaylists(updated);
     } catch (error) {
       console.error("Failed to delete playlist:", error);
+      showToast("Failed to delete playlist");
     }
     setMenuOpen(null);
   };
@@ -69,6 +72,7 @@ export function PlaylistsView() {
       setAIPlaylistSuggestion(suggestion);
     } catch (error) {
       console.error("Failed to generate AI playlist:", error);
+      showToast("Failed to generate AI playlist");
     } finally {
       setGeneratingAI(false);
     }
@@ -87,6 +91,7 @@ export function PlaylistsView() {
       setAIPlaylistSuggestion(null);
     } catch (error) {
       console.error("Failed to create playlist:", error);
+      showToast("Failed to create playlist");
     } finally {
       setLoading(false);
     }
@@ -335,3 +340,4 @@ export function PlaylistsView() {
     </div>
   );
 }
+

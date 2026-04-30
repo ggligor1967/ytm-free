@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+﻿import { useEffect, useState, useMemo } from "react";
 import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { TrackCard } from "../TrackCard";
@@ -6,6 +6,7 @@ import { Library, Loader2, Filter, X, Sparkles } from "lucide-react";
 import type { TrackMetadataDB } from "../../types";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
+import { showToast } from "../Toast";
 
 interface Filters {
   genre: string;
@@ -55,6 +56,7 @@ export function LibraryView() {
         }
       } catch (error) {
         console.error("Failed to load library:", error);
+      showToast("Failed to load library");
       } finally {
         setLoading(false);
       }
@@ -108,6 +110,7 @@ export function LibraryView() {
       await api.ollamaBatchAnalyzeTracks(untaggedIds);
     } catch (error) {
       console.error("Batch tagging failed:", error);
+      showToast("Batch tagging failed");
       setTagging(false);
       setTagProgress(null);
     }
