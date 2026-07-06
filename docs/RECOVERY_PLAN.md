@@ -25,16 +25,21 @@ Written 2026-07-06 from verified evidence (see PROJECT_STATE.md). Steps are orde
 
 Net: Step 1 is no longer blocked by disk space or db migration failures when using the SDK 10.0.26100.0 session pin. Rust Gate B is now **PASS with SDK pin**. Remaining environment debt: a plain, unpinned `cargo test` still needs SDK 10.0.28000.0 repaired or removed.
 
-## Step 2 — First real end-to-end run (never done in project history)
+## Step 2 — First real runtime/e2e verification
 
-ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning. Once Step 1 passes:
+ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning.
+
+**Step 2A — runtime startup smoke: VERIFIED 2026-07-06.** With `vcvarsall.bat x64 10.0.26100.0` in the same shell, `npm run tauri dev` started Vite on `http://localhost:5173`, launched `target\debug\ytm-free.exe` with responding window title `YTM Free`, and started the Axum stream server on `127.0.0.1:3456`. Evidence: `curl.exe -i http://localhost:3456/health` → `HTTP/1.1 200 OK` / `OK`; `curl.exe -I http://localhost:5173/` → `HTTP/1.1 200 OK`; `Get-NetTCPConnection` showed listeners on 5173 and 3456. This verifies startup only.
+
+**Step 2B — full non-destructive app flow: still pending.** Next controlled runtime session should exercise the smallest safe user flow without downloading or modifying personal data unless explicitly approved:
 
 1. `npm run tauri dev` — app window opens, no panic in console.
 2. `curl http://localhost:3456/health` — stream server responds.
-3. Manual smoke: search a track → play it → download it → add to playlist → restart app → data persisted.
-4. Optional: `./verify.sh` automates the first two checks.
+3. Manual smoke: search a track → verify results and stream URL availability.
+4. Later, only with explicit approval: download → add to playlist → restart app → data persisted.
+5. Optional: `./verify.sh` automates the first two checks.
 
-**Exit criterion:** all four pass. Record each in the ledger. Only after this may any doc say the app "works".
+**Exit criterion:** all selected flow checks pass. Record each in the ledger. Only after the full chosen flow passes may any doc say that flow works.
 
 ## Step 3 — Production build
 

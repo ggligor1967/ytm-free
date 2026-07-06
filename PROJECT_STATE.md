@@ -8,6 +8,7 @@
 **Step-1 re-verification (same day, second session):** the `dbghelp.lib` toolchain block is **bypassable** via a session-only SDK pin — see "Verified BROKEN" table below for the new finding and the changed blocker.
 **Step-1B re-verification (same day, third session):** the disk-space blocker is **resolved** (C: now 11.2 GB free). With the SDK 10.0.26100.0 pin, `cargo test` now **compiles and runs** (Finished in 35.98s, only warnings) — but reveals **8 real failures in `db::tests::*`** (20 passed / 8 failed of 28). Rust is no longer BLOCKED-ENV; it is **PASS-COMPILE-BUT-TEST-FAIL**. Root cause is a pre-existing bug in `run_migrations` (version-0 baseline collision), not the toolchain. See "Verified BROKEN" table.
 **Step-1C fix verification (same day, fourth session):** the `db::tests` blocker is **resolved** on branch `fix/db-initial-migration-baseline`. `run_migrations` now treats an empty `schema_migrations` table as baseline `-1`, so migration version 0 runs on fresh databases while preserving existing migration history. With the SDK 10.0.26100.0 pin, `cargo test db::tests` → 8 passed and full `cargo test` → 28 passed. Frontend Gate A also passed: `npx tsc --noEmit` exit 0, `npm test` → 32 passed, `npm run build` → built in 6.98s.
+**Step-2A runtime startup smoke (same day, fifth session):** first controlled Tauri dev startup is **verified** with the SDK 10.0.26100.0 pin. `npm run tauri dev` started Vite on `http://localhost:5173`, launched `target\debug\ytm-free.exe` with responding window title `YTM Free`, and the Axum stream server listened on `127.0.0.1:3456`; `curl.exe -i http://localhost:3456/health` → `HTTP/1.1 200 OK` / `OK`. This is startup evidence only, not a full search/stream/download/persistence e2e.
 
 ## What the project is
 
@@ -24,6 +25,7 @@ Personal-use desktop music player: Tauri 2.x shell, React 18 + TypeScript + Zust
 | yt-dlp installed | `yt-dlp --version` → 2026.02.04 |
 | Node v22.22.2 / npm 11.7.0 / rustc+cargo 1.94.1 | `--version` commands |
 | Rust tests pass with SDK pin (2026-07-06, 4th session) | `vcvarsall.bat x64 10.0.26100.0` then `cargo test db::tests` in `src-tauri/` → 8 passed; full `cargo test` → 28 passed, 0 failed. Only existing dead-code warnings. (Plain `cargo test` without the pin still fails — see BROKEN table.) |
+| Tauri dev runtime starts with SDK pin (2026-07-06, 5th session) | `vcvarsall.bat x64 10.0.26100.0` then `npm run tauri dev` → Vite ready at `http://localhost:5173`, `target\debug\ytm-free.exe` running with responding window title `YTM Free`, `Get-NetTCPConnection` shows `127.0.0.1:3456` listening, and `curl.exe -i http://localhost:3456/health` → `HTTP/1.1 200 OK` / `OK`. |
 
 ## Verified BROKEN (2026-07-06)
 
@@ -38,13 +40,13 @@ Fix procedure: see `docs/RECOVERY_PLAN.md`. **Step 1 part 1 (dbghelp.lib) is sol
 
 ## Never verified (open since project start)
 
-- End-to-end app run (search → stream → download → playlist) — ROADMAP_STATUS.md item 1, "NEFACUT". `verify.sh` exists for a smoke check but depends on the broken Rust build.
-- `npm run tauri build` (production bundle) — blocked by the same toolchain issue since ~Feb 2026.
+- Full end-to-end app flow (search → stream → download → playlist → restart → data persisted) — ROADMAP_STATUS.md item 1, "NEFACUT". Step 2A verified startup/server/window only; it did not run the full user-flow e2e.
+- `npm run tauri build` (production bundle) — still not run in any verified session. Step 2A intentionally did not start production packaging.
 - Ollama-dependent features against a live Ollama instance.
 
 ## Git state (2026-07-06)
 
-- `main` @ 2fc459f. **`main` is the real trunk.** (Was 65c6e6b at last verification; 82a44c2 + 2fc459f are doc-only recovery commits since. `origin/main` not re-checked this session — no network.)
+- **`main` is the real trunk.** At the start of Step 2A, local `main` and `origin/main` both pointed at 7271b84ee63ac3062734af8fc9560473f36d33f5. This file may include later local evidence commits not yet pushed.
 - **Trap:** GitHub's default branch (`origin/HEAD`) is `phase-2-frontend-bugs`, which is stale (main is 9 ahead). PRs and clones default to the wrong branch until this is changed on GitHub.
 - 4 merged-and-stale feature branches remain (debt/cleanup-sprint, faza-3/*, faza-4/*, phase-2-frontend-bugs) — squash-merge workflow, so their commits are not ancestors of main.
 - Untracked, uncommitted work: `gdpr-compliance-audit-report.md`, `docs/GDPR_REMEDIATION_PLAN.md` (status: DRAFT, awaiting owner approval), `docs/plan-remediere-gdpr-complete.md`, `.omx/` (agent session state — do not commit).
