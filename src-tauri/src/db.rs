@@ -44,17 +44,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
         // This is where the analize_audio migration will go
     ];
 
-    // Get the last applied version
-    let last_version: u32 = conn
+    // Empty migration table means no migrations have run yet; version 0 must apply.
+    let last_version: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            "SELECT COALESCE(MAX(version), -1) FROM schema_migrations",
             [],
             |row| row.get(0),
         )
         .map_err(|e| DbError::Migration(format!("Failed to read migration version: {}", e)))?;
 
     for migration in &migrations {
-        if migration.version > last_version {
+        if i64::from(migration.version) > last_version {
             conn.execute_batch(migration.sql)
                 .map_err(|e| DbError::Migration(format!(
                     "Migration {} ({}): {}", migration.version, migration.description, e
