@@ -46,6 +46,10 @@ ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning.
 ## Step 3 — Production build
 
 `npm run tauri build` → installer/exe in `src-tauri/target/release/`. This has **never succeeded** (blocked since ~Feb 2026 by Step 1's issue). Launch the built exe and repeat the Step 2 smoke test against it.
+**Step 3A — first controlled production build attempt: BLOCKED-ENV at the disk decision gate (2026-07-06, 8th session).** Preflight on main (local == origin/main == f8bb649621ea44a33b7aec31175bf3078d5fc44) confirmed the toolchain is ready under the SDK 10.0.26100.0 pin (dbghelp.lib and cvarsall.bat present; rustc/cargo 1.94.1), but sutil volume diskfree C: showed only **8.70 GB free** (down from 11.2 GB in the 3rd session) while src-tauri/target already occupies **10.62 GB**. The Step-3A protocol requires ≥15 GB free before running 
+pm run tauri build, so the production build was **not executed** and no source was changed. Classification: **BLOCKED-ENV** (insufficient disk space). No baseline gates or production build were run this session because the disk gate fires first. Build command (for reference): 
+pm run tauri build → 	auri build (auto-runs 
+pm run build via eforeBuildCommand; undle.targets: "all" → MSI + NSIS under src-tauri/target/release/bundle/). Next minimal action (needs the human): free several more GB on C: (a release profile adds GB on top of the existing 10.62 GB debug 	arget), or explicitly approve a project-local cleanup of build artifacts (cargo clean frees ~10.62 GB but a fresh release build peaks higher than its final size). Do not clean 	arget/dist automatically. Re-run Step 3A only after C: free is ≥15 GB.
 
 ## Step 4 — Git hygiene (cheap, do any time)
 
