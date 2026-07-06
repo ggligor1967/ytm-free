@@ -31,13 +31,13 @@ ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning.
 
 **Step 2A — runtime startup smoke: VERIFIED 2026-07-06.** With `vcvarsall.bat x64 10.0.26100.0` in the same shell, `npm run tauri dev` started Vite on `http://localhost:5173`, launched `target\debug\ytm-free.exe` with responding window title `YTM Free`, and started the Axum stream server on `127.0.0.1:3456`. Evidence: `curl.exe -i http://localhost:3456/health` → `HTTP/1.1 200 OK` / `OK`; `curl.exe -I http://localhost:5173/` → `HTTP/1.1 200 OK`; `Get-NetTCPConnection` showed listeners on 5173 and 3456. This verifies startup only.
 
-**Step 2B — minimal non-destructive app flow: ATTEMPTED 2026-07-06, currently FAIL-E2E.** A controlled runtime session re-verified startup and then exercised the first read-only stream probe through the app's local server. Search discovery itself was reachable through `yt-dlp --dump-json --flat-playlist "ytsearch10:test"`, but the local app route failed for sampled IDs: `curl.exe -i http://localhost:3456/stream/YXZH-eBtmqQ` and `curl.exe -i http://localhost:3456/stream/sF80I-TQiW0` both returned `HTTP/1.1 500 Internal Server Error` with `Failed to get audio: Failed to execute yt-dlp: ERROR: [youtube] ... Requested format is not available`. Runtime logs tie this to `src-tauri/src/server.rs` calling `ytdlp::get_audio_url` in `src-tauri/src/ytdlp.rs`. No download/import/delete/mutation flow was run.
+**Step 2B — minimal non-destructive app flow: VERIFIED for app-local stream redirect on 2026-07-06, branch `fix/stream-audio-url-resolution`.** The first attempt failed because `src-tauri/src/ytdlp.rs::get_audio_url` used strict `yt-dlp -f bestaudio -g`, which returns `Requested format is not available` for ordinary IDs that only expose a combined playable format. The fix changes only that audio URL selector to `bestaudio/best`, preserving audio preference and falling back to a playable `best` URL. Evidence: `curl.exe -i http://localhost:3456/stream/YXZH-eBtmqQ` now returns `HTTP/1.1 307 Temporary Redirect` with a `googlevideo.com/videoplayback` location instead of HTTP 500. No download/import/delete/mutation flow was run.
 
-**Next Step 2B pass criteria:** re-run the same startup steps and get at least one harmless search result to resolve successfully through the app's read-only stream path without HTTP 500, still without downloads or data mutation. Only after that should any doc claim a minimal user-facing runtime smoke passes.
+**Remaining Step 2 flow:** the minimal read-only stream redirect is verified, but this still does not cover full playback, downloads, playlist mutation, restart, persistence, or production packaging. Only run those with explicit approval and fresh evidence.
 
 1. `npm run tauri dev` — app window opens, no panic in console.
 2. `curl http://localhost:3456/health` — stream server responds.
-3. Read-only smoke: search a track → verify at least one sampled result resolves through `/stream/:video_id` without 500.
+3. Read-only smoke: search a track → verify at least one sampled result resolves through `/stream/:video_id` without 500. (**Verified for `YXZH-eBtmqQ` on 2026-07-06.**)
 4. Later, only with explicit approval: download → add to playlist → restart app → data persisted.
 5. Optional: `./verify.sh` automates the first two checks.
 

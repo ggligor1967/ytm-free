@@ -349,13 +349,13 @@ pub async fn get_audio_url(video_id: &str) -> Result<String, YtdlpError> {
 
     let output = Command::new("yt-dlp")
         .args([
-            "-f", "bestaudio",
+            "-f", "bestaudio/best",
             "-g", // Get URL only
             "--no-warnings",
             &url,
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .await?;
 
