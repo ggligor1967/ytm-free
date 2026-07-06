@@ -16,6 +16,13 @@ Written 2026-07-06 from verified evidence (see PROJECT_STATE.md). Steps are orde
 
 **Exit criterion:** `cd src-tauri && cargo test` compiles and reports test results (pass or fail — compiling at all is the gate). Expected: ~28 tests across db.rs, semantic.rs, spotify_import.rs, ollama/client.rs, ollama/prompts.rs.
 
+**Re-verified 2026-07-06 (2nd session) — Step 1 splits into two sub-blockers:**
+
+1. **dbghelp.lib — SOLVED in practice.** Option B (session pin) was confirmed working: `vcvarsall.bat x64 10.0.26100.0` then `cargo test` compiles the entire dep tree (~280 crates) and the `ytm-free` lib cleanly — only warnings, no errors. The SDK evidence is unchanged (28000/um/x64 = 115 libs, no dbghelp.lib; 26100/um/x64 = 481 libs, has it). Option A (VS Installer repair/remove of SDK 28000) remains the permanent fix so a plain `cargo test` works without the pin.
+2. **Disk space — NEW blocker.** With the pin applied, `cargo test` fails only at the final archive step: `error: failed to build archive ... libytm_free_lib.rlib: There is not enough space on the disk. (os error 112)`. `fsutil volume diskfree C:` showed **354.8 MB free of 585 GB**; `du -sh src-tauri/target` = 4.7 GB. The user must free several GB on C: before `cargo test` can complete. `cargo clean` alone is not a reliable fix (a fresh build peaks higher than the ~4.7 GB it would free).
+
+Net: Step 1 is no longer "blocked by the linker" — it is blocked by disk space. The Rust code compiles.
+
 ## Step 2 — First real end-to-end run (never done in project history)
 
 ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning. Once Step 1 passes:

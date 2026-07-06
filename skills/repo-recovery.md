@@ -12,8 +12,15 @@ Principle: **when a command that "should work" fails, first prove whether the en
 ### 1. `LNK1181: cannot open input file 'dbghelp.lib'` on any cargo build
 - **Cause (verified):** partial Windows SDK 10.0.28000.0 (`Lib\10.0.28000.0\um\x64` has ~115 libs, no dbghelp.lib; 10.0.26100.0 has 481 incl. dbghelp.lib). MSVC picks the newest SDK.
 - **Fix:** docs/RECOVERY_PLAN.md Step 1 (complete/remove SDK 28000 via VS Installer — needs the human; or pin LIB to 26100 for the session).
+- **Session-only bypass (verified 2026-07-06, 2nd session):** run `vcvarsall.bat x64 10.0.26100.0` (from `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\`) before cargo in the same shell. Confirmed: ~280 crates + the `ytm-free` lib then compile cleanly. (The simpler `$env:LIB -replace` form only works in a vcvars shell that already has LIB populated; vcvarsall with the explicit SDK version is the reliable form.)
 - **Do NOT:** edit Cargo.toml, downgrade crates, or "fix" Rust code in response to this error. The code is not the problem.
 - After fixing, update PROJECT_STATE.md.
+
+### 6. `os error 112` / "There is not enough space on the disk" during a cargo build
+- **Symptom:** `cargo test`/`cargo build` compiles most/all crates, then fails near the end with `error: failed to build archive ... : There is not enough space on the disk. (os error 112)`.
+- **Cause (verified 2026-07-06):** the C: drive is full. `fsutil volume diskfree C:` showed 354.8 MB free of 585 GB; `du -sh src-tauri/target` was 4.7 GB. A Tauri debug build needs several GB and peaks higher than its final size.
+- **Fix (needs the human):** free several GB on the C: drive. `cargo clean` frees ~4.7 GB but a fresh build peaks higher than that, so cleaning alone is not a reliable fix — the volume itself needs headroom.
+- **Do NOT:** treat this as a code or toolchain problem. The Rust code compiles; this is pure disk capacity.
 
 ### 2. `npm test` shows 1 failure: LibraryView "handles 1000 tracks…" timeout
 - Known flake (5s vitest timeout, test needs ~7s under full-suite load).
