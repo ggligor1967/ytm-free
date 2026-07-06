@@ -31,11 +31,13 @@ ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning.
 
 **Step 2A — runtime startup smoke: VERIFIED 2026-07-06.** With `vcvarsall.bat x64 10.0.26100.0` in the same shell, `npm run tauri dev` started Vite on `http://localhost:5173`, launched `target\debug\ytm-free.exe` with responding window title `YTM Free`, and started the Axum stream server on `127.0.0.1:3456`. Evidence: `curl.exe -i http://localhost:3456/health` → `HTTP/1.1 200 OK` / `OK`; `curl.exe -I http://localhost:5173/` → `HTTP/1.1 200 OK`; `Get-NetTCPConnection` showed listeners on 5173 and 3456. This verifies startup only.
 
-**Step 2B — full non-destructive app flow: still pending.** Next controlled runtime session should exercise the smallest safe user flow without downloading or modifying personal data unless explicitly approved:
+**Step 2B — minimal non-destructive app flow: ATTEMPTED 2026-07-06, currently FAIL-E2E.** A controlled runtime session re-verified startup and then exercised the first read-only stream probe through the app's local server. Search discovery itself was reachable through `yt-dlp --dump-json --flat-playlist "ytsearch10:test"`, but the local app route failed for sampled IDs: `curl.exe -i http://localhost:3456/stream/YXZH-eBtmqQ` and `curl.exe -i http://localhost:3456/stream/sF80I-TQiW0` both returned `HTTP/1.1 500 Internal Server Error` with `Failed to get audio: Failed to execute yt-dlp: ERROR: [youtube] ... Requested format is not available`. Runtime logs tie this to `src-tauri/src/server.rs` calling `ytdlp::get_audio_url` in `src-tauri/src/ytdlp.rs`. No download/import/delete/mutation flow was run.
+
+**Next Step 2B pass criteria:** re-run the same startup steps and get at least one harmless search result to resolve successfully through the app's read-only stream path without HTTP 500, still without downloads or data mutation. Only after that should any doc claim a minimal user-facing runtime smoke passes.
 
 1. `npm run tauri dev` — app window opens, no panic in console.
 2. `curl http://localhost:3456/health` — stream server responds.
-3. Manual smoke: search a track → verify results and stream URL availability.
+3. Read-only smoke: search a track → verify at least one sampled result resolves through `/stream/:video_id` without 500.
 4. Later, only with explicit approval: download → add to playlist → restart app → data persisted.
 5. Optional: `./verify.sh` automates the first two checks.
 
