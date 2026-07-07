@@ -233,6 +233,15 @@ impl Database {
     }
 
     fn get_db_path() -> Result<PathBuf, DbError> {
+        // Allow overriding the app data directory for isolated runs (e.g. release
+        // runtime smoke) via the YTM_FREE_DATA_DIR environment variable. When set
+        // and non-empty, the SQLite database lives directly in that directory.
+        // When unset or empty, the default dirs::data_dir()/ytm-free path is used.
+        if let Some(dir) = std::env::var_os("YTM_FREE_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir).join("ytm-free.db"));
+            }
+        }
         let data_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("ytm-free");
@@ -1509,5 +1518,80 @@ mod tests {
         assert!(tables.contains(&"play_history".to_string()), "play_history table missing");
         assert!(tables.contains(&"ai_cache".to_string()), "ai_cache table missing");
         assert!(tables.contains(&"track_embeddings".to_string()), "track_embeddings table missing");
+    }
+
+    // -- YTM_FREE_DATA_DIR override (no real AppData touched) --
+    // One consolidated test so the process-global env var is never touched by
+    // two parallel test threads at once (avoids flakes without extra deps).
+
+    /// RAII guard that restores an environment variable on drop, even if the
+    /// test panics, so the env var can never leak into other tests.
+    struct EnvVarGuard {
+        key: String,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &str) -> Self {
+            let original = std::env::var_os(key);
+            Self { key: key.to_string(), original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_db_path_override_behavior() {
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        // 1) Unset -> default layout: <data_dir>/ytm-free/ytm-free.db
+        std::env::remove_var("YTM_FREE_DATA_DIR");
+        let default_path = Database::get_db_path().expect("default get_db_path");
+        assert_eq!(default_path.file_name().unwrap(), "ytm-free.db");
+        assert_eq!(
+            default_path.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("ytm-free"))
+        );
+
+        // 2) Set to a real temp dir -> <dir>/ytm-free.db
+        let temp = std::env::temp_dir().join(format!(
+            "ytm-free-db-override-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp);
+        let override_path = Database::get_db_path().expect("override get_db_path");
+        assert_eq!(override_path, temp.join("ytm-free.db"));
+        assert_ne!(override_path, default_path);
+
+        // 3) Empty string -> falls back to default layout
+        std::env::set_var("YTM_FREE_DATA_DIR", "");
+        let empty_path = Database::get_db_path().expect("empty-env get_db_path");
+        assert_eq!(empty_path.file_name().unwrap(), "ytm-free.db");
+        assert_eq!(
+            empty_path.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("ytm-free"))
+        );
+
+        // 4) Database::new() with override creates the DB in the override dir,
+        //    never in real AppData. The parent dir must be created by new().
+        let expected_db = temp.join("ytm-free.db");
+        // Remove the file if a prior step left it (it should not exist yet).
+        let _ = std::fs::remove_file(&expected_db);
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp);
+        assert!(!expected_db.exists(), "precondition: db file should not exist yet");
+        let db = Database::new().expect("Database::new with override");
+        let _ = db; // drop connection
+        assert!(expected_db.exists(), "db file was not created in the override dir");
+
+        // cleanup temp dir
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
