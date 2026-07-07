@@ -1335,6 +1335,31 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spotify_import::{parse_exportify_csv, scan_folder_for_csv, ImportResult, ImportStatus};
+    use sha2::{Digest, Sha256};
+    use std::sync::{Mutex, OnceLock};
+
+    fn ytm_free_data_dir_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn count_rows(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap_or_else(|err| panic!("Failed to count rows in {table}: {err}"))
+    }
+
+    fn sha256_hex(path: &std::path::Path) -> String {
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|err| panic!("Failed to read {} for hashing: {err}", path.display()));
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{:02X}", byte))
+            .collect()
+    }
 
     #[test]
     fn test_in_memory_database_creation() {
@@ -1549,6 +1574,7 @@ mod tests {
 
     #[test]
     fn test_get_db_path_override_behavior() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         // 1) Unset -> default layout: <data_dir>/ytm-free/ytm-free.db
@@ -1593,5 +1619,156 @@ mod tests {
 
         // cleanup temp dir
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_controlled_spotify_import_harness_with_temp_db_and_synthetic_csv() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_root = std::env::temp_dir();
+        let temp_data_dir = temp_root.join(format!(
+            "ytm-free-import-harness-data-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let temp_csv_dir = temp_root.join(format!(
+            "ytm-free-import-harness-csv-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
+        std::fs::create_dir_all(&temp_csv_dir).expect("Failed to create temp csv dir");
+
+        let csv_path = temp_csv_dir.join("synthetic_spotify_import.csv");
+        let csv_content = concat!(
+            "Track Name,Artist Name(s),Album Name,Duration (ms),Spotify ID\n",
+            "Synthetic Song One,Synthetic Artist,Test Album,123000,spotify:track:synthetic001\n",
+            "Synthetic Song Two,Second Synthetic Artist,Test Album Two,245000,spotify:track:synthetic002\n"
+        );
+        std::fs::write(&csv_path, csv_content).expect("Failed to write synthetic csv");
+
+        let scanned_files = scan_folder_for_csv(temp_csv_dir.to_str().expect("csv dir path should be valid utf-8"))
+            .expect("Failed to scan synthetic csv dir");
+        assert_eq!(scanned_files.len(), 1, "Expected exactly one synthetic CSV file");
+        assert_eq!(scanned_files[0].track_count, 2, "Expected two rows in the synthetic CSV");
+
+        let parsed_tracks = parse_exportify_csv(csv_content).expect("Failed to parse synthetic csv content");
+        assert_eq!(parsed_tracks.len(), 2, "Expected two parsed Spotify tracks");
+
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
+        let expected_db = temp_data_dir.join("ytm-free.db");
+        assert_eq!(
+            Database::get_db_path().expect("override get_db_path"),
+            expected_db,
+            "Database path should honor YTM_FREE_DATA_DIR"
+        );
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let before_tracks = count_rows(&db.conn, "tracks");
+        let before_playlists = count_rows(&db.conn, "playlists");
+        let before_playlist_tracks = count_rows(&db.conn, "playlist_tracks");
+        assert_eq!(before_tracks, 0, "Temp DB should start with no tracks");
+        assert_eq!(before_playlists, 0, "Temp DB should start with no playlists");
+        assert_eq!(before_playlist_tracks, 0, "Temp DB should start with no playlist links");
+
+        let import_results: Vec<ImportResult> = parsed_tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| ImportResult {
+                spotify_track: track.clone(),
+                youtube_id: Some(format!("synthetic-video-{:03}", index + 1)),
+                youtube_title: Some(format!("Matched {}", track.track_name)),
+                status: ImportStatus::Found,
+                alternatives: vec![],
+            })
+            .collect();
+
+        let playlist_description = format!("Imported from Spotify - {} tracks", import_results.len());
+        let playlist = db
+            .create_playlist(&scanned_files[0].name, Some(&playlist_description))
+            .expect("Failed to create playlist for synthetic import");
+
+        // Mirror ImportView.createPlaylistWithTracks: create or reuse a playlist,
+        // upsert the matched track, set duration, and link it into the playlist.
+        for result in &import_results {
+            let youtube_id = result.youtube_id.as_deref().expect("Synthetic result should have youtube id");
+            let youtube_title = result.youtube_title.as_deref().expect("Synthetic result should have youtube title");
+            let spotify_track = &result.spotify_track;
+            let thumbnail = format!("https://i.ytimg.com/vi/{youtube_id}/mqdefault.jpg");
+
+            let added_track = db
+                .add_track(
+                    youtube_id,
+                    youtube_title,
+                    &spotify_track.artist_name,
+                    &thumbnail,
+                    None,
+                )
+                .expect("Failed to add synthetic imported track");
+
+            if let Some(duration_ms) = spotify_track.duration_ms {
+                db.update_track_duration(youtube_id, duration_ms / 1000)
+                    .expect("Failed to persist imported duration");
+            }
+
+            db.add_track_to_playlist(&playlist.id, &added_track.id)
+                .expect("Failed to link imported track to playlist");
+        }
+
+        let after_tracks = count_rows(&db.conn, "tracks");
+        let after_playlists = count_rows(&db.conn, "playlists");
+        let after_playlist_tracks = count_rows(&db.conn, "playlist_tracks");
+        assert_eq!(after_tracks, 2, "Expected two imported tracks in temp DB");
+        assert_eq!(after_playlists, 1, "Expected one imported playlist in temp DB");
+        assert_eq!(after_playlist_tracks, 2, "Expected two playlist links in temp DB");
+
+        let playlists = db.get_playlists().expect("Failed to read persisted playlists");
+        assert_eq!(playlists.len(), 1, "Expected a single persisted playlist");
+        assert_eq!(playlists[0].track_count, 2, "Persisted playlist should report two tracks");
+        assert_eq!(playlists[0].name, scanned_files[0].name);
+
+        let playlist_tracks = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read persisted playlist tracks");
+        assert_eq!(playlist_tracks.len(), 2, "Expected two persisted playlist tracks");
+        assert_eq!(playlist_tracks[0].video_id, "synthetic-video-001");
+        assert_eq!(playlist_tracks[0].title, "Matched Synthetic Song One");
+        assert_eq!(playlist_tracks[0].artist, "Synthetic Artist");
+        assert_eq!(playlist_tracks[0].duration, Some(123));
+        assert_eq!(playlist_tracks[1].video_id, "synthetic-video-002");
+        assert_eq!(playlist_tracks[1].title, "Matched Synthetic Song Two");
+        assert_eq!(playlist_tracks[1].artist, "Second Synthetic Artist");
+        assert_eq!(playlist_tracks[1].duration, Some(245));
+
+        drop(db);
+
+        let persisted = Connection::open(&expected_db).expect("Failed to reopen temp database");
+        assert_eq!(count_rows(&persisted, "tracks"), 2, "Reopened temp DB should retain two tracks");
+        assert_eq!(count_rows(&persisted, "playlists"), 1, "Reopened temp DB should retain one playlist");
+        assert_eq!(count_rows(&persisted, "playlist_tracks"), 2, "Reopened temp DB should retain two links");
+        drop(persisted);
+
+        let db_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat temp database")
+            .len();
+        let db_hash = sha256_hex(&expected_db);
+
+        println!(
+            "IMPORT_HARNESS temp_data_dir={} temp_csv_dir={} csv_path={} csv_rows=2 before_tracks={} before_playlists={} before_playlist_tracks={} after_tracks={} after_playlists={} after_playlist_tracks={} db_size={} db_sha256={}",
+            temp_data_dir.display(),
+            temp_csv_dir.display(),
+            csv_path.display(),
+            before_tracks,
+            before_playlists,
+            before_playlist_tracks,
+            after_tracks,
+            after_playlists,
+            after_playlist_tracks,
+            db_size,
+            db_hash,
+        );
+
+        std::fs::remove_dir_all(&temp_csv_dir).expect("Failed to remove temp csv dir");
+        std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
     }
 }
