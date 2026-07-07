@@ -1771,4 +1771,107 @@ mod tests {
         std::fs::remove_dir_all(&temp_csv_dir).expect("Failed to remove temp csv dir");
         std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
     }
+
+    #[test]
+    fn test_controlled_persistence_state_survives_reopen() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_data_dir = std::env::temp_dir().join(format!("ytm-free-persistence-state-harness-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
+
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
+        let expected_db = temp_data_dir.join("ytm-free.db");
+        assert_eq!(
+            Database::get_db_path().expect("override get_db_path"),
+            expected_db,
+            "Database path should honor YTM_FREE_DATA_DIR"
+        );
+
+        // --- Instance #1: seed synthetic state in the temp DB ---
+        let db = Database::new().expect("Failed to create first temp database");
+        assert_eq!(count_rows(&db.conn, "tracks"), 0, "Temp DB should start empty of tracks");
+        assert_eq!(count_rows(&db.conn, "playlists"), 0, "Temp DB should start empty of playlists");
+        assert_eq!(count_rows(&db.conn, "playlist_tracks"), 0, "Temp DB should start empty of links");
+
+        let playlist = db
+            .create_playlist("Persistence Harness Playlist", Some("Synthetic two-track playlist for reopen persistence"))
+            .expect("Failed to create synthetic playlist");
+
+        let synthetic = [
+            ("persist-video-001", "Persist Song One", "Persist Artist One", 123i64),
+            ("persist-video-002", "Persist Song Two", "Persist Artist Two", 245i64),
+        ];
+        for (video_id, title, artist, duration) in synthetic {
+            let thumbnail = format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg");
+            let added = db
+                .add_track(video_id, title, artist, &thumbnail, None)
+                .expect("Failed to add synthetic track");
+            db.update_track_duration(video_id, duration)
+                .expect("Failed to persist synthetic duration");
+            db.add_track_to_playlist(&playlist.id, &added.id)
+                .expect("Failed to link synthetic track to playlist");
+        }
+
+        let seeded_tracks = count_rows(&db.conn, "tracks");
+        let seeded_playlists = count_rows(&db.conn, "playlists");
+        let seeded_links = count_rows(&db.conn, "playlist_tracks");
+        assert_eq!(seeded_tracks, 2, "Expected two seeded tracks");
+        assert_eq!(seeded_playlists, 1, "Expected one seeded playlist");
+        assert_eq!(seeded_links, 2, "Expected two playlist links");
+
+        let seeded_size = std::fs::metadata(&expected_db).expect("Failed to stat seeded db").len();
+
+        // Drop the first Database instance (closes its SQLite connection).
+        drop(db);
+
+        // --- Instance #2: reopen the SAME temp DB via Database::new(), which reruns idempotent migrations on the existing file ---
+        let db2 = Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+
+        let reopened_tracks = count_rows(&db2.conn, "tracks");
+        let reopened_playlists = count_rows(&db2.conn, "playlists");
+        let reopened_links = count_rows(&db2.conn, "playlist_tracks");
+        assert_eq!(reopened_tracks, 2, "Reopened temp DB should retain two tracks");
+        assert_eq!(reopened_playlists, 1, "Reopened temp DB should retain one playlist");
+        assert_eq!(reopened_links, 2, "Reopened temp DB should retain two playlist links");
+
+        let playlists = db2.get_playlists().expect("Failed to read persisted playlists after reopen");
+        assert_eq!(playlists.len(), 1, "Expected a single persisted playlist after reopen");
+        assert_eq!(playlists[0].track_count, 2, "Persisted playlist should still report two tracks");
+        assert_eq!(playlists[0].name, "Persistence Harness Playlist");
+
+        let playlist_tracks = db2
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read persisted playlist tracks after reopen");
+        assert_eq!(playlist_tracks.len(), 2, "Expected two persisted playlist tracks after reopen");
+        assert_eq!(playlist_tracks[0].video_id, "persist-video-001");
+        assert_eq!(playlist_tracks[0].title, "Persist Song One");
+        assert_eq!(playlist_tracks[0].artist, "Persist Artist One");
+        assert_eq!(playlist_tracks[0].duration, Some(123));
+        assert_eq!(playlist_tracks[1].video_id, "persist-video-002");
+        assert_eq!(playlist_tracks[1].title, "Persist Song Two");
+        assert_eq!(playlist_tracks[1].artist, "Persist Artist Two");
+        assert_eq!(playlist_tracks[1].duration, Some(245));
+
+        let reopened_size = std::fs::metadata(&expected_db).expect("Failed to stat reopened db").len();
+        let reopened_hash = sha256_hex(&expected_db);
+
+        drop(db2);
+
+        println!(
+            "PERSISTENCE_HARNESS temp_data_dir={} before_tracks=0 before_playlists=0 before_links=0 seeded_tracks={} seeded_playlists={} seeded_links={} seeded_db_size={} reopened_tracks={} reopened_playlists={} reopened_links={} reopened_db_size={} reopened_db_sha256={}",
+            temp_data_dir.display(),
+            seeded_tracks,
+            seeded_playlists,
+            seeded_links,
+            seeded_size,
+            reopened_tracks,
+            reopened_playlists,
+            reopened_links,
+            reopened_size,
+            reopened_hash
+        );
+
+        std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
+    }
 }
