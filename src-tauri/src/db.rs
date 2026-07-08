@@ -1874,4 +1874,161 @@ mod tests {
 
         std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
     }
+
+    #[test]
+    fn test_controlled_delete_state_persists_after_reopen() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_data_dir = std::env::temp_dir().join(format!("ytm-free-delete-state-harness-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
+
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
+        let expected_db = temp_data_dir.join("ytm-free.db");
+        assert_eq!(
+            Database::get_db_path().expect("override get_db_path"),
+            expected_db,
+            "Database path should honor YTM_FREE_DATA_DIR"
+        );
+
+        let db = Database::new().expect("Failed to create temp database");
+        assert_eq!(count_rows(&db.conn, "tracks"), 0, "Temp DB should start empty of tracks");
+        assert_eq!(count_rows(&db.conn, "playlists"), 0, "Temp DB should start empty of playlists");
+        assert_eq!(count_rows(&db.conn, "playlist_tracks"), 0, "Temp DB should start empty of links");
+
+        let playlist = db
+            .create_playlist("Delete Harness Playlist", Some("Synthetic two-track playlist for deletion persistence"))
+            .expect("Failed to create synthetic playlist");
+
+        let synthetic = [
+            ("delete-video-001", "Delete Song One", "Delete Artist One", 123i64),
+            ("delete-video-002", "Delete Song Two", "Delete Artist Two", 245i64),
+        ];
+        let mut track_ids = Vec::new();
+        for (video_id, title, artist, duration) in synthetic {
+            let thumbnail = format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg");
+            let added = db
+                .add_track(video_id, title, artist, &thumbnail, None)
+                .expect("Failed to add synthetic track");
+            db.update_track_duration(video_id, duration)
+                .expect("Failed to persist synthetic duration");
+            db.add_track_to_playlist(&playlist.id, &added.id)
+                .expect("Failed to link synthetic track to playlist");
+            track_ids.push(added.id);
+        }
+
+        let seeded_tracks = count_rows(&db.conn, "tracks");
+        let seeded_playlists = count_rows(&db.conn, "playlists");
+        let seeded_links = count_rows(&db.conn, "playlist_tracks");
+        assert_eq!(seeded_tracks, 2, "Expected two seeded tracks");
+        assert_eq!(seeded_playlists, 1, "Expected one seeded playlist");
+        assert_eq!(seeded_links, 2, "Expected two playlist links");
+
+        let seeded_playlist = db.get_playlist(&playlist.id).expect("Failed to read seeded playlist");
+        assert_eq!(seeded_playlist.track_count, 2, "Seeded playlist should report two tracks");
+        let seeded_playlist_tracks = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read seeded playlist tracks");
+        assert_eq!(seeded_playlist_tracks.len(), 2, "Expected two seeded playlist tracks");
+        assert_eq!(seeded_playlist_tracks[0].video_id, "delete-video-001");
+        assert_eq!(seeded_playlist_tracks[1].video_id, "delete-video-002");
+
+        let removed_track_id = track_ids[0].clone();
+        let kept_track_id = track_ids[1].clone();
+        db.remove_track_from_playlist(&playlist.id, &removed_track_id)
+            .expect("Failed to remove synthetic track from playlist");
+
+        let after_delete_tracks = count_rows(&db.conn, "tracks");
+        let after_delete_playlists = count_rows(&db.conn, "playlists");
+        let after_delete_links = count_rows(&db.conn, "playlist_tracks");
+        assert_eq!(after_delete_tracks, 2, "Removing from playlist should not delete track rows");
+        assert_eq!(after_delete_playlists, 1, "Removing from playlist should not delete the playlist row");
+        assert_eq!(after_delete_links, 1, "Expected one playlist link after removal");
+        assert!(db.get_track_by_uuid(&removed_track_id).is_ok(), "Removed playlist member track row should remain");
+        assert!(db.get_track_by_uuid(&kept_track_id).is_ok(), "Kept playlist member track row should remain");
+
+        let after_delete_playlist = db.get_playlist(&playlist.id).expect("Failed to read playlist after removal");
+        assert_eq!(after_delete_playlist.track_count, 1, "Playlist should report one track after removal");
+        let after_delete_playlist_tracks = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read playlist tracks after removal");
+        assert_eq!(after_delete_playlist_tracks.len(), 1, "Expected one playlist track after removal");
+        assert_eq!(after_delete_playlist_tracks[0].video_id, "delete-video-002");
+        assert_eq!(after_delete_playlist_tracks[0].title, "Delete Song Two");
+        assert_eq!(after_delete_playlist_tracks[0].artist, "Delete Artist Two");
+        assert_eq!(after_delete_playlist_tracks[0].duration, Some(245));
+
+        let after_delete_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat db after removal")
+            .len();
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+        let reopened_tracks = count_rows(&db2.conn, "tracks");
+        let reopened_playlists = count_rows(&db2.conn, "playlists");
+        let reopened_links = count_rows(&db2.conn, "playlist_tracks");
+        assert_eq!(reopened_tracks, 2, "Reopened temp DB should retain two track rows");
+        assert_eq!(reopened_playlists, 1, "Reopened temp DB should retain one playlist row");
+        assert_eq!(reopened_links, 1, "Reopened temp DB should retain one playlist link");
+
+        let removed_link_count: i64 = db2
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                rusqlite::params![&playlist.id, &removed_track_id],
+                |row| row.get(0),
+            )
+            .expect("Failed to count removed playlist link after reopen");
+        assert_eq!(removed_link_count, 0, "Removed playlist link should stay absent after reopen");
+
+        let kept_link_count: i64 = db2
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                rusqlite::params![&playlist.id, &kept_track_id],
+                |row| row.get(0),
+            )
+            .expect("Failed to count kept playlist link after reopen");
+        assert_eq!(kept_link_count, 1, "Kept playlist link should remain after reopen");
+
+        let reopened_playlist = db2.get_playlist(&playlist.id).expect("Failed to read playlist after reopen");
+        assert_eq!(reopened_playlist.track_count, 1, "Reopened playlist should report one track");
+        let reopened_playlist_tracks = db2
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read playlist tracks after reopen");
+        assert_eq!(reopened_playlist_tracks.len(), 1, "Expected one playlist track after reopen");
+        assert_eq!(reopened_playlist_tracks[0].video_id, "delete-video-002");
+        assert_eq!(reopened_playlist_tracks[0].title, "Delete Song Two");
+        assert_eq!(reopened_playlist_tracks[0].artist, "Delete Artist Two");
+        assert_eq!(reopened_playlist_tracks[0].duration, Some(245));
+        assert!(db2.get_track_by_uuid(&removed_track_id).is_ok(), "Removed playlist member track row should remain after reopen");
+        assert!(db2.get_track_by_uuid(&kept_track_id).is_ok(), "Kept playlist member track row should remain after reopen");
+
+        let reopened_size = std::fs::metadata(&expected_db).expect("Failed to stat reopened db").len();
+        let reopened_hash = sha256_hex(&expected_db);
+
+        drop(db2);
+
+        println!(
+            "DELETE_HARNESS temp_data_dir={} before_tracks=0 before_playlists=0 before_links=0 seeded_tracks={} seeded_playlists={} seeded_links={} after_delete_tracks={} after_delete_playlists={} after_delete_links={} after_delete_db_size={} reopened_tracks={} reopened_playlists={} reopened_links={} removed_link_count={} kept_link_count={} reopened_db_size={} reopened_db_sha256={}",
+            temp_data_dir.display(),
+            seeded_tracks,
+            seeded_playlists,
+            seeded_links,
+            after_delete_tracks,
+            after_delete_playlists,
+            after_delete_links,
+            after_delete_size,
+            reopened_tracks,
+            reopened_playlists,
+            reopened_links,
+            removed_link_count,
+            kept_link_count,
+            reopened_size,
+            reopened_hash
+        );
+
+        std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
+    }
 }
