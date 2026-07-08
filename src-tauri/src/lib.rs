@@ -1742,6 +1742,43 @@ fn semantic_clear_index_db_helper(db: &Database) -> Result<(), String> {
     db.clear_embeddings().map_err(|e| e.to_string())
 }
 
+fn semantic_search_with_embedding_db_helper(
+    db: &Database,
+    query_embedding: &[f32],
+    limit: Option<i32>,
+) -> Result<Vec<SemanticSearchResult>, String> {
+    let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(20) as usize;
+
+    let mut scored: Vec<(String, f64)> = embeddings
+        .iter()
+        .map(|emb| {
+            let similarity = cosine_similarity(query_embedding, &emb.embedding);
+            (emb.track_id.clone(), similarity)
+        })
+        .collect();
+
+    scored.retain(|(_id, sim)| *sim > 0.3);
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+
+    let mut results = Vec::new();
+    for (track_id, similarity) in scored {
+        if let Ok(track) = db.get_track_by_uuid(&track_id) {
+            results.push(SemanticSearchResult {
+                track,
+                similarity,
+                match_reason: format!("Semantic match {:.0}%", similarity * 100.0),
+            });
+        }
+    }
+
+    Ok(results)
+}
+
 /// Index single track with embedding
 #[tauri::command]
 async fn semantic_index_track(
@@ -1887,36 +1924,7 @@ async fn semantic_search(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get all embeddings
-    let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
-    let limit = limit.unwrap_or(20) as usize;
-
-    let mut scored: Vec<(String, f64)> = embeddings
-        .iter()
-        .map(|emb| {
-            let similarity = cosine_similarity(&query_embedding, &emb.embedding);
-            (emb.track_id.clone(), similarity)
-        })
-        .collect();
-
-    // Filter threshold (0.3) and sort
-    scored.retain(|(_id, sim)| *sim > 0.3);
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
-
-    // Build results with track data
-    let mut results = Vec::new();
-    for (track_id, similarity) in scored {
-        if let Ok(track) = db.get_track_by_uuid(&track_id) {
-            results.push(SemanticSearchResult {
-                track,
-                similarity,
-                match_reason: format!("Semantic match {:.0}%", similarity * 100.0),
-            });
-        }
-    }
-
-    Ok(results)
+    semantic_search_with_embedding_db_helper(&db, &query_embedding, limit)
 }
 
 /// Get semantic index status
@@ -2011,7 +2019,10 @@ async fn semantic_search_filtered(
             });
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
         scored.truncate(limit);
         scored
     };
@@ -2065,7 +2076,10 @@ async fn create_semantic_playlist(
 
     // Filter and sort
     scored.retain(|(_id, sim)| *sim > 0.3);
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(50); // Max 50 songs per semantic playlist
 
     let track_count = scored.len() as i64;
@@ -3838,6 +3852,141 @@ mod tests {
             untagged_count,
             semantic_before.indexed_tracks,
             semantic_after.indexed_tracks,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_search_stub_uses_temp_db_embeddings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-search-stub-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let query_embedding = vec![1.0_f32, 0.0, 0.0];
+        let db = Database::new().expect("Failed to create temp database");
+        let near_track = db
+            .add_track(
+                "semantic-stub-video-001",
+                "Semantic Stub Song Near",
+                "Semantic Stub Artist Near",
+                "https://i.ytimg.com/vi/semantic-stub-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add near synthetic track");
+        let medium_track = db
+            .add_track(
+                "semantic-stub-video-002",
+                "Semantic Stub Song Medium",
+                "Semantic Stub Artist Medium",
+                "https://i.ytimg.com/vi/semantic-stub-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add medium synthetic track");
+        let far_track = db
+            .add_track(
+                "semantic-stub-video-003",
+                "Semantic Stub Song Far",
+                "Semantic Stub Artist Far",
+                "https://i.ytimg.com/vi/semantic-stub-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add far synthetic track");
+        let no_embedding_track = db
+            .add_track(
+                "semantic-stub-video-no-embedding",
+                "Semantic Stub Song No Embedding",
+                "Semantic Stub Artist No Embedding",
+                "https://i.ytimg.com/vi/semantic-stub-video-no-embedding/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add no-embedding synthetic track");
+
+        db.save_embedding(
+            &near_track.id,
+            &[1.0, 0.0, 0.0],
+            "Semantic Stub Song Near by Semantic Stub Artist Near",
+            "synthetic-semantic-stub-model",
+            3,
+        )
+        .expect("Failed to save near synthetic embedding");
+        db.save_embedding(
+            &medium_track.id,
+            &[0.8, 0.6, 0.0],
+            "Semantic Stub Song Medium by Semantic Stub Artist Medium",
+            "synthetic-semantic-stub-model",
+            3,
+        )
+        .expect("Failed to save medium synthetic embedding");
+        db.save_embedding(
+            &far_track.id,
+            &[0.4, 0.9165, 0.0],
+            "Semantic Stub Song Far by Semantic Stub Artist Far",
+            "synthetic-semantic-stub-model",
+            3,
+        )
+        .expect("Failed to save far synthetic embedding");
+
+        let limited_results =
+            semantic_search_with_embedding_db_helper(&db, &query_embedding, Some(2))
+                .expect("Failed to run semantic search helper with limit");
+        assert_eq!(limited_results.len(), 2, "Limit should be respected");
+        assert_eq!(limited_results[0].track.video_id, "semantic-stub-video-001");
+        assert_eq!(limited_results[1].track.video_id, "semantic-stub-video-002");
+        assert!(limited_results[0].similarity > limited_results[1].similarity);
+        assert!(!limited_results
+            .iter()
+            .any(|result| result.track.id == no_embedding_track.id));
+
+        let full_results =
+            semantic_search_with_embedding_db_helper(&db, &query_embedding, Some(10))
+                .expect("Failed to run semantic search helper without truncation");
+        assert_eq!(
+            full_results.len(),
+            3,
+            "All embedded tracks should be returned"
+        );
+        assert_eq!(full_results[0].track.video_id, "semantic-stub-video-001");
+        assert_eq!(full_results[1].track.video_id, "semantic-stub-video-002");
+        assert_eq!(full_results[2].track.video_id, "semantic-stub-video-003");
+        assert!(full_results[1].similarity > full_results[2].similarity);
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_results =
+            semantic_search_with_embedding_db_helper(&db2, &query_embedding, Some(10))
+                .expect("Failed to run semantic search helper after reopen");
+        assert_eq!(reopened_results.len(), 3);
+        assert_eq!(
+            reopened_results[0].track.video_id,
+            "semantic-stub-video-001"
+        );
+        assert_eq!(
+            reopened_results[1].track.video_id,
+            "semantic-stub-video-002"
+        );
+        assert_eq!(
+            reopened_results[2].track.video_id,
+            "semantic-stub-video-003"
+        );
+        assert!(!reopened_results
+            .iter()
+            .any(|result| result.track.id == no_embedding_track.id));
+        drop(db2);
+
+        println!(
+            "SEMANTIC_SEARCH_STUB_HARNESS results={} top={} limit={} temp_dir={}",
+            reopened_results.len(),
+            reopened_results[0].track.video_id,
+            2,
             temp_dir.display()
         );
 
