@@ -3656,16 +3656,14 @@ mod tests {
         assert!(db2.get_track_by_uuid(&track_a.id).is_ok());
         assert!(db2.get_track_by_uuid(&track_b.id).is_err());
         assert!(db2.get_track_metadata(&track_b.id).is_err());
-        assert!(
-            db2.get_playlist_tracks(&playlist.id)
-                .expect("Failed to read reopened playlist tracks")
-                .is_empty()
-        );
-        assert!(
-            db2.get_play_history(1, 10)
-                .expect("Failed to read reopened play history")
-                .is_empty()
-        );
+        assert!(db2
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read reopened playlist tracks")
+            .is_empty());
+        assert!(db2
+            .get_play_history(1, 10)
+            .expect("Failed to read reopened play history")
+            .is_empty());
         drop(db2);
 
         println!(
