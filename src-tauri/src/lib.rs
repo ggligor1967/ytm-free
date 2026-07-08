@@ -1779,6 +1779,68 @@ fn semantic_search_with_embedding_db_helper(
     Ok(results)
 }
 
+fn semantic_search_filtered_with_embedding_db_helper(
+    db: &Database,
+    query_embedding: &[f32],
+    limit: Option<i32>,
+    genres: Option<Vec<String>>,
+    moods: Option<Vec<String>>,
+    activities: Option<Vec<String>>,
+) -> Result<Vec<SemanticSearchResult>, String> {
+    let _ = activities;
+    let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(20) as usize;
+
+    let mut scored: Vec<(String, f32)> = embeddings
+        .iter()
+        .map(|emb| {
+            let similarity = cosine_similarity(query_embedding, &emb.embedding) as f32;
+            (emb.track_id.clone(), similarity)
+        })
+        .collect();
+
+    if let Some(g) = &genres {
+        scored.retain(|(track_id, _)| {
+            if let Ok(metadata) = db.get_track_metadata(track_id) {
+                if let Some(genre) = &metadata.genre {
+                    return g.contains(genre);
+                }
+            }
+            true
+        });
+    }
+
+    if let Some(m) = &moods {
+        scored.retain(|(track_id, _)| {
+            if let Ok(metadata) = db.get_track_metadata(track_id) {
+                if let Some(mood) = &metadata.mood {
+                    return m.contains(mood);
+                }
+            }
+            true
+        });
+    }
+
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+
+    let mut results = Vec::new();
+    for (track_id, similarity) in scored {
+        if let Ok(track) = db.get_track_by_uuid(&track_id) {
+            results.push(SemanticSearchResult {
+                track,
+                similarity: similarity as f64,
+                match_reason: format!("Semantic match {:.0}%", similarity * 100.0),
+            });
+        }
+    }
+
+    Ok(results)
+}
+
 /// Index single track with embedding
 #[tauri::command]
 async fn semantic_index_track(
@@ -1968,11 +2030,10 @@ async fn semantic_search_filtered(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Create filter
     let filter = SemanticSearchFilter {
-        genres,
-        moods,
-        activities,
+        genres: genres.clone(),
+        moods: moods.clone(),
+        activities: activities.clone(),
         min_similarity: Some(0.3),
     };
 
@@ -1984,47 +2045,14 @@ async fn semantic_search_filtered(
         ann.search_filtered(&query_embedding, limit, &filter)
     } else {
         drop(ann); // Release lock
-        // Fall back to brute force cosine similarity
-        let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
-        
-        let mut scored: Vec<(String, f32)> = embeddings
-            .iter()
-            .map(|emb| {
-                let similarity = cosine_similarity(&query_embedding, &emb.embedding) as f32;
-                (emb.track_id.clone(), similarity)
-            })
-            .collect();
-
-        // Apply filtering
-        if let Some(g) = &filter.genres {
-            scored.retain(|(track_id, _)| {
-                if let Ok(metadata) = db.get_track_metadata(track_id) {
-                    if let Some(genre) = &metadata.genre {
-                        return g.contains(&genre);
-                    }
-                }
-                true
-            });
-        }
-
-        // Similar filtering for moods and activities
-        if let Some(m) = &filter.moods {
-            scored.retain(|(track_id, _)| {
-                if let Ok(metadata) = db.get_track_metadata(track_id) {
-                    if let Some(mood) = &metadata.mood {
-                        return m.contains(&mood);
-                    }
-                }
-                true
-            });
-        }
-
-        scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-        scored.truncate(limit);
-        scored
+        return semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(limit as i32),
+            genres,
+            moods,
+            activities,
+        );
     };
 
     // Build results with track data
@@ -3987,6 +4015,221 @@ mod tests {
             reopened_results.len(),
             reopened_results[0].track.video_id,
             2,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_filtered_search_stub_uses_temp_db_embeddings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-filtered-stub-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let query_embedding = vec![1.0_f32, 0.0, 0.0];
+        let db = Database::new().expect("Failed to create temp database");
+        let near_rock_happy = db
+            .add_track(
+                "semantic-filtered-video-001",
+                "Semantic Filtered Song Near Rock Happy",
+                "Semantic Filtered Artist One",
+                "https://i.ytimg.com/vi/semantic-filtered-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add near rock happy synthetic track");
+        let medium_rock_calm = db
+            .add_track(
+                "semantic-filtered-video-002",
+                "Semantic Filtered Song Medium Rock Calm",
+                "Semantic Filtered Artist Two",
+                "https://i.ytimg.com/vi/semantic-filtered-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add medium rock calm synthetic track");
+        let far_jazz_happy = db
+            .add_track(
+                "semantic-filtered-video-003",
+                "Semantic Filtered Song Far Jazz Happy",
+                "Semantic Filtered Artist Three",
+                "https://i.ytimg.com/vi/semantic-filtered-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add far jazz happy synthetic track");
+        let no_embedding_rock_happy = db
+            .add_track(
+                "semantic-filtered-video-004",
+                "Semantic Filtered Song No Embedding",
+                "Semantic Filtered Artist Four",
+                "https://i.ytimg.com/vi/semantic-filtered-video-004/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add no-embedding synthetic track");
+
+        let save_metadata = |track_id: &str, genre: &str, mood: &str| {
+            let metadata = crate::ollama::TrackMetadataAI {
+                genre: genre.to_string(),
+                sub_genre: None,
+                mood: mood.to_string(),
+                energy_level: 5,
+                tempo: "medium".to_string(),
+                danceability: 5,
+                vocal_type: "mixed vocals".to_string(),
+                decade: "2020s".to_string(),
+                language: "English".to_string(),
+                activity_tags: vec!["not-validated-in-db-fallback".to_string()],
+                occasion_tags: vec![],
+                keywords: vec![genre.to_string(), mood.to_string()],
+            };
+            db.save_track_metadata(track_id, &metadata, "synthetic-semantic-filtered-harness")
+                .expect("Failed to save synthetic metadata");
+        };
+        save_metadata(&near_rock_happy.id, "rock", "happy");
+        save_metadata(&medium_rock_calm.id, "rock", "calm");
+        save_metadata(&far_jazz_happy.id, "jazz", "happy");
+        save_metadata(&no_embedding_rock_happy.id, "rock", "happy");
+
+        db.save_embedding(
+            &near_rock_happy.id,
+            &[1.0, 0.0, 0.0],
+            "Semantic Filtered Song Near Rock Happy by Semantic Filtered Artist One",
+            "synthetic-semantic-filtered-model",
+            3,
+        )
+        .expect("Failed to save near synthetic embedding");
+        db.save_embedding(
+            &medium_rock_calm.id,
+            &[0.8, 0.6, 0.0],
+            "Semantic Filtered Song Medium Rock Calm by Semantic Filtered Artist Two",
+            "synthetic-semantic-filtered-model",
+            3,
+        )
+        .expect("Failed to save medium synthetic embedding");
+        db.save_embedding(
+            &far_jazz_happy.id,
+            &[0.4, 0.9165, 0.0],
+            "Semantic Filtered Song Far Jazz Happy by Semantic Filtered Artist Three",
+            "synthetic-semantic-filtered-model",
+            3,
+        )
+        .expect("Failed to save far synthetic embedding");
+
+        let all_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            None,
+            None,
+        )
+        .expect("Failed to run filtered semantic helper without filters");
+        assert_eq!(all_results.len(), 3);
+        assert_eq!(all_results[0].track.video_id, "semantic-filtered-video-001");
+        assert_eq!(all_results[1].track.video_id, "semantic-filtered-video-002");
+        assert_eq!(all_results[2].track.video_id, "semantic-filtered-video-003");
+        assert!(!all_results
+            .iter()
+            .any(|result| result.track.id == no_embedding_rock_happy.id));
+
+        let genre_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            Some(vec!["rock".to_string()]),
+            None,
+            None,
+        )
+        .expect("Failed to run filtered semantic helper with genre filter");
+        let genre_ids: Vec<&str> = genre_results
+            .iter()
+            .map(|result| result.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            genre_ids,
+            vec!["semantic-filtered-video-001", "semantic-filtered-video-002"]
+        );
+
+        let mood_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            Some(vec!["happy".to_string()]),
+            None,
+        )
+        .expect("Failed to run filtered semantic helper with mood filter");
+        let mood_ids: Vec<&str> = mood_results
+            .iter()
+            .map(|result| result.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            mood_ids,
+            vec!["semantic-filtered-video-001", "semantic-filtered-video-003"]
+        );
+
+        let combined_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            Some(vec!["rock".to_string()]),
+            Some(vec!["happy".to_string()]),
+            None,
+        )
+        .expect("Failed to run filtered semantic helper with combined filters");
+        assert_eq!(combined_results.len(), 1);
+        assert_eq!(
+            combined_results[0].track.video_id,
+            "semantic-filtered-video-001"
+        );
+
+        let limited_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(1),
+            Some(vec!["rock".to_string()]),
+            None,
+            None,
+        )
+        .expect("Failed to run filtered semantic helper with limit");
+        assert_eq!(limited_results.len(), 1);
+        assert_eq!(
+            limited_results[0].track.video_id,
+            "semantic-filtered-video-001"
+        );
+        // Existing DB fallback applies genre and mood only; activities/min_similarity remain unverified here.
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_results = semantic_search_filtered_with_embedding_db_helper(
+            &db2,
+            &query_embedding,
+            Some(10),
+            Some(vec!["rock".to_string()]),
+            Some(vec!["happy".to_string()]),
+            None,
+        )
+        .expect("Failed to run filtered semantic helper after reopen");
+        assert_eq!(reopened_results.len(), 1);
+        assert_eq!(
+            reopened_results[0].track.video_id,
+            "semantic-filtered-video-001"
+        );
+        drop(db2);
+
+        println!(
+            "SEMANTIC_FILTERED_STUB_HARNESS results={} top={} genre_filtered={} mood_filtered={} combined_filtered={} temp_dir={}",
+            all_results.len(),
+            all_results[0].track.video_id,
+            genre_results.len(),
+            mood_results.len(),
+            reopened_results.len(),
             temp_dir.display()
         );
 
