@@ -764,18 +764,29 @@ async fn ollama_resolve_vague_query(
 // ============================================================================ // Ollama Auto-Tagging (FAZA 2)
 // ============================================================================
 
+fn ollama_get_track_metadata_db_helper(
+    db: &Database,
+    track_id: &str,
+) -> Result<Option<TrackMetadataDB>, String> {
+    match db.get_track_metadata(track_id) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn ollama_get_untagged_count_db_helper(db: &Database) -> Result<usize, String> {
+    db.get_unanalyzed_tracks()
+        .map(|tracks| tracks.len())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn ollama_get_track_metadata(
     state: State<'_, AppState>,
     track_id: String,
 ) -> Result<Option<TrackMetadataDB>, String> {
     let db = state.db.lock().await;
-    
-    // Try to get cached metadata
-    match db.get_track_metadata(&track_id) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(_) => Ok(None),
-    }
+    ollama_get_track_metadata_db_helper(&db, &track_id)
 }
 
 #[tauri::command]
@@ -783,10 +794,7 @@ async fn ollama_get_untagged_count(
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
     let db = state.db.lock().await;
-    
-    db.get_unanalyzed_tracks()
-        .map(|tracks| tracks.len())
-        .map_err(|e| e.to_string())
+    ollama_get_untagged_count_db_helper(&db)
 }
 
 #[tauri::command]
@@ -1717,6 +1725,23 @@ fn build_track_text(track: &Track, metadata: Option<&TrackMetadataDB>) -> String
     parts.join(". ")
 }
 
+fn get_semantic_status_db_helper(db: &Database) -> Result<SemanticIndexStatus, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    let total = db.get_all_tracks().map_err(|e| e.to_string())?.len() as i64;
+    let indexed = db.count_embeddings().map_err(|e| e.to_string())?;
+
+    Ok(SemanticIndexStatus {
+        total_tracks: total,
+        indexed_tracks: indexed,
+        model_used: settings.embedding_model,
+        is_indexing: false,
+    })
+}
+
+fn semantic_clear_index_db_helper(db: &Database) -> Result<(), String> {
+    db.clear_embeddings().map_err(|e| e.to_string())
+}
+
 /// Index single track with embedding
 #[tauri::command]
 async fn semantic_index_track(
@@ -1900,23 +1925,14 @@ async fn get_semantic_status(
     state: State<'_, AppState>,
 ) -> Result<SemanticIndexStatus, String> {
     let db = state.db.lock().await;
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
-    let total = db.get_all_tracks().map_err(|e| e.to_string())?.len() as i64;
-    let indexed = db.count_embeddings().map_err(|e| e.to_string())?;
-
-    Ok(SemanticIndexStatus {
-        total_tracks: total,
-        indexed_tracks: indexed,
-        model_used: settings.embedding_model,
-        is_indexing: false,
-    })
+    get_semantic_status_db_helper(&db)
 }
 
 /// Clear all semantic embeddings
 #[tauri::command]
 async fn semantic_clear_index(state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().await;
-    db.clear_embeddings().map_err(|e| e.to_string())
+    semantic_clear_index_db_helper(&db)
 }
 
 /// Semantic search with metadata filtering (genres, moods, activities)
@@ -3672,6 +3688,156 @@ mod tests {
             track_a.id,
             track_b.id,
             delete_playlist_link_count,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_ai_semantic_db_cache_helpers_with_temp_database() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-ai-semantic-db-cache-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let track_a = db
+            .add_track(
+                "ai-cache-video-001",
+                "AI Cache Harness Song One",
+                "AI Cache Harness Artist One",
+                "https://i.ytimg.com/vi/ai-cache-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track A");
+        let track_b = db
+            .add_track(
+                "ai-cache-video-002",
+                "AI Cache Harness Song Two",
+                "AI Cache Harness Artist Two",
+                "https://i.ytimg.com/vi/ai-cache-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track B");
+
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "synthetic-cache".to_string(),
+            sub_genre: Some("harness".to_string()),
+            mood: "focused".to_string(),
+            energy_level: 6,
+            tempo: "medium".to_string(),
+            danceability: 5,
+            vocal_type: "instrumental".to_string(),
+            decade: "2020s".to_string(),
+            language: "Instrumental".to_string(),
+            activity_tags: vec!["coding".to_string(), "verification".to_string()],
+            occasion_tags: vec!["test".to_string()],
+            keywords: vec!["ai-cache".to_string(), "semantic".to_string()],
+        };
+        db.save_track_metadata(&track_a.id, &metadata, "synthetic-ai-cache-harness")
+            .expect("Failed to save synthetic metadata");
+
+        db.save_embedding(
+            &track_a.id,
+            &[0.10, 0.20, 0.30, 0.40],
+            "AI Cache Harness Song One by AI Cache Harness Artist One",
+            "synthetic-embedding-model",
+            4,
+        )
+        .expect("Failed to save synthetic embedding A");
+        db.save_embedding(
+            &track_b.id,
+            &[0.40, 0.30, 0.20, 0.10],
+            "AI Cache Harness Song Two by AI Cache Harness Artist Two",
+            "synthetic-embedding-model",
+            4,
+        )
+        .expect("Failed to save synthetic embedding B");
+
+        let metadata_result = ollama_get_track_metadata_db_helper(&db, &track_a.id)
+            .expect("Failed to read metadata through DB helper")
+            .expect("Synthetic metadata should exist");
+        assert_eq!(metadata_result.track_id, track_a.id);
+        assert_eq!(metadata_result.genre.as_deref(), Some("synthetic-cache"));
+        assert_eq!(metadata_result.mood.as_deref(), Some("focused"));
+        assert_eq!(
+            metadata_result.model_used.as_deref(),
+            Some("synthetic-ai-cache-harness")
+        );
+        assert!(
+            ollama_get_track_metadata_db_helper(&db, &track_b.id)
+                .expect("Failed to read missing metadata through DB helper")
+                .is_none(),
+            "Track B should remain untagged"
+        );
+
+        let untagged_count = ollama_get_untagged_count_db_helper(&db)
+            .expect("Failed to read untagged count through DB helper");
+        assert_eq!(untagged_count, 1, "Only track B should be untagged");
+
+        let semantic_before = get_semantic_status_db_helper(&db)
+            .expect("Failed to read semantic status before clear");
+        assert_eq!(semantic_before.total_tracks, 2);
+        assert_eq!(semantic_before.indexed_tracks, 2);
+        assert_eq!(semantic_before.model_used, "all-minilm");
+        assert!(!semantic_before.is_indexing);
+
+        semantic_clear_index_db_helper(&db).expect("Failed to clear semantic embeddings");
+        let semantic_after =
+            get_semantic_status_db_helper(&db).expect("Failed to read semantic status after clear");
+        assert_eq!(semantic_after.total_tracks, 2);
+        assert_eq!(semantic_after.indexed_tracks, 0);
+        assert_eq!(semantic_after.model_used, "all-minilm");
+
+        assert!(
+            db.get_embedding(&track_a.id)
+                .expect("Failed to read embedding A after clear")
+                .is_none(),
+            "Semantic clear should remove embedding A"
+        );
+        assert!(
+            db.get_embedding(&track_b.id)
+                .expect("Failed to read embedding B after clear")
+                .is_none(),
+            "Semantic clear should remove embedding B"
+        );
+        assert!(db.get_track_by_uuid(&track_a.id).is_ok());
+        assert!(db.get_track_by_uuid(&track_b.id).is_ok());
+        assert!(db.get_track_metadata(&track_a.id).is_ok());
+        assert!(db.get_track_metadata(&track_b.id).is_err());
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_metadata = ollama_get_track_metadata_db_helper(&db2, &track_a.id)
+            .expect("Failed to read reopened metadata through DB helper")
+            .expect("Reopened synthetic metadata should exist");
+        assert_eq!(reopened_metadata.genre.as_deref(), Some("synthetic-cache"));
+        assert_eq!(
+            ollama_get_untagged_count_db_helper(&db2)
+                .expect("Failed to read reopened untagged count"),
+            1
+        );
+        let reopened_status =
+            get_semantic_status_db_helper(&db2).expect("Failed to read reopened semantic status");
+        assert_eq!(reopened_status.total_tracks, 2);
+        assert_eq!(reopened_status.indexed_tracks, 0);
+        assert!(db2.get_track_by_uuid(&track_a.id).is_ok());
+        assert!(db2.get_track_by_uuid(&track_b.id).is_ok());
+        drop(db2);
+
+        println!(
+            "AI_SEMANTIC_DB_CACHE_HARNESS tracks={} untagged_count={} semantic_before={} semantic_after={} temp_dir={}",
+            2,
+            untagged_count,
+            semantic_before.indexed_tracks,
+            semantic_after.indexed_tracks,
             temp_dir.display()
         );
 
