@@ -2031,4 +2031,215 @@ mod tests {
 
         std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
     }
+
+    #[test]
+    fn test_controlled_search_state_filters_persist_after_reopen() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_data_dir = std::env::temp_dir().join(format!(
+            "ytm-free-search-state-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
+
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
+        let expected_db = temp_data_dir.join("ytm-free.db");
+        assert_eq!(
+            Database::get_db_path().expect("override get_db_path"),
+            expected_db,
+            "Database path should honor YTM_FREE_DATA_DIR"
+        );
+
+        let db = Database::new().expect("Failed to create temp database");
+        assert_eq!(
+            count_rows(&db.conn, "tracks"),
+            0,
+            "Temp DB should start empty of tracks"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "track_metadata"),
+            0,
+            "Temp DB should start empty of metadata"
+        );
+
+        let synthetic = [
+            (
+                "search-video-001",
+                "Search Song One",
+                "Search Artist One",
+                "synthwave",
+                "focus",
+                8u8,
+            ),
+            (
+                "search-video-002",
+                "Search Song Two",
+                "Search Artist Two",
+                "ambient",
+                "calm",
+                3u8,
+            ),
+            (
+                "search-video-003",
+                "Search Song Three",
+                "Search Artist Three",
+                "synthwave",
+                "calm",
+                6u8,
+            ),
+        ];
+        for (video_id, title, artist, genre, mood, energy) in synthetic {
+            let thumbnail = format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg");
+            let added = db
+                .add_track(video_id, title, artist, &thumbnail, None)
+                .expect("Failed to add synthetic track");
+            let metadata = crate::ollama::TrackMetadataAI {
+                genre: genre.to_string(),
+                sub_genre: None,
+                mood: mood.to_string(),
+                energy_level: energy,
+                tempo: "medium".to_string(),
+                danceability: 5,
+                vocal_type: "instrumental".to_string(),
+                decade: "2020s".to_string(),
+                language: "Instrumental".to_string(),
+                activity_tags: vec!["test".to_string()],
+                occasion_tags: vec!["harness".to_string()],
+                keywords: vec![genre.to_string(), mood.to_string()],
+            };
+            db.save_track_metadata(&added.id, &metadata, "synthetic-search-harness")
+                .expect("Failed to save synthetic metadata");
+        }
+
+        let seeded_tracks = count_rows(&db.conn, "tracks");
+        let seeded_metadata = count_rows(&db.conn, "track_metadata");
+        assert_eq!(seeded_tracks, 3, "Expected three seeded tracks");
+        assert_eq!(seeded_metadata, 3, "Expected three metadata rows");
+
+        let video_ids = |tracks: Vec<Track>| -> Vec<String> {
+            let mut ids: Vec<String> = tracks.into_iter().map(|track| track.video_id).collect();
+            ids.sort();
+            ids
+        };
+
+        let synthwave_ids = video_ids(
+            db.get_tracks_by_genre("synthwave")
+                .expect("Failed genre filter"),
+        );
+        assert_eq!(
+            synthwave_ids,
+            vec![
+                "search-video-001".to_string(),
+                "search-video-003".to_string()
+            ],
+        );
+
+        let focus_ids = video_ids(db.get_tracks_by_mood("focus").expect("Failed mood filter"));
+        assert_eq!(focus_ids, vec!["search-video-001".to_string()]);
+
+        let high_energy = db
+            .get_tracks_by_energy_range(5, 10)
+            .expect("Failed energy range filter");
+        assert_eq!(high_energy.len(), 2, "Expected two high-energy tracks");
+        assert_eq!(
+            high_energy[0].video_id, "search-video-001",
+            "Energy filter should order by energy descending"
+        );
+        assert_eq!(
+            high_energy[1].video_id, "search-video-003",
+            "Energy filter should order by energy descending"
+        );
+
+        let missing_genre = db
+            .get_tracks_by_genre("metal")
+            .expect("Failed missing genre filter");
+        assert!(
+            missing_genre.is_empty(),
+            "Unexpected results for absent exact genre"
+        );
+
+        let seeded_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat seeded db")
+            .len();
+
+        drop(db);
+
+        let db2 = Database::new()
+            .expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+        let reopened_tracks = count_rows(&db2.conn, "tracks");
+        let reopened_metadata = count_rows(&db2.conn, "track_metadata");
+        assert_eq!(
+            reopened_tracks, 3,
+            "Reopened temp DB should retain three tracks"
+        );
+        assert_eq!(
+            reopened_metadata, 3,
+            "Reopened temp DB should retain three metadata rows"
+        );
+
+        let reopened_synthwave_ids = video_ids(
+            db2.get_tracks_by_genre("synthwave")
+                .expect("Failed reopened genre filter"),
+        );
+        assert_eq!(
+            reopened_synthwave_ids,
+            vec![
+                "search-video-001".to_string(),
+                "search-video-003".to_string()
+            ],
+        );
+
+        let reopened_focus_ids = video_ids(
+            db2.get_tracks_by_mood("focus")
+                .expect("Failed reopened mood filter"),
+        );
+        assert_eq!(reopened_focus_ids, vec!["search-video-001".to_string()]);
+
+        let reopened_high_energy = db2
+            .get_tracks_by_energy_range(5, 10)
+            .expect("Failed reopened energy range filter");
+        assert_eq!(
+            reopened_high_energy.len(),
+            2,
+            "Expected two reopened high-energy tracks"
+        );
+        assert_eq!(
+            reopened_high_energy[0].video_id, "search-video-001",
+            "Reopened energy filter should preserve ordering"
+        );
+        assert_eq!(
+            reopened_high_energy[1].video_id, "search-video-003",
+            "Reopened energy filter should preserve ordering"
+        );
+
+        let reopened_missing_genre = db2
+            .get_tracks_by_genre("metal")
+            .expect("Failed reopened missing genre filter");
+        assert!(
+            reopened_missing_genre.is_empty(),
+            "Unexpected reopened results for absent exact genre"
+        );
+
+        let reopened_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat reopened db")
+            .len();
+        let reopened_hash = sha256_hex(&expected_db);
+
+        drop(db2);
+
+        println!(
+            "SEARCH_HARNESS temp_data_dir={} before_tracks=0 before_metadata=0 seeded_tracks={} seeded_metadata={} synthwave_matches=2 focus_matches=1 high_energy_matches=2 missing_genre_matches=0 seeded_db_size={} reopened_tracks={} reopened_metadata={} reopened_synthwave_matches=2 reopened_focus_matches=1 reopened_high_energy_matches=2 reopened_missing_genre_matches=0 reopened_db_size={} reopened_db_sha256={}",
+            temp_data_dir.display(),
+            seeded_tracks,
+            seeded_metadata,
+            seeded_size,
+            reopened_tracks,
+            reopened_metadata,
+            reopened_size,
+            reopened_hash
+        );
+
+        std::fs::remove_dir_all(&temp_data_dir).expect("Failed to remove temp data dir");
+    }
 }
