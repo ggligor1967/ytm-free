@@ -154,6 +154,55 @@ async fn download_track(
 // PLAYLIST COMMANDS
 // ============================================================================
 
+fn create_playlist_db_helper(
+    db: &Database,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Playlist, String> {
+    db.create_playlist(name, description)
+        .map_err(|e| e.to_string())
+}
+
+fn delete_playlist_db_helper(db: &Database, playlist_id: &str) -> Result<(), String> {
+    db.delete_playlist(playlist_id).map_err(|e| e.to_string())
+}
+
+fn add_to_playlist_db_helper(
+    db: &Database,
+    playlist_id: &str,
+    video_id: &str,
+    title: &str,
+    artist: &str,
+    thumbnail: &str,
+    duration: Option<i64>,
+) -> Result<Track, String> {
+    let track = db
+        .add_track(video_id, title, artist, thumbnail, None)
+        .map_err(|e| e.to_string())?;
+
+    if let Some(dur) = duration {
+        let _ = db.update_track_duration(video_id, dur);
+    }
+
+    db.add_track_to_playlist(playlist_id, &track.id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(track)
+}
+
+fn remove_from_playlist_db_helper(
+    db: &Database,
+    playlist_id: &str,
+    track_id: &str,
+) -> Result<(), String> {
+    db.remove_track_from_playlist(playlist_id, track_id)
+        .map_err(|e| e.to_string())
+}
+
+fn cleanup_delete_track_db_helper(db: &Database, track_id: &str) -> Result<(), String> {
+    db.delete_track(track_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_playlists(state: State<'_, AppState>) -> Result<Vec<Playlist>, String> {
     let db = state.db.lock().await;
@@ -167,14 +216,13 @@ async fn create_playlist(
     description: Option<String>,
 ) -> Result<Playlist, String> {
     let db = state.db.lock().await;
-    db.create_playlist(&name, description.as_deref())
-        .map_err(|e| e.to_string())
+    create_playlist_db_helper(&db, &name, description.as_deref())
 }
 
 #[tauri::command]
 async fn delete_playlist(state: State<'_, AppState>, playlist_id: String) -> Result<(), String> {
     let db = state.db.lock().await;
-    db.delete_playlist(&playlist_id).map_err(|e| e.to_string())
+    delete_playlist_db_helper(&db, &playlist_id)
 }
 
 #[tauri::command]
@@ -210,21 +258,15 @@ async fn add_to_playlist(
     duration: Option<i64>,
 ) -> Result<Track, String> {
     let db = state.db.lock().await;
-    
-    // First ensure track exists
-    let track = db.add_track(&video_id, &title, &artist, &thumbnail, None)
-        .map_err(|e| e.to_string())?;
-    
-    // Update duration if provided
-    if let Some(dur) = duration {
-        let _ = db.update_track_duration(&video_id, dur);
-    }
-    
-    // Add to playlist
-    db.add_track_to_playlist(&playlist_id, &track.id)
-        .map_err(|e| e.to_string())?;
-    
-    Ok(track)
+    add_to_playlist_db_helper(
+        &db,
+        &playlist_id,
+        &video_id,
+        &title,
+        &artist,
+        &thumbnail,
+        duration,
+    )
 }
 
 #[tauri::command]
@@ -234,8 +276,7 @@ async fn remove_from_playlist(
     track_id: String,
 ) -> Result<(), String> {
     let db = state.db.lock().await;
-    db.remove_track_from_playlist(&playlist_id, &track_id)
-        .map_err(|e| e.to_string())
+    remove_from_playlist_db_helper(&db, &playlist_id, &track_id)
 }
 
 // ============================================================================
@@ -2607,7 +2648,7 @@ async fn cleanup_delete_track(
     track_id: String,
 ) -> Result<(), String> {
     let db = state.db.lock().await;
-    db.delete_track(&track_id).map_err(|e| e.to_string())
+    cleanup_delete_track_db_helper(&db, &track_id)
 }
 
 // ============================================================================
@@ -3375,6 +3416,35 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn ytm_free_data_dir_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[tokio::test]
     async fn test_controlled_runtime_ipc_safe_csv_wrappers_with_synthetic_temp_files() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -3460,5 +3530,153 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp harness dir");
+    }
+
+    #[test]
+    fn test_controlled_stateful_ipc_db_playlist_wrappers_with_temp_database() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-stateful-ipc-db-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let playlist = create_playlist_db_helper(
+            &db,
+            "Stateful IPC Harness Playlist",
+            Some("Synthetic playlist for stateful IPC DB helper harness"),
+        )
+        .expect("Failed to create playlist through DB helper");
+        assert_eq!(playlist.name, "Stateful IPC Harness Playlist");
+        assert_eq!(playlist.track_count, 0);
+
+        let track_a = add_to_playlist_db_helper(
+            &db,
+            &playlist.id,
+            "stateful-ipc-video-001",
+            "Stateful IPC Song One",
+            "Stateful IPC Artist One",
+            "https://i.ytimg.com/vi/stateful-ipc-video-001/mqdefault.jpg",
+            Some(123),
+        )
+        .expect("Failed to add track A through DB helper");
+        let track_b = add_to_playlist_db_helper(
+            &db,
+            &playlist.id,
+            "stateful-ipc-video-002",
+            "Stateful IPC Song Two",
+            "Stateful IPC Artist Two",
+            "https://i.ytimg.com/vi/stateful-ipc-video-002/mqdefault.jpg",
+            Some(245),
+        )
+        .expect("Failed to add track B through DB helper");
+
+        let playlist_tracks = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read playlist tracks after add");
+        assert_eq!(playlist_tracks.len(), 2);
+        assert_eq!(playlist_tracks[0].video_id, "stateful-ipc-video-001");
+        assert_eq!(playlist_tracks[0].duration, Some(123));
+        assert_eq!(playlist_tracks[1].video_id, "stateful-ipc-video-002");
+        assert_eq!(playlist_tracks[1].duration, Some(245));
+
+        remove_from_playlist_db_helper(&db, &playlist.id, &track_a.id)
+            .expect("Failed to remove track A through DB helper");
+        let after_remove_tracks = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to read playlist tracks after removal");
+        assert_eq!(after_remove_tracks.len(), 1);
+        assert_eq!(after_remove_tracks[0].video_id, "stateful-ipc-video-002");
+        assert!(db.get_track_by_uuid(&track_a.id).is_ok());
+
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "synthetic".to_string(),
+            sub_genre: None,
+            mood: "focused".to_string(),
+            energy_level: 7,
+            tempo: "medium".to_string(),
+            danceability: 4,
+            vocal_type: "instrumental".to_string(),
+            decade: "2020s".to_string(),
+            language: "Instrumental".to_string(),
+            activity_tags: vec!["test".to_string()],
+            occasion_tags: vec!["harness".to_string()],
+            keywords: vec!["stateful".to_string(), "ipc".to_string()],
+        };
+        db.save_track_metadata(&track_b.id, &metadata, "synthetic-stateful-ipc-harness")
+            .expect("Failed to save synthetic metadata");
+        db.update_play_count("stateful-ipc-video-002")
+            .expect("Failed to create synthetic play history");
+        assert!(db.get_track_metadata(&track_b.id).is_ok());
+        assert_eq!(
+            db.get_play_history(1, 10)
+                .expect("Failed to read synthetic play history")
+                .len(),
+            1
+        );
+
+        delete_playlist_db_helper(&db, &playlist.id)
+            .expect("Failed to delete playlist through DB helper");
+        assert!(db.get_playlist(&playlist.id).is_err());
+        let playlist_tracks_after_delete = db
+            .get_playlist_tracks(&playlist.id)
+            .expect("Failed to observe playlist tracks after playlist delete");
+        assert!(
+            playlist_tracks_after_delete.len() <= 1,
+            "Deleted playlist should have at most the previously kept link"
+        );
+        let delete_playlist_link_count = playlist_tracks_after_delete.len();
+
+        cleanup_delete_track_db_helper(&db, &track_b.id)
+            .expect("Failed to delete track B through DB helper");
+        assert!(db.get_track_by_uuid(&track_b.id).is_err());
+        assert!(db.get_track_metadata(&track_b.id).is_err());
+        assert!(
+            db.get_play_history(1, 10)
+                .expect("Failed to read play history after track delete")
+                .is_empty(),
+            "Track delete helper should remove synthetic play history"
+        );
+        assert!(
+            db.get_playlist_tracks(&playlist.id)
+                .expect("Failed to read playlist tracks after track cleanup")
+                .is_empty(),
+            "Track delete helper should remove remaining playlist links"
+        );
+        assert!(db.get_track_by_uuid(&track_a.id).is_ok());
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        assert!(db2.get_playlist(&playlist.id).is_err());
+        assert!(db2.get_track_by_uuid(&track_a.id).is_ok());
+        assert!(db2.get_track_by_uuid(&track_b.id).is_err());
+        assert!(db2.get_track_metadata(&track_b.id).is_err());
+        assert!(
+            db2.get_playlist_tracks(&playlist.id)
+                .expect("Failed to read reopened playlist tracks")
+                .is_empty()
+        );
+        assert!(
+            db2.get_play_history(1, 10)
+                .expect("Failed to read reopened play history")
+                .is_empty()
+        );
+        drop(db2);
+
+        println!(
+            "STATEFUL_IPC_DB_HARNESS playlist_id={} track_a={} track_b={} delete_playlist_link_count={} temp_dir={}",
+            playlist.id,
+            track_a.id,
+            track_b.id,
+            delete_playlist_link_count,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
     }
 }
