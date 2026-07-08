@@ -25,6 +25,8 @@ Written 2026-07-06 from verified evidence (see PROJECT_STATE.md). Steps are orde
 
 Net: Step 1 is no longer blocked by disk space or db migration failures when using the SDK 10.0.26100.0 session pin. Rust Gate B is now **PASS with SDK pin**. Remaining environment debt: a plain, unpinned `cargo test` still needs SDK 10.0.28000.0 repaired or removed.
 
+**Re-verified 2026-07-08 (PowerShell shell remediation):** the routine PowerShell workflow on this machine no longer requires a manual `vcvarsall.bat` step. A user-level env pin plus `C:\Users\gglig\Documents\PowerShell\profile.ps1` now auto-populates `VCToolsInstallDir`, `WindowsSdkDir`, `WindowsSDKVersion=10.0.26100.0\`, `UCRTVersion`, `LIB`, `INCLUDE`, and prepends the MSVC/SDK x64 bin paths at shell startup. Evidence: from a normal PowerShell shell, `. C:\Users\gglig\Documents\PowerShell\profile.ps1; cargo test --no-run` compiled successfully in `src-tauri`, and full `. C:\Users\gglig\Documents\PowerShell\profile.ps1; cargo test -- --test-threads=1` passed `34/34` without manual `vcvarsall`. The underlying SDK `10.0.28000.0` partial install still exists on disk, so Visual Studio Installer cleanup remains the cleaner machine-wide fix for non-PowerShell or env-less tools.
+
 ## Step 2 — First real runtime/e2e verification
 
 ROADMAP_STATUS.md item 1 has been "NEFACUT" (not done) since the beginning.

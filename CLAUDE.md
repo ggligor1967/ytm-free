@@ -14,12 +14,12 @@ npm test              # vitest run (frontend; src/__tests__/)
 npx tsc --noEmit      # typecheck
 npm run build         # tsc + vite build
 npm run tauri dev     # full app — BROKEN as of 2026-07-06 (Rust toolchain, see below)
-cargo test            # in src-tauri/ — BROKEN as of 2026-07-06
+cargo test            # in src-tauri/ — works in normal PowerShell shells after the 2026-07-08 SDK 10.0.26100.0 env/profile bootstrap
 ```
 
 ## Known traps (verified 2026-07-06 — re-verify before assuming still true)
 
-1. **Rust toolchain broken on this machine**: every cargo build fails with `LNK1181: dbghelp.lib` because Windows SDK 10.0.28000.0 is a partial install. Fix: `docs/RECOVERY_PLAN.md`. Until fixed, you cannot compile, test, or run any Rust change — say so explicitly in reports.
+1. **Underlying Windows SDK defect still exists on this machine**: SDK 10.0.28000.0 is a partial install, so raw/unbootstrapped shells can still fail with `LNK1181: dbghelp.lib`. As of 2026-07-08, normal PowerShell shells are auto-bootstrapped to SDK 10.0.26100.0 via user env + PowerShell profile, and `cargo test` passes there without manual `vcvarsall`. OS-level cleanup guidance remains in `docs/RECOVERY_PLAN.md`.
 2. **GitHub default branch is wrong**: `origin/HEAD` → `phase-2-frontend-bugs` (stale). Trunk is `main`. Always branch from and PR into `main`.
 3. **Flaky test**: `LibraryView.test.tsx` › "handles 1000 tracks…" times out under full-suite load, passes in isolation. Verify with `npx vitest run src/__tests__/LibraryView.test.tsx -t "handles 1000 tracks"` before treating a red run as your fault (or as fine).
 4. `Cargo.lock` is gitignored (known debt). Rust dependency versions are not pinned — a clean clone may resolve different crates.
