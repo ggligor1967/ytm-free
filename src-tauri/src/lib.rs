@@ -3370,3 +3370,95 @@ pub fn run() {
         .expect("error while running tauri application");
     tracing::info!("App exited");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_controlled_runtime_ipc_safe_csv_wrappers_with_synthetic_temp_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-runtime-ipc-safe-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp harness dir");
+
+        let synthetic_csv = concat!(
+            "Track Name,Artist Name(s),Album Name,Duration (ms),Spotify ID\n",
+            "\"Synthetic IPC Song One\",\"Synthetic IPC Artist One\",\"Synthetic IPC Album One\",123000,\"spotify:track:synthetic-ipc-001\"\n",
+            "\"Synthetic IPC Song Two\",\"Synthetic IPC Artist Two\",\"Synthetic IPC Album Two\",245000,\"spotify:track:synthetic-ipc-002\""
+        );
+        let csv_path = temp_dir.join("synthetic_ipc_export.csv");
+        let invalid_csv_path = temp_dir.join("invalid_ipc_export.csv");
+        let notes_path = temp_dir.join("notes.txt");
+
+        std::fs::write(&csv_path, synthetic_csv).expect("Failed to write synthetic CSV");
+        std::fs::write(&invalid_csv_path, "Name,Value\nSong,123\n")
+            .expect("Failed to write invalid CSV");
+        std::fs::write(&notes_path, "not a csv").expect("Failed to write non-CSV file");
+
+        let parsed = parse_spotify_csv(synthetic_csv.to_string())
+            .await
+            .expect("Failed to parse synthetic CSV through IPC wrapper");
+        assert_eq!(parsed.len(), 2, "Expected two parsed synthetic tracks");
+
+        assert_eq!(parsed[0].track_name, "Synthetic IPC Song One");
+        assert_eq!(parsed[0].artist_name, "Synthetic IPC Artist One");
+        assert_eq!(parsed[0].album_name, "Synthetic IPC Album One");
+        assert_eq!(parsed[0].duration_ms, Some(123000));
+        assert_eq!(
+            parsed[0].spotify_id,
+            Some("spotify:track:synthetic-ipc-001".to_string())
+        );
+
+        assert_eq!(parsed[1].track_name, "Synthetic IPC Song Two");
+        assert_eq!(parsed[1].artist_name, "Synthetic IPC Artist Two");
+        assert_eq!(parsed[1].album_name, "Synthetic IPC Album Two");
+        assert_eq!(parsed[1].duration_ms, Some(245000));
+        assert_eq!(
+            parsed[1].spotify_id,
+            Some("spotify:track:synthetic-ipc-002".to_string())
+        );
+
+        let read_back = read_csv_file(csv_path.to_string_lossy().to_string())
+            .expect("Failed to read synthetic CSV through IPC wrapper");
+        assert_eq!(read_back, synthetic_csv);
+
+        let scanned = scan_spotify_folder(temp_dir.to_string_lossy().to_string())
+            .expect("Failed to scan temp CSV folder through IPC wrapper");
+        assert_eq!(
+            scanned.len(),
+            2,
+            "Scanner should include only CSV files and ignore non-CSV files"
+        );
+        assert!(
+            scanned.iter().all(|entry| entry.name != "notes"),
+            "Scanner should ignore non-CSV files"
+        );
+
+        let synthetic_entry = scanned
+            .iter()
+            .find(|entry| entry.name == "synthetic_ipc_export")
+            .expect("Synthetic CSV should be scanned");
+        assert_eq!(synthetic_entry.track_count, 2);
+        assert_eq!(synthetic_entry.path, csv_path.to_string_lossy());
+
+        let invalid_entry = scanned
+            .iter()
+            .find(|entry| entry.name == "invalid_ipc_export")
+            .expect("Invalid CSV should still be listed by scanner");
+        assert_eq!(
+            invalid_entry.track_count, 0,
+            "Invalid CSV track_count should follow existing scan behavior"
+        );
+
+        println!(
+            "RUNTIME_IPC_SAFE_HARNESS parsed_tracks={} scanned_csvs={} temp_dir={}",
+            parsed.len(),
+            scanned.len(),
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp harness dir");
+    }
+}
