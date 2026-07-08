@@ -2070,6 +2070,48 @@ async fn semantic_search_filtered(
     Ok(results)
 }
 
+/// Create a semantic playlist from pre-scored semantic search results (DB-only helper).
+///
+/// This helper performs no embedding generation, no Ollama calls, no network
+/// access, and requires no Tauri runtime state. It takes already-scored
+/// `SemanticSearchResult` values, creates a playlist in the given `Database`,
+/// links the tracks in order, and returns a `SemanticPlaylistResult`.
+fn create_semantic_playlist_from_scored_results_db_helper(
+    db: &Database,
+    query: &str,
+    playlist_name: Option<String>,
+    scored_results: Vec<SemanticSearchResult>,
+) -> Result<SemanticPlaylistResult, String> {
+    let track_count = scored_results.len() as i64;
+    let average_similarity = if !scored_results.is_empty() {
+        scored_results.iter().map(|r| r.similarity).sum::<f64>() / scored_results.len() as f64
+    } else {
+        0.0
+    };
+
+    let name = playlist_name.unwrap_or_else(|| {
+        format!("🎵 Like {} — {}", query, chrono::Local::now().format("%Y-%m-%d"))
+    });
+
+    let description = format!("Auto-generated semantic playlist from: {}", query);
+
+    let playlist = db
+        .create_playlist(&name, Some(&description))
+        .map_err(|e| e.to_string())?;
+
+    for result in &scored_results {
+        let _ = db.add_track_to_playlist(&playlist.id, &result.track.id);
+    }
+
+    Ok(SemanticPlaylistResult {
+        playlist_id: playlist.id,
+        playlist_name: playlist.name,
+        track_count,
+        average_similarity,
+        created_at: chrono::Local::now().to_rfc3339(),
+    })
+}
+
 /// Create a semantic playlist from search results
 #[tauri::command]
 async fn create_semantic_playlist(
@@ -2110,36 +2152,24 @@ async fn create_semantic_playlist(
     });
     scored.truncate(50); // Max 50 songs per semantic playlist
 
-    let track_count = scored.len() as i64;
-    let average_similarity = if !scored.is_empty() {
-        scored.iter().map(|(_, sim)| sim).sum::<f64>() / scored.len() as f64
-    } else {
-        0.0
-    };
-
-    // Create playlist
-    let name = playlist_name.unwrap_or_else(|| {
-        format!("🎵 Like {} — {}", query, chrono::Local::now().format("%Y-%m-%d"))
-    });
-
-    let description = format!("Auto-generated semantic playlist from: {}", query);
-
-    let playlist = db
-        .create_playlist(&name, Some(&description))
-        .map_err(|e| e.to_string())?;
-
-    // Add tracks to playlist
-    for (track_id, _) in scored {
-        let _ = db.add_track_to_playlist(&playlist.id, &track_id);
+    // Resolve scored track IDs to SemanticSearchResult for the DB-only helper.
+    let mut scored_results: Vec<SemanticSearchResult> = Vec::new();
+    for (track_id, similarity) in &scored {
+        if let Ok(track) = db.get_track_by_uuid(track_id) {
+            scored_results.push(SemanticSearchResult {
+                track,
+                similarity: *similarity,
+                match_reason: format!("Semantic match {:.0}%", similarity * 100.0),
+            });
+        }
     }
 
-    Ok(SemanticPlaylistResult {
-        playlist_id: playlist.id,
-        playlist_name: playlist.name,
-        track_count,
-        average_similarity,
-        created_at: chrono::Local::now().to_rfc3339(),
-    })
+    create_semantic_playlist_from_scored_results_db_helper(
+        &db,
+        &query,
+        playlist_name,
+        scored_results,
+    )
 }
 
 // ============================================================================
@@ -4230,6 +4260,131 @@ mod tests {
             genre_results.len(),
             mood_results.len(),
             reopened_results.len(),
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_playlist_save_stub_uses_temp_db_results() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-stub-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        // Insert synthetic tracks (no embedding, no Ollama, no network).
+        let track_alpha = db
+            .add_track(
+                "semantic-playlist-video-001",
+                "Semantic Playlist Song Alpha",
+                "Semantic Playlist Artist One",
+                "https://i.ytimg.com/vi/semantic-playlist-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Alpha");
+        let track_beta = db
+            .add_track(
+                "semantic-playlist-video-002",
+                "Semantic Playlist Song Beta",
+                "Semantic Playlist Artist Two",
+                "https://i.ytimg.com/vi/semantic-playlist-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Beta");
+        let track_gamma = db
+            .add_track(
+                "semantic-playlist-video-003",
+                "Semantic Playlist Song Gamma",
+                "Semantic Playlist Artist Three",
+                "https://i.ytimg.com/vi/semantic-playlist-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Gamma");
+
+        // Build pre-computed scored semantic results (no embedding, no Ollama).
+        // Order mirrors expected playlist order: Alpha (0.91) > Beta (0.78) > Gamma (0.44).
+        let scored_results = vec![
+            SemanticSearchResult {
+                track: track_alpha.clone(),
+                similarity: 0.91,
+                match_reason: "Semantic match 91%".to_string(),
+            },
+            SemanticSearchResult {
+                track: track_beta.clone(),
+                similarity: 0.78,
+                match_reason: "Semantic match 78%".to_string(),
+            },
+            SemanticSearchResult {
+                track: track_gamma.clone(),
+                similarity: 0.44,
+                match_reason: "Semantic match 44%".to_string(),
+            },
+        ];
+
+        let query = "semantic playlist stub query";
+        let result = create_semantic_playlist_from_scored_results_db_helper(
+            &db,
+            query,
+            Some("Semantic Playlist Stub".to_string()),
+            scored_results,
+        )
+        .expect("Failed to create semantic playlist through DB-only helper");
+
+        assert_eq!(result.playlist_name, "Semantic Playlist Stub");
+        assert_eq!(result.track_count, 3);
+        assert!(
+            (result.average_similarity - ((0.91 + 0.78 + 0.44) / 3.0)).abs() < 1e-9,
+            "average_similarity should match pre-computed mean"
+        );
+
+        // Verify playlist row was created in temp DB.
+        let playlist = db
+            .get_playlist(&result.playlist_id)
+            .expect("Failed to read created playlist from temp DB");
+        assert_eq!(playlist.name, "Semantic Playlist Stub");
+        assert_eq!(playlist.track_count, 3);
+
+        // Verify track links and ordering (position 1 > 2 > 3).
+        let playlist_tracks = db
+            .get_playlist_tracks(&result.playlist_id)
+            .expect("Failed to read playlist tracks from temp DB");
+        assert_eq!(playlist_tracks.len(), 3);
+        assert_eq!(playlist_tracks[0].video_id, "semantic-playlist-video-001");
+        assert_eq!(playlist_tracks[1].video_id, "semantic-playlist-video-002");
+        assert_eq!(playlist_tracks[2].video_id, "semantic-playlist-video-003");
+
+        drop(db);
+
+        // Reopen temp DB on same YTM_FREE_DATA_DIR and verify persistence.
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_playlist = db2
+            .get_playlist(&result.playlist_id)
+            .expect("Failed to read persisted playlist after reopen");
+        assert_eq!(reopened_playlist.name, "Semantic Playlist Stub");
+        assert_eq!(reopened_playlist.track_count, 3);
+        let reopened_tracks = db2
+            .get_playlist_tracks(&result.playlist_id)
+            .expect("Failed to read persisted playlist tracks after reopen");
+        assert_eq!(reopened_tracks.len(), 3);
+        assert_eq!(reopened_tracks[0].video_id, "semantic-playlist-video-001");
+        assert_eq!(reopened_tracks[1].video_id, "semantic-playlist-video-002");
+        assert_eq!(reopened_tracks[2].video_id, "semantic-playlist-video-003");
+        drop(db2);
+
+        println!(
+            "SEMANTIC_PLAYLIST_STUB_HARNESS playlist_id={} tracks={} top={} avg={} temp_dir={}",
+            result.playlist_id,
+            result.track_count,
+            "semantic-playlist-video-001",
+            result.average_similarity,
             temp_dir.display()
         );
 
