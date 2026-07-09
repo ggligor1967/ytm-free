@@ -2249,34 +2249,66 @@ fn create_semantic_playlist_from_scored_results_db_helper(
     })
 }
 
-/// Create a semantic playlist from search results
-#[tauri::command]
-async fn create_semantic_playlist(
-    state: State<'_, AppState>,
+/// Prepared input for semantic playlist embedding generation (DB-only stage).
+///
+/// This struct is produced by the pre-embedding DB helper and consumed by the
+/// `create_semantic_playlist` wrapper after the DB lock is released. It carries
+/// everything needed to call `OllamaClient::embed_single` without holding the lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticPlaylistPrepareInput {
     query: String,
+    ollama_url: String,
+    embedding_model: String,
     playlist_name: Option<String>,
-) -> Result<SemanticPlaylistResult, String> {
-    let db = state.db.lock().await;
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
+}
 
+/// Pre-embedding DB-only helper for `create_semantic_playlist`.
+///
+/// Reads settings from the given `Database`, validates that semantic search is
+/// enabled, and returns a `SemanticPlaylistPrepareInput` carrying the query, the
+/// Ollama URL, the embedding model, and the caller-supplied playlist name.
+///
+/// This helper performs no embedding generation, no Ollama calls, no network
+/// access, and no playlist creation. It is intended to be called under a
+/// short-lived DB lock so that `embed_single().await` can run without the lock.
+fn create_semantic_playlist_prepare_embedding_input_db_helper(
+    db: &Database,
+    query: &str,
+    playlist_name: Option<String>,
+) -> Result<SemanticPlaylistPrepareInput, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
     if !settings.semantic_search_enabled {
         return Err("Semantic search is disabled".to_string());
     }
 
-    let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
+    Ok(SemanticPlaylistPrepareInput {
+        query: query.to_string(),
+        ollama_url: settings.ollama_url,
+        embedding_model: settings.embedding_model,
+        playlist_name,
+    })
+}
 
-    // Perform semantic search
-    let query_embedding = ollama
-        .embed_single(&query, &settings.embedding_model)
-        .await
-        .map_err(|e| e.to_string())?;
-
+/// Scoring-from-embedding DB-only helper for `create_semantic_playlist`.
+///
+/// Given a pre-computed query embedding, this helper reads all stored track
+/// embeddings from the `Database`, computes cosine similarity, filters by the
+/// existing threshold (> 0.3), sorts descending, truncates to 50, and resolves
+/// the surviving track IDs into `SemanticSearchResult` values.
+///
+/// This helper performs no embedding generation, no Ollama calls, no network
+/// access, and no playlist creation. It is intended to be called under a
+/// short-lived DB lock after `embed_single().await` has completed.
+fn create_semantic_playlist_scored_from_embedding_db_helper(
+    db: &Database,
+    query_embedding: &[f32],
+) -> Result<Vec<SemanticSearchResult>, String> {
     let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
 
     let mut scored: Vec<(String, f64)> = embeddings
         .iter()
         .map(|emb| {
-            let similarity = cosine_similarity(&query_embedding, &emb.embedding);
+            let similarity = cosine_similarity(query_embedding, &emb.embedding);
             (emb.track_id.clone(), similarity)
         })
         .collect();
@@ -2298,10 +2330,38 @@ async fn create_semantic_playlist(
         }
     }
 
+    Ok(scored_results)
+}
+
+/// Create a semantic playlist from search results
+#[tauri::command]
+async fn create_semantic_playlist(
+    state: State<'_, AppState>,
+    query: String,
+    playlist_name: Option<String>,
+) -> Result<SemanticPlaylistResult, String> {
+    // Stage 1: pre-embedding DB preparation under short-lived lock.
+    let prepared = {
+        let db = state.db.lock().await;
+        create_semantic_playlist_prepare_embedding_input_db_helper(&db, &query, playlist_name)?
+    };
+
+    // Stage 2: embedding generation without DB lock held.
+    let ollama = OllamaClient::with_config(&prepared.ollama_url, &prepared.embedding_model);
+    let query_embedding = ollama
+        .embed_single(&prepared.query, &prepared.embedding_model)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Stage 3: scoring + playlist save under reacquired lock.
+    let db = state.db.lock().await;
+    let scored_results =
+        create_semantic_playlist_scored_from_embedding_db_helper(&db, &query_embedding)?;
+
     create_semantic_playlist_from_scored_results_db_helper(
         &db,
-        &query,
-        playlist_name,
+        &prepared.query,
+        prepared.playlist_name,
         scored_results,
     )
 }
@@ -5095,6 +5155,237 @@ mod tests {
             result.track_count,
             "semantic-playlist-video-001",
             result.average_similarity,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_playlist_prepare_embedding_input_uses_temp_db_settings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://127.0.0.1:11434".to_string();
+        settings.embedding_model = "semantic-playlist-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        let query = "semantic-playlist-lock-scope-query";
+        let playlist_name = Some("semantic-playlist-lock-scope-playlist".to_string());
+
+        let embeddings_before = db
+            .count_embeddings()
+            .expect("Failed to count embeddings before prepare");
+        assert_eq!(embeddings_before, 0);
+
+        let prepared = create_semantic_playlist_prepare_embedding_input_db_helper(
+            &db,
+            query,
+            playlist_name.clone(),
+        )
+        .expect("Failed to prepare semantic playlist embedding input");
+
+        // Verify prepare returns the expected query, ollama_url, embedding_model,
+        // and playlist_name from temp DB settings — no mutation, no playlist.
+        assert_eq!(prepared.query, query);
+        assert_eq!(prepared.ollama_url, "http://127.0.0.1:11434");
+        assert_eq!(
+            prepared.embedding_model,
+            "semantic-playlist-lock-scope-model"
+        );
+        assert_eq!(prepared.playlist_name, playlist_name);
+
+        // Verify no embeddings were saved (pre-embedding stage is read-only on embeddings).
+        let embeddings_after = db
+            .count_embeddings()
+            .expect("Failed to count embeddings after prepare");
+        assert_eq!(embeddings_after, 0);
+
+        // Verify no playlist was created.
+        let playlists = db
+            .get_playlists()
+            .expect("Failed to read playlists from temp DB");
+        assert!(
+            playlists.is_empty(),
+            "no playlist should be created during prepare"
+        );
+
+        drop(db);
+
+        println!(
+            "SEMANTIC_PLAYLIST_LOCK_SCOPE_HARNESS query={} playlist={} scored=0 saved=0 temp_dir={}",
+            prepared.query,
+            prepared.playlist_name.as_deref().unwrap_or("(default)"),
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_playlist_scored_from_embedding_uses_temp_db_embeddings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://127.0.0.1:11434".to_string();
+        settings.embedding_model = "semantic-playlist-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        // Seed three synthetic tracks.
+        let track_alpha = db
+            .add_track(
+                "semantic-playlist-lock-scope-video-001",
+                "Semantic Playlist Lock Scope Song Alpha",
+                "Semantic Playlist Lock Scope Artist One",
+                "https://i.ytimg.com/vi/semantic-playlist-lock-scope-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Alpha");
+        let track_beta = db
+            .add_track(
+                "semantic-playlist-lock-scope-video-002",
+                "Semantic Playlist Lock Scope Song Beta",
+                "Semantic Playlist Lock Scope Artist Two",
+                "https://i.ytimg.com/vi/semantic-playlist-lock-scope-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Beta");
+        let track_gamma = db
+            .add_track(
+                "semantic-playlist-lock-scope-video-003",
+                "Semantic Playlist Lock Scope Song Gamma",
+                "Semantic Playlist Lock Scope Artist Three",
+                "https://i.ytimg.com/vi/semantic-playlist-lock-scope-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track Gamma");
+
+        // Seed synthetic embeddings — query embedding [1.0, 0.0, 0.0] will be
+        // most similar to Alpha [1.0, 0.0, 0.0], then Beta [0.8, 0.6, 0.0],
+        // and Gamma [0.0, 0.0, 1.0] will be below the 0.3 threshold.
+        let embedding_alpha = vec![1.0_f32, 0.0, 0.0];
+        let embedding_beta = vec![0.8_f32, 0.6, 0.0];
+        let embedding_gamma = vec![0.0_f32, 0.0, 1.0]; // cosine_sim with [1,0,0] = 0.0, below 0.3
+
+        db.save_embedding(
+            &track_alpha.id,
+            &embedding_alpha,
+            "alpha text",
+            "test-model",
+            3,
+        )
+        .expect("Failed to save embedding Alpha");
+        db.save_embedding(
+            &track_beta.id,
+            &embedding_beta,
+            "beta text",
+            "test-model",
+            3,
+        )
+        .expect("Failed to save embedding Beta");
+        db.save_embedding(
+            &track_gamma.id,
+            &embedding_gamma,
+            "gamma text",
+            "test-model",
+            3,
+        )
+        .expect("Failed to save embedding Gamma");
+
+        let query_embedding = vec![1.0_f32, 0.0, 0.0];
+
+        let scored =
+            create_semantic_playlist_scored_from_embedding_db_helper(&db, &query_embedding)
+                .expect("Failed to score playlist from precomputed embedding");
+
+        // Gamma is below the 0.3 threshold and should be filtered out.
+        // Alpha (cosine_sim=1.0) ranks above Beta (cosine_sim=0.8).
+        assert_eq!(
+            scored.len(),
+            2,
+            "Gamma below threshold should be filtered out"
+        );
+        assert_eq!(
+            scored[0].track.video_id,
+            "semantic-playlist-lock-scope-video-001"
+        );
+        assert_eq!(
+            scored[1].track.video_id,
+            "semantic-playlist-lock-scope-video-002"
+        );
+        assert!(
+            (scored[0].similarity - 1.0).abs() < 1e-6,
+            "Alpha similarity should be 1.0"
+        );
+        assert!(
+            (scored[1].similarity - 0.8).abs() < 1e-6,
+            "Beta similarity should be 0.8"
+        );
+
+        // Now exercise the existing save helper to verify end-to-end scoring+save.
+        let query = "semantic-playlist-lock-scope-query";
+        let playlist_name = Some("semantic-playlist-lock-scope-playlist".to_string());
+        let saved = create_semantic_playlist_from_scored_results_db_helper(
+            &db,
+            query,
+            playlist_name.clone(),
+            scored,
+        )
+        .expect("Failed to create semantic playlist through save helper");
+
+        assert_eq!(saved.playlist_name, "semantic-playlist-lock-scope-playlist");
+        assert_eq!(saved.track_count, 2);
+
+        // Verify playlist row and track links in temp DB.
+        let playlist = db
+            .get_playlist(&saved.playlist_id)
+            .expect("Failed to read created playlist from temp DB");
+        assert_eq!(playlist.name, "semantic-playlist-lock-scope-playlist");
+        assert_eq!(playlist.track_count, 2);
+
+        let playlist_tracks = db
+            .get_playlist_tracks(&saved.playlist_id)
+            .expect("Failed to read playlist tracks from temp DB");
+        assert_eq!(playlist_tracks.len(), 2);
+        assert_eq!(
+            playlist_tracks[0].video_id,
+            "semantic-playlist-lock-scope-video-001"
+        );
+        assert_eq!(
+            playlist_tracks[1].video_id,
+            "semantic-playlist-lock-scope-video-002"
+        );
+
+        drop(db);
+
+        println!(
+            "SEMANTIC_PLAYLIST_LOCK_SCOPE_HARNESS query={} playlist={} scored=2 saved=2 temp_dir={}",
+            query,
+            playlist_name.as_deref().unwrap_or("(default)"),
             temp_dir.display()
         );
 
