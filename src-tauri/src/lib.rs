@@ -954,32 +954,27 @@ async fn smart_playlist_generate_plan(
         .map_err(|e| e.to_string())
 }
 
-/// Match library tracks against smart playlist criteria
-#[tauri::command]
-async fn smart_playlist_match_library(
-    state: State<'_, AppState>,
-    genres: Vec<String>,
-    moods: Vec<String>,
+fn smart_playlist_match_library_db_helper(
+    db: &Database,
+    genres: &[String],
+    moods: &[String],
     energy_min: i32,
     energy_max: i32,
-    decades: Vec<String>,
-    activities: Vec<String>,
+    decades: &[String],
+    activities: &[String],
     limit: Option<i64>,
 ) -> Result<Vec<SmartPlaylistTrackMatch>, String> {
-    let db = state.db.lock().await;
-    let all = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
-    drop(db);
-
+    let all = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
     let max_tracks = limit.unwrap_or(50) as usize;
 
-    // Score and filter tracks
     let mut matches: Vec<SmartPlaylistTrackMatch> = all
         .into_iter()
         .filter_map(|(track, meta)| {
             let mut score = 0.0_f64;
             let mut criteria_count = 0.0;
 
-            // Genre match
             if !genres.is_empty() {
                 criteria_count += 1.0;
                 if let Some(ref g) = meta.genre {
@@ -989,7 +984,6 @@ async fn smart_playlist_match_library(
                 }
             }
 
-            // Mood match
             if !moods.is_empty() {
                 criteria_count += 1.0;
                 if let Some(ref m) = meta.mood {
@@ -999,7 +993,6 @@ async fn smart_playlist_match_library(
                 }
             }
 
-            // Energy match
             if energy_min > 1 || energy_max < 10 {
                 criteria_count += 1.0;
                 if let Some(e) = meta.energy_level {
@@ -1009,7 +1002,6 @@ async fn smart_playlist_match_library(
                 }
             }
 
-            // Decade match
             if !decades.is_empty() {
                 criteria_count += 1.0;
                 if let Some(ref d) = meta.decade {
@@ -1019,7 +1011,6 @@ async fn smart_playlist_match_library(
                 }
             }
 
-            // Activity match
             if !activities.is_empty() {
                 criteria_count += 1.0;
                 if let Some(ref tags) = meta.activity_tags {
@@ -1030,14 +1021,12 @@ async fn smart_playlist_match_library(
                 }
             }
 
-            // Normalize score
             let normalized = if criteria_count > 0.0 {
                 score / criteria_count
             } else {
-                0.5 // No criteria = moderate match
+                0.5
             };
 
-            // Only include tracks with at least partial match
             if normalized > 0.0 {
                 Some(SmartPlaylistTrackMatch {
                     track,
@@ -1053,11 +1042,39 @@ async fn smart_playlist_match_library(
         })
         .collect();
 
-    // Sort by score descending
-    matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    matches.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     matches.truncate(max_tracks);
 
     Ok(matches)
+}
+
+/// Match library tracks against smart playlist criteria
+#[tauri::command]
+async fn smart_playlist_match_library(
+    state: State<'_, AppState>,
+    genres: Vec<String>,
+    moods: Vec<String>,
+    energy_min: i32,
+    energy_max: i32,
+    decades: Vec<String>,
+    activities: Vec<String>,
+    limit: Option<i64>,
+) -> Result<Vec<SmartPlaylistTrackMatch>, String> {
+    let db = state.db.lock().await;
+    smart_playlist_match_library_db_helper(
+        &db,
+        &genres,
+        &moods,
+        energy_min,
+        energy_max,
+        &decades,
+        &activities,
+        limit,
+    )
 }
 
 /// Generate a "more like this" plan from a seed track
@@ -4510,6 +4527,293 @@ mod tests {
             "SEMANTIC_INDEX_TRACK_STUB_HARNESS video=semantic-index-video-001 dimensions={} embeddings={} temp_dir={}",
             reopened.dimensions,
             reopened_count,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_smart_playlist_match_library_filters_temp_db_metadata() {
+        fn sorted_match_ids(results: &[SmartPlaylistTrackMatch]) -> Vec<String> {
+            let mut ids = results
+                .iter()
+                .map(|result| result.track.video_id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        }
+
+        fn contains_id(results: &[SmartPlaylistTrackMatch], video_id: &str) -> bool {
+            results
+                .iter()
+                .any(|result| result.track.video_id == video_id)
+        }
+
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-smart-playlist-match-library-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let tracks = vec![
+            (
+                "smart-playlist-video-001",
+                "Smart Playlist Rock Focus Coding",
+                "rock",
+                "focus",
+                8,
+                "2020s",
+                vec!["coding", "work"],
+            ),
+            (
+                "smart-playlist-video-002",
+                "Smart Playlist Rock Calm Driving",
+                "rock",
+                "calm",
+                5,
+                "2010s",
+                vec!["driving"],
+            ),
+            (
+                "smart-playlist-video-003",
+                "Smart Playlist Jazz Focus Study",
+                "jazz",
+                "focus",
+                3,
+                "2000s",
+                vec!["study"],
+            ),
+            (
+                "smart-playlist-video-004",
+                "Smart Playlist Pop Party Workout",
+                "pop",
+                "party",
+                9,
+                "2020s",
+                vec!["workout"],
+            ),
+            (
+                "smart-playlist-video-005",
+                "Smart Playlist Classical Sleep No Match",
+                "classical",
+                "sleep",
+                2,
+                "1990s",
+                vec!["sleep"],
+            ),
+        ];
+
+        for (video_id, title, genre, mood, energy, decade, activities) in tracks {
+            let track = db
+                .add_track(
+                    video_id,
+                    title,
+                    "Smart Playlist Harness Artist",
+                    &format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"),
+                    None,
+                )
+                .expect("Failed to add smart playlist synthetic track");
+            let metadata = crate::ollama::TrackMetadataAI {
+                genre: genre.to_string(),
+                sub_genre: None,
+                mood: mood.to_string(),
+                energy_level: energy,
+                tempo: "medium".to_string(),
+                danceability: 5,
+                vocal_type: "synthetic vocals".to_string(),
+                decade: decade.to_string(),
+                language: "English".to_string(),
+                activity_tags: activities.into_iter().map(str::to_string).collect(),
+                occasion_tags: vec![],
+                keywords: vec!["smart".to_string(), "playlist".to_string()],
+            };
+            db.save_track_metadata(&track.id, &metadata, "smart-playlist-match-stub-model")
+                .expect("Failed to save smart playlist synthetic metadata");
+        }
+
+        let empty: Vec<String> = Vec::new();
+        let rock_filter = vec!["rock".to_string()];
+        let focus_filter = vec!["focus".to_string()];
+        let coding_filter = vec!["coding".to_string()];
+        let decade_2020s = vec!["2020s".to_string()];
+
+        let all_matches = smart_playlist_match_library_db_helper(
+            &db, &empty, &empty, 1, 10, &empty, &empty, None,
+        )
+        .expect("Failed to run no-filter smart playlist helper");
+        assert_eq!(all_matches.len(), 5);
+
+        let rock_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &rock_filter,
+            &empty,
+            1,
+            10,
+            &empty,
+            &empty,
+            None,
+        )
+        .expect("Failed to run rock smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&rock_matches),
+            vec![
+                "smart-playlist-video-001".to_string(),
+                "smart-playlist-video-002".to_string(),
+            ]
+        );
+        assert!(rock_matches
+            .iter()
+            .all(|result| (result.score - 1.0).abs() < f64::EPSILON));
+
+        let focus_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &empty,
+            &focus_filter,
+            1,
+            10,
+            &empty,
+            &empty,
+            None,
+        )
+        .expect("Failed to run focus smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&focus_matches),
+            vec![
+                "smart-playlist-video-001".to_string(),
+                "smart-playlist-video-003".to_string(),
+            ]
+        );
+
+        let coding_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &empty,
+            &empty,
+            1,
+            10,
+            &empty,
+            &coding_filter,
+            None,
+        )
+        .expect("Failed to run coding smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&coding_matches),
+            vec!["smart-playlist-video-001".to_string()]
+        );
+
+        let energy_matches = smart_playlist_match_library_db_helper(
+            &db, &empty, &empty, 7, 10, &empty, &empty, None,
+        )
+        .expect("Failed to run energy smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&energy_matches),
+            vec![
+                "smart-playlist-video-001".to_string(),
+                "smart-playlist-video-004".to_string(),
+            ]
+        );
+
+        let decade_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &empty,
+            &empty,
+            1,
+            10,
+            &decade_2020s,
+            &empty,
+            None,
+        )
+        .expect("Failed to run decade smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&decade_matches),
+            vec![
+                "smart-playlist-video-001".to_string(),
+                "smart-playlist-video-004".to_string(),
+            ]
+        );
+
+        let combined_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &rock_filter,
+            &focus_filter,
+            7,
+            10,
+            &decade_2020s,
+            &coding_filter,
+            None,
+        )
+        .expect("Failed to run combined smart playlist helper");
+        assert_eq!(
+            combined_matches
+                .first()
+                .expect("Expected combined result")
+                .track
+                .video_id,
+            "smart-playlist-video-001"
+        );
+        assert!((combined_matches[0].score - 1.0).abs() < f64::EPSILON);
+        assert!(combined_matches.len() < all_matches.len());
+        assert!(!contains_id(&combined_matches, "smart-playlist-video-005"));
+
+        let limit_matches = smart_playlist_match_library_db_helper(
+            &db,
+            &rock_filter,
+            &focus_filter,
+            1,
+            10,
+            &empty,
+            &empty,
+            Some(1),
+        )
+        .expect("Failed to run limited smart playlist helper");
+        assert_eq!(limit_matches.len(), 1);
+        assert_eq!(limit_matches[0].track.video_id, "smart-playlist-video-001");
+
+        let no_match = smart_playlist_match_library_db_helper(
+            &db,
+            &["metal".to_string()],
+            &["angry".to_string()],
+            1,
+            10,
+            &empty,
+            &empty,
+            None,
+        )
+        .expect("Failed to run no-match smart playlist helper");
+        assert!(no_match.is_empty());
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_rock = smart_playlist_match_library_db_helper(
+            &db2,
+            &rock_filter,
+            &empty,
+            1,
+            10,
+            &empty,
+            &empty,
+            None,
+        )
+        .expect("Failed to run reopened rock smart playlist helper");
+        assert_eq!(
+            sorted_match_ids(&reopened_rock),
+            sorted_match_ids(&rock_matches)
+        );
+        drop(db2);
+
+        println!(
+            "SMART_PLAYLIST_MATCH_LIBRARY_HARNESS results={} top={} rock={} focus={} combined={} temp_dir={}",
+            all_matches.len(),
+            combined_matches[0].track.video_id,
+            rock_matches.len(),
+            focus_matches.len(),
+            combined_matches.len(),
             temp_dir.display()
         );
 
