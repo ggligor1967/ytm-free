@@ -1768,6 +1768,29 @@ fn semantic_clear_index_db_helper(db: &Database) -> Result<(), String> {
     db.clear_embeddings().map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticSearchPrepareInput {
+    query: String,
+    ollama_url: String,
+    embedding_model: String,
+}
+
+fn semantic_search_prepare_embedding_input_db_helper(
+    db: &Database,
+    query: &str,
+) -> Result<SemanticSearchPrepareInput, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    if !settings.semantic_search_enabled {
+        return Err("Semantic search is disabled".to_string());
+    }
+
+    Ok(SemanticSearchPrepareInput {
+        query: query.to_string(),
+        ollama_url: settings.ollama_url,
+        embedding_model: settings.embedding_model,
+    })
+}
+
 fn semantic_search_with_embedding_db_helper(
     db: &Database,
     query_embedding: &[f32],
@@ -2052,21 +2075,20 @@ async fn semantic_search(
     query: String,
     limit: Option<i32>,
 ) -> Result<Vec<SemanticSearchResult>, String> {
-    let db = state.db.lock().await;
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    let prepared = {
+        let db = state.db.lock().await;
+        semantic_search_prepare_embedding_input_db_helper(&db, &query)?
+    };
 
-    if !settings.semantic_search_enabled {
-        return Err("Semantic search is disabled".to_string());
-    }
-
-    let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
+    let ollama = OllamaClient::with_config(&prepared.ollama_url, &prepared.embedding_model);
 
     // Embed query
     let query_embedding = ollama
-        .embed_single(&query, &settings.embedding_model)
+        .embed_single(&prepared.query, &prepared.embedding_model)
         .await
         .map_err(|e| e.to_string())?;
 
+    let db = state.db.lock().await;
     semantic_search_with_embedding_db_helper(&db, &query_embedding, limit)
 }
 
@@ -4304,6 +4326,85 @@ mod tests {
             temp_dir.display()
         );
 
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_search_prepare_embedding_input_uses_temp_db_settings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-search-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://semantic-search-lock-scope.invalid:11434".to_string();
+        settings.embedding_model = "semantic-search-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        let query = "semantic-search-lock-scope-query";
+        let prepared = semantic_search_prepare_embedding_input_db_helper(&db, query)
+            .expect("Failed to prepare semantic search embedding input");
+        assert_eq!(prepared.query, query);
+        assert_eq!(
+            prepared.ollama_url,
+            "http://semantic-search-lock-scope.invalid:11434"
+        );
+        assert_eq!(prepared.embedding_model, "semantic-search-lock-scope-model");
+        assert_eq!(
+            db.count_embeddings()
+                .expect("Failed to count embeddings before post helper"),
+            0,
+            "Prepare helper must not persist embeddings"
+        );
+
+        let track = db
+            .add_track(
+                "semantic-search-lock-scope-video-001",
+                "Semantic Search Lock Scope Song",
+                "Semantic Search Lock Scope Artist",
+                "https://i.ytimg.com/vi/semantic-search-lock-scope-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add semantic search lock-scope synthetic track");
+        db.save_embedding(
+            &track.id,
+            &[1.0, 0.0, 0.0],
+            "Semantic Search Lock Scope Song by Semantic Search Lock Scope Artist",
+            &prepared.embedding_model,
+            3,
+        )
+        .expect("Failed to save synthetic semantic search embedding");
+
+        let results = semantic_search_with_embedding_db_helper(&db, &[1.0, 0.0, 0.0], Some(10))
+            .expect("Failed to run semantic search post-embedding helper");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].track.video_id,
+            "semantic-search-lock-scope-video-001"
+        );
+        assert_eq!(
+            db.count_embeddings()
+                .expect("Failed to count embeddings after post helper"),
+            1
+        );
+
+        println!(
+            "SEMANTIC_SEARCH_LOCK_SCOPE_HARNESS query={} model={} results={} temp_dir={}",
+            prepared.query,
+            prepared.embedding_model,
+            results.len(),
+            temp_dir.display()
+        );
+
+        drop(db);
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
     }
 
