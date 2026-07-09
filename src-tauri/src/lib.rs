@@ -1841,6 +1841,27 @@ fn semantic_search_filtered_with_embedding_db_helper(
     Ok(results)
 }
 
+fn semantic_index_track_with_embedding_db_helper(
+    db: &Database,
+    track_id: &str,
+    embedding: &[f32],
+    model_used: &str,
+) -> Result<TrackEmbedding, String> {
+    let track = db
+        .get_track_by_uuid(track_id)
+        .map_err(|e| e.to_string())?;
+    let metadata = db.get_track_metadata(track_id).ok();
+    let text = build_track_text(&track, metadata.as_ref());
+    let dimensions = embedding.len() as i32;
+
+    db.save_embedding(track_id, embedding, &text, model_used, dimensions)
+        .map_err(|e| e.to_string())?;
+
+    db.get_embedding(track_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Embedding was not saved for track: {}", track_id))
+}
+
 /// Index single track with embedding
 #[tauri::command]
 async fn semantic_index_track(
@@ -1872,11 +1893,12 @@ async fn semantic_index_track(
         .await
         .map_err(|e| e.to_string())?;
 
-    let dimensions = embedding.len() as i32;
-
-    // Save embedding
-    db.save_embedding(&track_id, &embedding, &text, &settings.embedding_model, dimensions)
-        .map_err(|e| e.to_string())?;
+    semantic_index_track_with_embedding_db_helper(
+        &db,
+        &track_id,
+        &embedding,
+        &settings.embedding_model,
+    )?;
 
     Ok(true)
 }
@@ -4385,6 +4407,109 @@ mod tests {
             result.track_count,
             "semantic-playlist-video-001",
             result.average_similarity,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_index_track_stub_saves_temp_db_embedding() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-index-track-stub-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let track = db
+            .add_track(
+                "semantic-index-video-001",
+                "Semantic Index Song One",
+                "Semantic Index Artist One",
+                "https://i.ytimg.com/vi/semantic-index-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add semantic index synthetic track");
+
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-genre-rock".to_string(),
+            sub_genre: None,
+            mood: "semantic-index-mood-focused".to_string(),
+            energy_level: 7,
+            tempo: "medium".to_string(),
+            danceability: 5,
+            vocal_type: "synthetic vocals".to_string(),
+            decade: "2020s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-activity-coding".to_string()],
+            occasion_tags: vec![],
+            keywords: vec![
+                "semantic".to_string(),
+                "index".to_string(),
+                "stub".to_string(),
+                "harness".to_string(),
+            ],
+        };
+        db.save_track_metadata(&track.id, &metadata, "semantic-index-stub-metadata-model")
+            .expect("Failed to save semantic index synthetic metadata");
+
+        let embedding = vec![1.0_f32, 0.0, 0.0];
+        let saved = semantic_index_track_with_embedding_db_helper(
+            &db,
+            &track.id,
+            &embedding,
+            "semantic-index-stub-model",
+        )
+        .expect("Failed to save semantic index embedding through DB-only helper");
+
+        assert_eq!(saved.track_id, track.id);
+        assert_eq!(saved.embedding, embedding);
+        assert_eq!(saved.dimensions, 3);
+        assert_eq!(saved.model_used, "semantic-index-stub-model");
+        assert!(saved.text_used.contains("Semantic Index Song One"));
+        assert!(saved.text_used.contains("Semantic Index Artist One"));
+        assert!(saved.text_used.contains("semantic-index-genre-rock"));
+        assert!(saved.text_used.contains("semantic-index-mood-focused"));
+        assert!(saved.text_used.contains("semantic-index-activity-coding"));
+        assert!(saved.text_used.contains("semantic"));
+        assert_eq!(
+            db.count_embeddings().expect("Failed to count embeddings"),
+            1
+        );
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened = db2
+            .get_embedding(&track.id)
+            .expect("Failed to read reopened embedding")
+            .expect("Expected persisted embedding after reopen");
+        assert_eq!(reopened.track_id, track.id);
+        assert_eq!(reopened.embedding, vec![1.0_f32, 0.0, 0.0]);
+        assert_eq!(reopened.dimensions, 3);
+        assert_eq!(reopened.model_used, "semantic-index-stub-model");
+        assert!(reopened.text_used.contains("Semantic Index Song One"));
+        assert!(reopened.text_used.contains("Semantic Index Artist One"));
+        assert!(reopened.text_used.contains("semantic-index-genre-rock"));
+        assert!(reopened.text_used.contains("semantic-index-mood-focused"));
+        assert!(reopened
+            .text_used
+            .contains("semantic-index-activity-coding"));
+        let reopened_count = db2
+            .count_embeddings()
+            .expect("Failed to count reopened embeddings");
+        assert_eq!(reopened_count, 1);
+        drop(db2);
+
+        println!(
+            "SEMANTIC_INDEX_TRACK_STUB_HARNESS video=semantic-index-video-001 dimensions={} embeddings={} temp_dir={}",
+            reopened.dimensions,
+            reopened_count,
             temp_dir.display()
         );
 
