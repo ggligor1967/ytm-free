@@ -1,4 +1,7 @@
-use crate::models::{DjTriggersEnabled, ListeningStats, PlayEvent, Playlist, Settings, Track, TrackEmbedding, TrackMetadataDB};
+use crate::models::{
+    DjTriggersEnabled, ListeningStats, PlayEvent, Playlist, Settings, Track, TrackEmbedding,
+    TrackMetadataDB,
+};
 use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -31,8 +34,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
             version INTEGER PRIMARY KEY,
             description TEXT NOT NULL,
             applied_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );"
-    ).map_err(|e| DbError::Migration(format!("Failed to create schema_migrations table: {}", e)))?;
+        );",
+    )
+    .map_err(|e| DbError::Migration(format!("Failed to create schema_migrations table: {}", e)))?;
 
     let migrations: Vec<Migration> = vec![
         Migration {
@@ -55,17 +59,23 @@ pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
 
     for migration in &migrations {
         if i64::from(migration.version) > last_version {
-            conn.execute_batch(migration.sql)
-                .map_err(|e| DbError::Migration(format!(
-                    "Migration {} ({}): {}", migration.version, migration.description, e
-                )))?;
+            conn.execute_batch(migration.sql).map_err(|e| {
+                DbError::Migration(format!(
+                    "Migration {} ({}): {}",
+                    migration.version, migration.description, e
+                ))
+            })?;
 
             conn.execute(
                 "INSERT INTO schema_migrations (version, description) VALUES (?1, ?2)",
                 params![migration.version, migration.description],
-            ).map_err(|e| DbError::Migration(format!(
-                "Failed to record migration {}: {}", migration.version, e
-            )))?;
+            )
+            .map_err(|e| {
+                DbError::Migration(format!(
+                    "Failed to record migration {}: {}",
+                    migration.version, e
+                ))
+            })?;
         }
     }
 
@@ -292,16 +302,16 @@ impl Database {
 
     pub fn get_track_by_uuid(&self, uuid: &str) -> Result<Track, DbError> {
         self.conn
-            .query_row(
-                "SELECT * FROM tracks WHERE id = ?1",
-                params![uuid],
-                |row| Self::row_to_track(row),
-            )
+            .query_row("SELECT * FROM tracks WHERE id = ?1", params![uuid], |row| {
+                Self::row_to_track(row)
+            })
             .map_err(|_| DbError::NotFound(format!("Track not found by UUID: {}", uuid)))
     }
 
     pub fn get_all_tracks(&self) -> Result<Vec<Track>, DbError> {
-        let mut stmt = self.conn.prepare("SELECT * FROM tracks ORDER BY created_at DESC")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM tracks ORDER BY created_at DESC")?;
         let tracks = stmt
             .query_map([], |row| Self::row_to_track(row))?
             .filter_map(|r| r.ok())
@@ -310,9 +320,9 @@ impl Database {
     }
 
     pub fn get_downloaded_tracks(&self) -> Result<Vec<Track>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM tracks WHERE is_downloaded = 1 ORDER BY created_at DESC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM tracks WHERE is_downloaded = 1 ORDER BY created_at DESC")?;
         let tracks = stmt
             .query_map([], |row| Self::row_to_track(row))?
             .filter_map(|r| r.ok())
@@ -332,9 +342,9 @@ impl Database {
     }
 
     pub fn get_favorites(&self) -> Result<Vec<Track>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM tracks WHERE is_favorite = 1 ORDER BY created_at DESC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM tracks WHERE is_favorite = 1 ORDER BY created_at DESC")?;
         let tracks = stmt
             .query_map([], |row| Self::row_to_track(row))?
             .filter_map(|r| r.ok())
@@ -382,13 +392,13 @@ impl Database {
             "UPDATE tracks SET is_favorite = NOT is_favorite WHERE video_id = ?1",
             params![video_id],
         )?;
-        
+
         let is_favorite: bool = self.conn.query_row(
             "SELECT is_favorite FROM tracks WHERE video_id = ?1",
             params![video_id],
             |row| row.get(0),
         )?;
-        
+
         Ok(is_favorite)
     }
 
@@ -413,9 +423,13 @@ impl Database {
     // PLAYLISTS
     // ========================================================================
 
-    pub fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<Playlist, DbError> {
+    pub fn create_playlist(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<Playlist, DbError> {
         let id = uuid::Uuid::new_v4().to_string();
-        
+
         self.conn.execute(
             "INSERT INTO playlists (id, name, description) VALUES (?1, ?2, ?3)",
             params![id, name, description],
@@ -450,12 +464,12 @@ impl Database {
             ORDER BY p.updated_at DESC
             "#,
         )?;
-        
+
         let playlists = stmt
             .query_map([], |row| Self::row_to_playlist(row))?
             .filter_map(|r| r.ok())
             .collect();
-        
+
         Ok(playlists)
     }
 
@@ -473,7 +487,8 @@ impl Database {
     }
 
     pub fn delete_playlist(&self, id: &str) -> Result<(), DbError> {
-        self.conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -499,7 +514,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn remove_track_from_playlist(&self, playlist_id: &str, track_id: &str) -> Result<(), DbError> {
+    pub fn remove_track_from_playlist(
+        &self,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> Result<(), DbError> {
         self.conn.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
             params![playlist_id, track_id],
@@ -517,12 +536,12 @@ impl Database {
             ORDER BY pt.position
             "#,
         )?;
-        
+
         let tracks = stmt
             .query_map(params![playlist_id], |row| Self::row_to_track(row))?
             .filter_map(|r| r.ok())
             .collect();
-        
+
         Ok(tracks)
     }
 
@@ -544,15 +563,15 @@ impl Database {
 
     pub fn get_settings(&self) -> Result<Settings, DbError> {
         let default_path = Settings::default().download_path;
-        
+
         self.conn
             .query_row("SELECT * FROM settings WHERE id = 1", [], |row| {
                 let triggers_json = row.get::<_, Option<String>>("dj_triggers_enabled")?
                     .unwrap_or_else(|| r#"{"track_start":true,"track_end":true,"queue_empty":true,"long_session":true,"first_track_of_day":true,"milestone":true,"time_announcement":true,"mood_shift":true}"#.to_string());
-                
+
                 let dj_triggers_enabled = serde_json::from_str(&triggers_json)
                     .unwrap_or_else(|_| DjTriggersEnabled::default());
-                
+
                 Ok(Settings {
                     audio_quality: row.get::<_, Option<String>>("audio_quality")?.unwrap_or_else(|| "best".to_string()),
                     download_path: row.get::<_, Option<String>>("download_path")?.unwrap_or(default_path),
@@ -588,7 +607,7 @@ impl Database {
     pub fn update_settings(&self, settings: &Settings) -> Result<(), DbError> {
         let triggers_json = serde_json::to_string(&settings.dj_triggers_enabled)
             .unwrap_or_else(|_| r#"{"track_start":true,"track_end":true,"queue_empty":true,"long_session":true,"first_track_of_day":true,"milestone":true,"time_announcement":true,"mood_shift":true}"#.to_string());
-        
+
         self.conn.execute(
             r#"
             UPDATE settings SET
@@ -724,7 +743,12 @@ impl Database {
                     })
                 },
             )
-            .map_err(|e| DbError::NotFound(format!("Metadata not found for track: {} ({})", track_id, e)))
+            .map_err(|e| {
+                DbError::NotFound(format!(
+                    "Metadata not found for track: {} ({})",
+                    track_id, e
+                ))
+            })
     }
 
     pub fn get_tracks_by_mood(&self, mood: &str) -> Result<Vec<Track>, DbError> {
@@ -836,7 +860,7 @@ impl Database {
     /// Get unique genre and mood values from metadata for AI context
     pub fn get_unique_metadata_values(&self) -> Result<(Vec<String>, Vec<String>), DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT genre FROM track_metadata WHERE genre IS NOT NULL ORDER BY genre"
+            "SELECT DISTINCT genre FROM track_metadata WHERE genre IS NOT NULL ORDER BY genre",
         )?;
         let genres: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
@@ -844,7 +868,7 @@ impl Database {
             .collect();
 
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT mood FROM track_metadata WHERE mood IS NOT NULL ORDER BY mood"
+            "SELECT DISTINCT mood FROM track_metadata WHERE mood IS NOT NULL ORDER BY mood",
         )?;
         let moods: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
@@ -924,15 +948,18 @@ impl Database {
         )?;
 
         // Total time (use duration of tracks if available)
-        let total_time_seconds: i64 = self.conn.query_row(
-            r#"
+        let total_time_seconds: i64 = self
+            .conn
+            .query_row(
+                r#"
             SELECT COALESCE(SUM(t.duration), 0) FROM play_history ph
             JOIN tracks t ON ph.track_id = t.id
             WHERE datetime(ph.played_at) >= datetime('now', '-' || ?1 || ' days')
             "#,
-            params![days_back],
-            |row| row.get(0),
-        ).unwrap_or(0);
+                params![days_back],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         // Top genres
         let mut stmt = self.conn.prepare(
@@ -1040,7 +1067,9 @@ impl Database {
 
         match result {
             Ok(response) => Ok(response),
-            Err(_) => Err(DbError::NotFound("Cache entry not found or expired".to_string())),
+            Err(_) => Err(DbError::NotFound(
+                "Cache entry not found or expired".to_string(),
+            )),
         }
     }
 
@@ -1064,11 +1093,8 @@ impl Database {
         model_used: &str,
         dimensions: i32,
     ) -> Result<(), DbError> {
-        let bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO track_embeddings (track_id, embedding, text_used, model_used, dimensions, created_at)
@@ -1089,7 +1115,7 @@ impl Database {
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
                     .collect();
-                
+
                 Ok(TrackEmbedding {
                     track_id: row.get("track_id")?,
                     embedding,
@@ -1120,7 +1146,7 @@ impl Database {
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
                     .collect();
-                
+
                 Ok(TrackEmbedding {
                     track_id: row.get("track_id")?,
                     embedding,
@@ -1167,7 +1193,11 @@ impl Database {
     // ========================================================================
 
     /// Get tracks never played or not played in a long time ("forgotten gems") [F6]
-    pub fn get_forgotten_gems(&self, min_days_unplayed: i64, limit: i64) -> Result<Vec<Track>, DbError> {
+    pub fn get_forgotten_gems(
+        &self,
+        min_days_unplayed: i64,
+        limit: i64,
+    ) -> Result<Vec<Track>, DbError> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT t.* FROM tracks t
@@ -1178,7 +1208,9 @@ impl Database {
             "#,
         )?;
         let tracks = stmt
-            .query_map(params![min_days_unplayed, limit], |row| Self::row_to_track(row))?
+            .query_map(params![min_days_unplayed, limit], |row| {
+                Self::row_to_track(row)
+            })?
             .filter_map(|r| r.ok())
             .collect();
         Ok(tracks)
@@ -1224,7 +1256,9 @@ impl Database {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         // If the most recent day isn't today or yesterday, streak is 0
         if days[0] != today {
-            let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+            let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string();
             if days[0] != yesterday {
                 return Ok(0);
             }
@@ -1278,10 +1312,20 @@ impl Database {
 
     /// Delete a track by ID (and its metadata + playlist entries)
     pub fn delete_track(&self, track_id: &str) -> Result<(), DbError> {
-        self.conn.execute("DELETE FROM track_metadata WHERE track_id = ?1", params![track_id])?;
-        self.conn.execute("DELETE FROM playlist_tracks WHERE track_id = ?1", params![track_id])?;
-        self.conn.execute("DELETE FROM play_history WHERE track_id = ?1", params![track_id])?;
-        self.conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
+        self.conn.execute(
+            "DELETE FROM track_metadata WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM play_history WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
         Ok(())
     }
 
@@ -1302,9 +1346,9 @@ impl Database {
 
     /// Get all metadata entries
     pub fn get_all_metadata(&self) -> Result<Vec<TrackMetadataDB>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM track_metadata ORDER BY analyzed_at DESC"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM track_metadata ORDER BY analyzed_at DESC")?;
         let results = stmt
             .query_map([], |row| {
                 Ok(TrackMetadataDB {
@@ -1335,7 +1379,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spotify_import::{parse_exportify_csv, scan_folder_for_csv, ImportResult, ImportStatus};
+    use crate::spotify_import::{
+        parse_exportify_csv, scan_folder_for_csv, ImportResult, ImportStatus,
+    };
     use sha2::{Digest, Sha256};
     use std::sync::{Mutex, OnceLock};
 
@@ -1345,8 +1391,10 @@ mod tests {
     }
 
     fn count_rows(conn: &Connection, table: &str) -> i64 {
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-            .unwrap_or_else(|err| panic!("Failed to count rows in {table}: {err}"))
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|err| panic!("Failed to count rows in {table}: {err}"))
     }
 
     fn sha256_hex(path: &std::path::Path) -> String {
@@ -1407,9 +1455,7 @@ mod tests {
             .expect("Failed to add track");
 
         // Toggle favorite on
-        let is_fav = db
-            .toggle_favorite("v1")
-            .expect("Failed to toggle favorite");
+        let is_fav = db.toggle_favorite("v1").expect("Failed to toggle favorite");
         assert!(is_fav);
 
         // Check favorites list
@@ -1418,9 +1464,7 @@ mod tests {
         assert!(favs[0].is_favorite);
 
         // Toggle favorite off
-        let is_fav = db
-            .toggle_favorite("v1")
-            .expect("Failed to toggle favorite");
+        let is_fav = db.toggle_favorite("v1").expect("Failed to toggle favorite");
         assert!(!is_fav);
 
         let favs = db.get_favorites().expect("Failed to get favorites");
@@ -1434,12 +1478,17 @@ mod tests {
             .expect("Failed to add track");
 
         // Initial play count
-        let total = db.get_total_play_count().expect("Failed to get total play count");
+        let total = db
+            .get_total_play_count()
+            .expect("Failed to get total play count");
         assert_eq!(total, 0);
 
         // Update play count
-        db.update_play_count("v1").expect("Failed to update play count");
-        let total = db.get_total_play_count().expect("Failed to get total play count");
+        db.update_play_count("v1")
+            .expect("Failed to update play count");
+        let total = db
+            .get_total_play_count()
+            .expect("Failed to get total play count");
         assert_eq!(total, 1);
 
         // Verify last_played is set
@@ -1498,12 +1547,16 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         let version: u32 = conn
-            .query_row("SELECT version FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT version FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(version, 0);
 
         let description: String = conn
-            .query_row("SELECT description FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT description FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(description, "initial schema");
     }
@@ -1515,7 +1568,9 @@ mod tests {
         run_migrations(&conn).unwrap(); // second call should not fail
 
         let count: u32 = conn
-            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -1526,23 +1581,48 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         let tables: Vec<String> = {
-            let mut stmt = conn.prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            ).unwrap();
-            stmt.query_map([], |row| row.get(0)).unwrap()
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
                 .filter_map(|r| r.ok())
                 .filter(|n| n != "schema_migrations") // exclude the tracking table
                 .collect()
         };
 
-        assert!(tables.contains(&"tracks".to_string()), "tracks table missing");
-        assert!(tables.contains(&"playlists".to_string()), "playlists table missing");
-        assert!(tables.contains(&"playlist_tracks".to_string()), "playlist_tracks table missing");
-        assert!(tables.contains(&"settings".to_string()), "settings table missing");
-        assert!(tables.contains(&"track_metadata".to_string()), "track_metadata table missing");
-        assert!(tables.contains(&"play_history".to_string()), "play_history table missing");
-        assert!(tables.contains(&"ai_cache".to_string()), "ai_cache table missing");
-        assert!(tables.contains(&"track_embeddings".to_string()), "track_embeddings table missing");
+        assert!(
+            tables.contains(&"tracks".to_string()),
+            "tracks table missing"
+        );
+        assert!(
+            tables.contains(&"playlists".to_string()),
+            "playlists table missing"
+        );
+        assert!(
+            tables.contains(&"playlist_tracks".to_string()),
+            "playlist_tracks table missing"
+        );
+        assert!(
+            tables.contains(&"settings".to_string()),
+            "settings table missing"
+        );
+        assert!(
+            tables.contains(&"track_metadata".to_string()),
+            "track_metadata table missing"
+        );
+        assert!(
+            tables.contains(&"play_history".to_string()),
+            "play_history table missing"
+        );
+        assert!(
+            tables.contains(&"ai_cache".to_string()),
+            "ai_cache table missing"
+        );
+        assert!(
+            tables.contains(&"track_embeddings".to_string()),
+            "track_embeddings table missing"
+        );
     }
 
     // -- YTM_FREE_DATA_DIR override (no real AppData touched) --
@@ -1559,7 +1639,10 @@ mod tests {
     impl EnvVarGuard {
         fn new(key: &str) -> Self {
             let original = std::env::var_os(key);
-            Self { key: key.to_string(), original }
+            Self {
+                key: key.to_string(),
+                original,
+            }
         }
     }
 
@@ -1612,10 +1695,16 @@ mod tests {
         // Remove the file if a prior step left it (it should not exist yet).
         let _ = std::fs::remove_file(&expected_db);
         std::env::set_var("YTM_FREE_DATA_DIR", &temp);
-        assert!(!expected_db.exists(), "precondition: db file should not exist yet");
+        assert!(
+            !expected_db.exists(),
+            "precondition: db file should not exist yet"
+        );
         let db = Database::new().expect("Database::new with override");
         let _ = db; // drop connection
-        assert!(expected_db.exists(), "db file was not created in the override dir");
+        assert!(
+            expected_db.exists(),
+            "db file was not created in the override dir"
+        );
 
         // cleanup temp dir
         let _ = std::fs::remove_dir_all(&temp);
@@ -1646,12 +1735,24 @@ mod tests {
         );
         std::fs::write(&csv_path, csv_content).expect("Failed to write synthetic csv");
 
-        let scanned_files = scan_folder_for_csv(temp_csv_dir.to_str().expect("csv dir path should be valid utf-8"))
-            .expect("Failed to scan synthetic csv dir");
-        assert_eq!(scanned_files.len(), 1, "Expected exactly one synthetic CSV file");
-        assert_eq!(scanned_files[0].track_count, 2, "Expected two rows in the synthetic CSV");
+        let scanned_files = scan_folder_for_csv(
+            temp_csv_dir
+                .to_str()
+                .expect("csv dir path should be valid utf-8"),
+        )
+        .expect("Failed to scan synthetic csv dir");
+        assert_eq!(
+            scanned_files.len(),
+            1,
+            "Expected exactly one synthetic CSV file"
+        );
+        assert_eq!(
+            scanned_files[0].track_count, 2,
+            "Expected two rows in the synthetic CSV"
+        );
 
-        let parsed_tracks = parse_exportify_csv(csv_content).expect("Failed to parse synthetic csv content");
+        let parsed_tracks =
+            parse_exportify_csv(csv_content).expect("Failed to parse synthetic csv content");
         assert_eq!(parsed_tracks.len(), 2, "Expected two parsed Spotify tracks");
 
         std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
@@ -1668,8 +1769,14 @@ mod tests {
         let before_playlists = count_rows(&db.conn, "playlists");
         let before_playlist_tracks = count_rows(&db.conn, "playlist_tracks");
         assert_eq!(before_tracks, 0, "Temp DB should start with no tracks");
-        assert_eq!(before_playlists, 0, "Temp DB should start with no playlists");
-        assert_eq!(before_playlist_tracks, 0, "Temp DB should start with no playlist links");
+        assert_eq!(
+            before_playlists, 0,
+            "Temp DB should start with no playlists"
+        );
+        assert_eq!(
+            before_playlist_tracks, 0,
+            "Temp DB should start with no playlist links"
+        );
 
         let import_results: Vec<ImportResult> = parsed_tracks
             .iter()
@@ -1683,7 +1790,8 @@ mod tests {
             })
             .collect();
 
-        let playlist_description = format!("Imported from Spotify - {} tracks", import_results.len());
+        let playlist_description =
+            format!("Imported from Spotify - {} tracks", import_results.len());
         let playlist = db
             .create_playlist(&scanned_files[0].name, Some(&playlist_description))
             .expect("Failed to create playlist for synthetic import");
@@ -1691,8 +1799,14 @@ mod tests {
         // Mirror ImportView.createPlaylistWithTracks: create or reuse a playlist,
         // upsert the matched track, set duration, and link it into the playlist.
         for result in &import_results {
-            let youtube_id = result.youtube_id.as_deref().expect("Synthetic result should have youtube id");
-            let youtube_title = result.youtube_title.as_deref().expect("Synthetic result should have youtube title");
+            let youtube_id = result
+                .youtube_id
+                .as_deref()
+                .expect("Synthetic result should have youtube id");
+            let youtube_title = result
+                .youtube_title
+                .as_deref()
+                .expect("Synthetic result should have youtube title");
             let spotify_track = &result.spotify_track;
             let thumbnail = format!("https://i.ytimg.com/vi/{youtube_id}/mqdefault.jpg");
 
@@ -1719,18 +1833,33 @@ mod tests {
         let after_playlists = count_rows(&db.conn, "playlists");
         let after_playlist_tracks = count_rows(&db.conn, "playlist_tracks");
         assert_eq!(after_tracks, 2, "Expected two imported tracks in temp DB");
-        assert_eq!(after_playlists, 1, "Expected one imported playlist in temp DB");
-        assert_eq!(after_playlist_tracks, 2, "Expected two playlist links in temp DB");
+        assert_eq!(
+            after_playlists, 1,
+            "Expected one imported playlist in temp DB"
+        );
+        assert_eq!(
+            after_playlist_tracks, 2,
+            "Expected two playlist links in temp DB"
+        );
 
-        let playlists = db.get_playlists().expect("Failed to read persisted playlists");
+        let playlists = db
+            .get_playlists()
+            .expect("Failed to read persisted playlists");
         assert_eq!(playlists.len(), 1, "Expected a single persisted playlist");
-        assert_eq!(playlists[0].track_count, 2, "Persisted playlist should report two tracks");
+        assert_eq!(
+            playlists[0].track_count, 2,
+            "Persisted playlist should report two tracks"
+        );
         assert_eq!(playlists[0].name, scanned_files[0].name);
 
         let playlist_tracks = db
             .get_playlist_tracks(&playlist.id)
             .expect("Failed to read persisted playlist tracks");
-        assert_eq!(playlist_tracks.len(), 2, "Expected two persisted playlist tracks");
+        assert_eq!(
+            playlist_tracks.len(),
+            2,
+            "Expected two persisted playlist tracks"
+        );
         assert_eq!(playlist_tracks[0].video_id, "synthetic-video-001");
         assert_eq!(playlist_tracks[0].title, "Matched Synthetic Song One");
         assert_eq!(playlist_tracks[0].artist, "Synthetic Artist");
@@ -1743,9 +1872,21 @@ mod tests {
         drop(db);
 
         let persisted = Connection::open(&expected_db).expect("Failed to reopen temp database");
-        assert_eq!(count_rows(&persisted, "tracks"), 2, "Reopened temp DB should retain two tracks");
-        assert_eq!(count_rows(&persisted, "playlists"), 1, "Reopened temp DB should retain one playlist");
-        assert_eq!(count_rows(&persisted, "playlist_tracks"), 2, "Reopened temp DB should retain two links");
+        assert_eq!(
+            count_rows(&persisted, "tracks"),
+            2,
+            "Reopened temp DB should retain two tracks"
+        );
+        assert_eq!(
+            count_rows(&persisted, "playlists"),
+            1,
+            "Reopened temp DB should retain one playlist"
+        );
+        assert_eq!(
+            count_rows(&persisted, "playlist_tracks"),
+            2,
+            "Reopened temp DB should retain two links"
+        );
         drop(persisted);
 
         let db_size = std::fs::metadata(&expected_db)
@@ -1777,7 +1918,10 @@ mod tests {
         let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
-        let temp_data_dir = std::env::temp_dir().join(format!("ytm-free-persistence-state-harness-{}", uuid::Uuid::new_v4()));
+        let temp_data_dir = std::env::temp_dir().join(format!(
+            "ytm-free-persistence-state-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
 
         std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
@@ -1790,17 +1934,42 @@ mod tests {
 
         // --- Instance #1: seed synthetic state in the temp DB ---
         let db = Database::new().expect("Failed to create first temp database");
-        assert_eq!(count_rows(&db.conn, "tracks"), 0, "Temp DB should start empty of tracks");
-        assert_eq!(count_rows(&db.conn, "playlists"), 0, "Temp DB should start empty of playlists");
-        assert_eq!(count_rows(&db.conn, "playlist_tracks"), 0, "Temp DB should start empty of links");
+        assert_eq!(
+            count_rows(&db.conn, "tracks"),
+            0,
+            "Temp DB should start empty of tracks"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlists"),
+            0,
+            "Temp DB should start empty of playlists"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlist_tracks"),
+            0,
+            "Temp DB should start empty of links"
+        );
 
         let playlist = db
-            .create_playlist("Persistence Harness Playlist", Some("Synthetic two-track playlist for reopen persistence"))
+            .create_playlist(
+                "Persistence Harness Playlist",
+                Some("Synthetic two-track playlist for reopen persistence"),
+            )
             .expect("Failed to create synthetic playlist");
 
         let synthetic = [
-            ("persist-video-001", "Persist Song One", "Persist Artist One", 123i64),
-            ("persist-video-002", "Persist Song Two", "Persist Artist Two", 245i64),
+            (
+                "persist-video-001",
+                "Persist Song One",
+                "Persist Artist One",
+                123i64,
+            ),
+            (
+                "persist-video-002",
+                "Persist Song Two",
+                "Persist Artist Two",
+                245i64,
+            ),
         ];
         for (video_id, title, artist, duration) in synthetic {
             let thumbnail = format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg");
@@ -1820,30 +1989,55 @@ mod tests {
         assert_eq!(seeded_playlists, 1, "Expected one seeded playlist");
         assert_eq!(seeded_links, 2, "Expected two playlist links");
 
-        let seeded_size = std::fs::metadata(&expected_db).expect("Failed to stat seeded db").len();
+        let seeded_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat seeded db")
+            .len();
 
         // Drop the first Database instance (closes its SQLite connection).
         drop(db);
 
         // --- Instance #2: reopen the SAME temp DB via Database::new(), which reruns idempotent migrations on the existing file ---
-        let db2 = Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+        let db2 =
+            Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
 
         let reopened_tracks = count_rows(&db2.conn, "tracks");
         let reopened_playlists = count_rows(&db2.conn, "playlists");
         let reopened_links = count_rows(&db2.conn, "playlist_tracks");
-        assert_eq!(reopened_tracks, 2, "Reopened temp DB should retain two tracks");
-        assert_eq!(reopened_playlists, 1, "Reopened temp DB should retain one playlist");
-        assert_eq!(reopened_links, 2, "Reopened temp DB should retain two playlist links");
+        assert_eq!(
+            reopened_tracks, 2,
+            "Reopened temp DB should retain two tracks"
+        );
+        assert_eq!(
+            reopened_playlists, 1,
+            "Reopened temp DB should retain one playlist"
+        );
+        assert_eq!(
+            reopened_links, 2,
+            "Reopened temp DB should retain two playlist links"
+        );
 
-        let playlists = db2.get_playlists().expect("Failed to read persisted playlists after reopen");
-        assert_eq!(playlists.len(), 1, "Expected a single persisted playlist after reopen");
-        assert_eq!(playlists[0].track_count, 2, "Persisted playlist should still report two tracks");
+        let playlists = db2
+            .get_playlists()
+            .expect("Failed to read persisted playlists after reopen");
+        assert_eq!(
+            playlists.len(),
+            1,
+            "Expected a single persisted playlist after reopen"
+        );
+        assert_eq!(
+            playlists[0].track_count, 2,
+            "Persisted playlist should still report two tracks"
+        );
         assert_eq!(playlists[0].name, "Persistence Harness Playlist");
 
         let playlist_tracks = db2
             .get_playlist_tracks(&playlist.id)
             .expect("Failed to read persisted playlist tracks after reopen");
-        assert_eq!(playlist_tracks.len(), 2, "Expected two persisted playlist tracks after reopen");
+        assert_eq!(
+            playlist_tracks.len(),
+            2,
+            "Expected two persisted playlist tracks after reopen"
+        );
         assert_eq!(playlist_tracks[0].video_id, "persist-video-001");
         assert_eq!(playlist_tracks[0].title, "Persist Song One");
         assert_eq!(playlist_tracks[0].artist, "Persist Artist One");
@@ -1853,7 +2047,9 @@ mod tests {
         assert_eq!(playlist_tracks[1].artist, "Persist Artist Two");
         assert_eq!(playlist_tracks[1].duration, Some(245));
 
-        let reopened_size = std::fs::metadata(&expected_db).expect("Failed to stat reopened db").len();
+        let reopened_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat reopened db")
+            .len();
         let reopened_hash = sha256_hex(&expected_db);
 
         drop(db2);
@@ -1880,7 +2076,10 @@ mod tests {
         let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
-        let temp_data_dir = std::env::temp_dir().join(format!("ytm-free-delete-state-harness-{}", uuid::Uuid::new_v4()));
+        let temp_data_dir = std::env::temp_dir().join(format!(
+            "ytm-free-delete-state-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&temp_data_dir).expect("Failed to create temp data dir");
 
         std::env::set_var("YTM_FREE_DATA_DIR", &temp_data_dir);
@@ -1892,17 +2091,42 @@ mod tests {
         );
 
         let db = Database::new().expect("Failed to create temp database");
-        assert_eq!(count_rows(&db.conn, "tracks"), 0, "Temp DB should start empty of tracks");
-        assert_eq!(count_rows(&db.conn, "playlists"), 0, "Temp DB should start empty of playlists");
-        assert_eq!(count_rows(&db.conn, "playlist_tracks"), 0, "Temp DB should start empty of links");
+        assert_eq!(
+            count_rows(&db.conn, "tracks"),
+            0,
+            "Temp DB should start empty of tracks"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlists"),
+            0,
+            "Temp DB should start empty of playlists"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlist_tracks"),
+            0,
+            "Temp DB should start empty of links"
+        );
 
         let playlist = db
-            .create_playlist("Delete Harness Playlist", Some("Synthetic two-track playlist for deletion persistence"))
+            .create_playlist(
+                "Delete Harness Playlist",
+                Some("Synthetic two-track playlist for deletion persistence"),
+            )
             .expect("Failed to create synthetic playlist");
 
         let synthetic = [
-            ("delete-video-001", "Delete Song One", "Delete Artist One", 123i64),
-            ("delete-video-002", "Delete Song Two", "Delete Artist Two", 245i64),
+            (
+                "delete-video-001",
+                "Delete Song One",
+                "Delete Artist One",
+                123i64,
+            ),
+            (
+                "delete-video-002",
+                "Delete Song Two",
+                "Delete Artist Two",
+                245i64,
+            ),
         ];
         let mut track_ids = Vec::new();
         for (video_id, title, artist, duration) in synthetic {
@@ -1924,12 +2148,21 @@ mod tests {
         assert_eq!(seeded_playlists, 1, "Expected one seeded playlist");
         assert_eq!(seeded_links, 2, "Expected two playlist links");
 
-        let seeded_playlist = db.get_playlist(&playlist.id).expect("Failed to read seeded playlist");
-        assert_eq!(seeded_playlist.track_count, 2, "Seeded playlist should report two tracks");
+        let seeded_playlist = db
+            .get_playlist(&playlist.id)
+            .expect("Failed to read seeded playlist");
+        assert_eq!(
+            seeded_playlist.track_count, 2,
+            "Seeded playlist should report two tracks"
+        );
         let seeded_playlist_tracks = db
             .get_playlist_tracks(&playlist.id)
             .expect("Failed to read seeded playlist tracks");
-        assert_eq!(seeded_playlist_tracks.len(), 2, "Expected two seeded playlist tracks");
+        assert_eq!(
+            seeded_playlist_tracks.len(),
+            2,
+            "Expected two seeded playlist tracks"
+        );
         assert_eq!(seeded_playlist_tracks[0].video_id, "delete-video-001");
         assert_eq!(seeded_playlist_tracks[1].video_id, "delete-video-002");
 
@@ -1941,18 +2174,42 @@ mod tests {
         let after_delete_tracks = count_rows(&db.conn, "tracks");
         let after_delete_playlists = count_rows(&db.conn, "playlists");
         let after_delete_links = count_rows(&db.conn, "playlist_tracks");
-        assert_eq!(after_delete_tracks, 2, "Removing from playlist should not delete track rows");
-        assert_eq!(after_delete_playlists, 1, "Removing from playlist should not delete the playlist row");
-        assert_eq!(after_delete_links, 1, "Expected one playlist link after removal");
-        assert!(db.get_track_by_uuid(&removed_track_id).is_ok(), "Removed playlist member track row should remain");
-        assert!(db.get_track_by_uuid(&kept_track_id).is_ok(), "Kept playlist member track row should remain");
+        assert_eq!(
+            after_delete_tracks, 2,
+            "Removing from playlist should not delete track rows"
+        );
+        assert_eq!(
+            after_delete_playlists, 1,
+            "Removing from playlist should not delete the playlist row"
+        );
+        assert_eq!(
+            after_delete_links, 1,
+            "Expected one playlist link after removal"
+        );
+        assert!(
+            db.get_track_by_uuid(&removed_track_id).is_ok(),
+            "Removed playlist member track row should remain"
+        );
+        assert!(
+            db.get_track_by_uuid(&kept_track_id).is_ok(),
+            "Kept playlist member track row should remain"
+        );
 
-        let after_delete_playlist = db.get_playlist(&playlist.id).expect("Failed to read playlist after removal");
-        assert_eq!(after_delete_playlist.track_count, 1, "Playlist should report one track after removal");
+        let after_delete_playlist = db
+            .get_playlist(&playlist.id)
+            .expect("Failed to read playlist after removal");
+        assert_eq!(
+            after_delete_playlist.track_count, 1,
+            "Playlist should report one track after removal"
+        );
         let after_delete_playlist_tracks = db
             .get_playlist_tracks(&playlist.id)
             .expect("Failed to read playlist tracks after removal");
-        assert_eq!(after_delete_playlist_tracks.len(), 1, "Expected one playlist track after removal");
+        assert_eq!(
+            after_delete_playlist_tracks.len(),
+            1,
+            "Expected one playlist track after removal"
+        );
         assert_eq!(after_delete_playlist_tracks[0].video_id, "delete-video-002");
         assert_eq!(after_delete_playlist_tracks[0].title, "Delete Song Two");
         assert_eq!(after_delete_playlist_tracks[0].artist, "Delete Artist Two");
@@ -1964,13 +2221,23 @@ mod tests {
 
         drop(db);
 
-        let db2 = Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+        let db2 =
+            Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
         let reopened_tracks = count_rows(&db2.conn, "tracks");
         let reopened_playlists = count_rows(&db2.conn, "playlists");
         let reopened_links = count_rows(&db2.conn, "playlist_tracks");
-        assert_eq!(reopened_tracks, 2, "Reopened temp DB should retain two track rows");
-        assert_eq!(reopened_playlists, 1, "Reopened temp DB should retain one playlist row");
-        assert_eq!(reopened_links, 1, "Reopened temp DB should retain one playlist link");
+        assert_eq!(
+            reopened_tracks, 2,
+            "Reopened temp DB should retain two track rows"
+        );
+        assert_eq!(
+            reopened_playlists, 1,
+            "Reopened temp DB should retain one playlist row"
+        );
+        assert_eq!(
+            reopened_links, 1,
+            "Reopened temp DB should retain one playlist link"
+        );
 
         let removed_link_count: i64 = db2
             .conn
@@ -1980,7 +2247,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to count removed playlist link after reopen");
-        assert_eq!(removed_link_count, 0, "Removed playlist link should stay absent after reopen");
+        assert_eq!(
+            removed_link_count, 0,
+            "Removed playlist link should stay absent after reopen"
+        );
 
         let kept_link_count: i64 = db2
             .conn
@@ -1990,22 +2260,42 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to count kept playlist link after reopen");
-        assert_eq!(kept_link_count, 1, "Kept playlist link should remain after reopen");
+        assert_eq!(
+            kept_link_count, 1,
+            "Kept playlist link should remain after reopen"
+        );
 
-        let reopened_playlist = db2.get_playlist(&playlist.id).expect("Failed to read playlist after reopen");
-        assert_eq!(reopened_playlist.track_count, 1, "Reopened playlist should report one track");
+        let reopened_playlist = db2
+            .get_playlist(&playlist.id)
+            .expect("Failed to read playlist after reopen");
+        assert_eq!(
+            reopened_playlist.track_count, 1,
+            "Reopened playlist should report one track"
+        );
         let reopened_playlist_tracks = db2
             .get_playlist_tracks(&playlist.id)
             .expect("Failed to read playlist tracks after reopen");
-        assert_eq!(reopened_playlist_tracks.len(), 1, "Expected one playlist track after reopen");
+        assert_eq!(
+            reopened_playlist_tracks.len(),
+            1,
+            "Expected one playlist track after reopen"
+        );
         assert_eq!(reopened_playlist_tracks[0].video_id, "delete-video-002");
         assert_eq!(reopened_playlist_tracks[0].title, "Delete Song Two");
         assert_eq!(reopened_playlist_tracks[0].artist, "Delete Artist Two");
         assert_eq!(reopened_playlist_tracks[0].duration, Some(245));
-        assert!(db2.get_track_by_uuid(&removed_track_id).is_ok(), "Removed playlist member track row should remain after reopen");
-        assert!(db2.get_track_by_uuid(&kept_track_id).is_ok(), "Kept playlist member track row should remain after reopen");
+        assert!(
+            db2.get_track_by_uuid(&removed_track_id).is_ok(),
+            "Removed playlist member track row should remain after reopen"
+        );
+        assert!(
+            db2.get_track_by_uuid(&kept_track_id).is_ok(),
+            "Kept playlist member track row should remain after reopen"
+        );
 
-        let reopened_size = std::fs::metadata(&expected_db).expect("Failed to stat reopened db").len();
+        let reopened_size = std::fs::metadata(&expected_db)
+            .expect("Failed to stat reopened db")
+            .len();
         let reopened_hash = sha256_hex(&expected_db);
 
         drop(db2);
@@ -2165,8 +2455,8 @@ mod tests {
 
         drop(db);
 
-        let db2 = Database::new()
-            .expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
+        let db2 =
+            Database::new().expect("Failed to reopen temp database with same YTM_FREE_DATA_DIR");
         let reopened_tracks = count_rows(&db2.conn, "tracks");
         let reopened_metadata = count_rows(&db2.conn, "track_metadata");
         assert_eq!(

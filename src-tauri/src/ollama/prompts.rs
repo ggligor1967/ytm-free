@@ -6,14 +6,14 @@ pub struct TrackMetadataAI {
     pub genre: String,
     pub sub_genre: Option<String>,
     pub mood: String,
-    pub energy_level: u8,      // 1-10
-    pub tempo: String,         // slow, medium, fast
-    pub danceability: u8,      // 1-10 (B7)
-    pub vocal_type: String,    // instrumental, female vocals, male vocals, mixed vocals, rap, choir (B8)
-    pub decade: String,        // 1960s, 1970s, 1980s, 1990s, 2000s, 2010s, 2020s (B9)
-    pub language: String,      // English, Romanian, Spanish, French, Instrumental, etc. (B10)
-    pub activity_tags: Vec<String>,  // workout, study, sleep, driving, party, cooking, meditation (B11)
-    pub occasion_tags: Vec<String>,  // wedding, birthday, christmas, summer, road trip (B11)
+    pub energy_level: u8,           // 1-10
+    pub tempo: String,              // slow, medium, fast
+    pub danceability: u8,           // 1-10 (B7)
+    pub vocal_type: String, // instrumental, female vocals, male vocals, mixed vocals, rap, choir (B8)
+    pub decade: String,     // 1960s, 1970s, 1980s, 1990s, 2000s, 2010s, 2020s (B9)
+    pub language: String,   // English, Romanian, Spanish, French, Instrumental, etc. (B10)
+    pub activity_tags: Vec<String>, // workout, study, sleep, driving, party, cooking, meditation (B11)
+    pub occasion_tags: Vec<String>, // wedding, birthday, christmas, summer, road trip (B11)
     pub keywords: Vec<String>,
 }
 
@@ -42,7 +42,10 @@ pub enum PlayerCommand {
     #[serde(rename = "search")]
     Search { query: String },
     #[serde(rename = "create_playlist")]
-    CreatePlaylist { name: String, description: Option<String> },
+    CreatePlaylist {
+        name: String,
+        description: Option<String>,
+    },
     #[serde(rename = "set_mood")]
     SetMood { mood: String },
     #[serde(rename = "set_volume")]
@@ -324,7 +327,12 @@ Exemple:
         } else {
             format!(
                 "\nArtiști din biblioteca utilizatorului: {}",
-                existing_artists.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+                existing_artists
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         };
 
@@ -367,7 +375,14 @@ Returnează JSON:
                 let dur_str = dur
                     .map(|d| format!(" [{}:{}]", d / 60, d % 60))
                     .unwrap_or_default();
-                format!("{}. ID:{} - \"{}\" de {}{}", i + 1, id, title, channel, dur_str)
+                format!(
+                    "{}. ID:{} - \"{}\" de {}{}",
+                    i + 1,
+                    id,
+                    title,
+                    channel,
+                    dur_str
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -791,10 +806,18 @@ Return JSON:
     ) -> String {
         let metadata_context = {
             let mut parts = Vec::new();
-            if let Some(g) = genre { parts.push(format!("Genre: {}", g)); }
-            if let Some(m) = mood { parts.push(format!("Mood: {}", m)); }
-            if let Some(e) = energy { parts.push(format!("Energy: {}/10", e)); }
-            if let Some(d) = decade { parts.push(format!("Decade: {}", d)); }
+            if let Some(g) = genre {
+                parts.push(format!("Genre: {}", g));
+            }
+            if let Some(m) = mood {
+                parts.push(format!("Mood: {}", m));
+            }
+            if let Some(e) = energy {
+                parts.push(format!("Energy: {}/10", e));
+            }
+            if let Some(d) = decade {
+                parts.push(format!("Decade: {}", d));
+            }
             if parts.is_empty() {
                 String::new()
             } else {
@@ -893,10 +916,17 @@ Return JSON:
   "track_ids": ["id1", "id2", ...],
   "transition_points": ["start: {}", "mid: transitional", "end: {}"]
 }}"#,
-            start_mood, end_mood, library_tracks,
-            start_mood, end_mood,
-            start_mood, end_mood, start_mood, end_mood,
-            start_mood, end_mood
+            start_mood,
+            end_mood,
+            library_tracks,
+            start_mood,
+            end_mood,
+            start_mood,
+            end_mood,
+            start_mood,
+            end_mood,
+            start_mood,
+            end_mood
         )
     }
 
@@ -1101,8 +1131,14 @@ Return JSON:
   "description": "Short 1-sentence description of today's vibe",
   "track_ids": ["id1", "id2", ...]
 }}"#,
-            hour, time_context, day_of_week, weekend_hint,
-            genres_context, moods_context, recent_tracks, library_summary
+            hour,
+            time_context,
+            day_of_week,
+            weekend_hint,
+            genres_context,
+            moods_context,
+            recent_tracks,
+            library_summary
         )
     }
 
@@ -1124,7 +1160,14 @@ Return JSON:
                 let dur_str = dur
                     .map(|d| format!(" [{}:{:02}]", d / 60, d % 60))
                     .unwrap_or_default();
-                format!("{}. ID:{} | \"{}\" | Canal: {}{}", i + 1, id, yt_title, channel, dur_str)
+                format!(
+                    "{}. ID:{} | \"{}\" | Canal: {}{}",
+                    i + 1,
+                    id,
+                    yt_title,
+                    channel,
+                    dur_str
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1160,11 +1203,7 @@ Returnează JSON:
     }
 
     /// D3: Alternative search queries when primary search fails
-    pub fn alternative_queries(
-        track_name: &str,
-        artist_name: &str,
-        album: &str,
-    ) -> String {
+    pub fn alternative_queries(track_name: &str, artist_name: &str, album: &str) -> String {
         format!(
             r#"Piesa Spotify nu a fost găsită pe YouTube cu căutarea standard.
 
@@ -1239,17 +1278,18 @@ Returnează JSON:
   "duration_match": true,
   "recommendation": "accept" | "review" | "reject" | "re-search"
 }}"#,
-            spotify_title, spotify_artist, spotify_album, sp_dur,
-            youtube_title, youtube_channel, yt_dur
+            spotify_title,
+            spotify_artist,
+            spotify_album,
+            sp_dur,
+            youtube_title,
+            youtube_channel,
+            yt_dur
         )
     }
 
     /// D5: Suggest similar/alternative track when original can't be found
-    pub fn suggest_similar_track(
-        track_name: &str,
-        artist_name: &str,
-        album: &str,
-    ) -> String {
+    pub fn suggest_similar_track(track_name: &str, artist_name: &str, album: &str) -> String {
         format!(
             r#"O piesă Spotify nu a putut fi găsită pe YouTube. Sugerează alternative similare.
 
@@ -1294,11 +1334,20 @@ Returnează JSON:
     ) -> String {
         let current_meta = {
             let mut parts = Vec::new();
-            if let Some(g) = current_genre { parts.push(format!("Genre: {}", g)); }
-            if let Some(m) = current_mood { parts.push(format!("Mood: {}", m)); }
-            if let Some(e) = current_energy { parts.push(format!("Energy: {}/10", e)); }
-            if parts.is_empty() { "No metadata available".to_string() }
-            else { parts.join(", ") }
+            if let Some(g) = current_genre {
+                parts.push(format!("Genre: {}", g));
+            }
+            if let Some(m) = current_mood {
+                parts.push(format!("Mood: {}", m));
+            }
+            if let Some(e) = current_energy {
+                parts.push(format!("Energy: {}/10", e));
+            }
+            if parts.is_empty() {
+                "No metadata available".to_string()
+            } else {
+                parts.join(", ")
+            }
         };
 
         let recently_played = if recent_track_ids.is_empty() {
@@ -1325,8 +1374,7 @@ Select the {} best next track(s) from the library. Consider:
 
 Return ONLY a JSON array of track IDs in play order:
 ["track-id-1", "track-id-2", ...]"#,
-            current_title, current_artist, current_meta, recently_played,
-            library_summary, count
+            current_title, current_artist, current_meta, recently_played, library_summary, count
         )
     }
 
@@ -1374,10 +1422,7 @@ Return ONLY JSON:
     }
 
     /// I3: Wake-up sequence — morning energy ramp
-    pub fn wake_up_sequence(
-        library_summary: &str,
-        duration_minutes: u32,
-    ) -> String {
+    pub fn wake_up_sequence(library_summary: &str, duration_minutes: u32) -> String {
         format!(
             r#"You are a smart DJ creating a wake-up morning sequence.
 
@@ -1402,10 +1447,7 @@ IMPORTANT: Do NOT include any reasoning, thoughts, explanation, or chain-of-thou
     }
 
     /// I4: Sleep timer sequence — wind-down energy decrease
-    pub fn sleep_timer_sequence(
-        library_summary: &str,
-        duration_minutes: u32,
-    ) -> String {
+    pub fn sleep_timer_sequence(library_summary: &str, duration_minutes: u32) -> String {
         format!(
             r#"You are a smart DJ creating a sleep/wind-down sequence.
 
@@ -1431,11 +1473,7 @@ IMPORTANT: Do NOT include any reasoning, thoughts, explanation, or chain-of-thou
     }
 
     /// I5: Workout pacer — high-energy BPM-matched queue
-    pub fn workout_pacer(
-        library_summary: &str,
-        duration_minutes: u32,
-        intensity: &str,
-    ) -> String {
+    pub fn workout_pacer(library_summary: &str, duration_minutes: u32, intensity: &str) -> String {
         let energy_range = match intensity {
             "low" => "5-7",
             "high" => "8-10",
@@ -1485,7 +1523,9 @@ IMPORTANT: Do NOT include any reasoning, thoughts, explanation, or chain-of-thou
         };
 
         let weekend_hint = match day_of_week {
-            "Saturday" | "Sunday" => "\nIt's the weekend - user might want more relaxed or party vibes.",
+            "Saturday" | "Sunday" => {
+                "\nIt's the weekend - user might want more relaxed or party vibes."
+            }
             "Friday" => "\nIt's Friday evening - user might want upbeat/party music.",
             _ => "",
         };
@@ -2030,7 +2070,6 @@ Return JSON:
             tracks
         )
     }
-
 }
 
 // ============================================================================
@@ -2284,9 +2323,16 @@ Return JSON:
 }}}}
 
 IMPORTANT: The commentary should sound like a real radio DJ speaking naturally. Never mention JSON, AI, or technical terms."#,
-            prev_title, prev_artist, prev_genre_str, prev_mood_str,
-            next_title, next_artist, next_genre_str, next_mood_str,
-            style, language
+            prev_title,
+            prev_artist,
+            prev_genre_str,
+            prev_mood_str,
+            next_title,
+            next_artist,
+            next_genre_str,
+            next_mood_str,
+            style,
+            language
         )
     }
 
@@ -2327,12 +2373,7 @@ Return JSON:
     }
 
     /// DJ QueueEmpty: Farewell when playlist ends
-    pub fn dj_queue_empty(
-        title: &str,
-        artist: &str,
-        style: &str,
-        language: &str,
-    ) -> String {
+    pub fn dj_queue_empty(title: &str, artist: &str, style: &str, language: &str) -> String {
         format!(
             r#"You are an AI radio DJ with a {} style. Generate a farewell message when the queue is empty.
 Keep it warm and concise (1-2 sentences).

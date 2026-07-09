@@ -1,6 +1,6 @@
 use reqwest::Client;
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
@@ -28,7 +28,10 @@ fn generate_request_id() -> String {
 
 /// Determine if an error is retryable (timeout or connection error, NOT parse errors)
 fn is_retryable(err: &OllamaError) -> bool {
-    matches!(err, OllamaError::Network(_) | OllamaError::Timeout | OllamaError::NotAvailable)
+    matches!(
+        err,
+        OllamaError::Network(_) | OllamaError::Timeout | OllamaError::NotAvailable
+    )
 }
 
 #[derive(Error, Debug)]
@@ -109,7 +112,7 @@ impl OllamaClient {
                 Client::builder()
                     .timeout(std::time::Duration::from_secs(90))
                     .build()
-                    .expect("Failed to create HTTP client")
+                    .expect("Failed to create HTTP client"),
             ),
             base_url: OLLAMA_DEFAULT_URL.to_string(),
             model: DEFAULT_MODEL.to_string(),
@@ -123,7 +126,7 @@ impl OllamaClient {
                 Client::builder()
                     .timeout(std::time::Duration::from_secs(90))
                     .build()
-                    .expect("Failed to create HTTP client")
+                    .expect("Failed to create HTTP client"),
             ),
             base_url: base_url.to_string(),
             model: model.to_string(),
@@ -142,7 +145,8 @@ impl OllamaClient {
     /// List available models (API + CLI fallback)
     pub async fn list_models(&self) -> Result<Vec<String>, OllamaError> {
         // Try API first
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/tags", self.base_url))
             .send()
             .await
@@ -180,29 +184,35 @@ impl OllamaClient {
     }
 
     /// Generate embeddings via POST /api/embed
-    pub async fn embed(&self, texts: Vec<String>, model: &str) -> Result<Vec<Vec<f32>>, OllamaError> {
+    pub async fn embed(
+        &self,
+        texts: Vec<String>,
+        model: &str,
+    ) -> Result<Vec<Vec<f32>>, OllamaError> {
         let request = EmbedRequest {
             model: model.to_string(),
             input: texts,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/embed", self.base_url))
             .json(&request)
             .send()
             .await
             .map_err(|e| {
-                if e.is_timeout() { 
-                    OllamaError::Timeout 
-                } else { 
-                    OllamaError::Network(e.to_string()) 
+                if e.is_timeout() {
+                    OllamaError::Timeout
+                } else {
+                    OllamaError::Network(e.to_string())
                 }
             })?;
 
         if !response.status().is_success() {
-            return Err(OllamaError::Network(
-                format!("Embed failed: {}", response.status())
-            ));
+            return Err(OllamaError::Network(format!(
+                "Embed failed: {}",
+                response.status()
+            )));
         }
 
         let result: EmbedResponse = response
@@ -216,7 +226,9 @@ impl OllamaClient {
     /// Embed single text (convenience wrapper)
     pub async fn embed_single(&self, text: &str, model: &str) -> Result<Vec<f32>, OllamaError> {
         let results = self.embed(vec![text.to_string()], model).await?;
-        results.into_iter().next()
+        results
+            .into_iter()
+            .next()
             .ok_or(OllamaError::Parse("No embedding returned".to_string()))
     }
 
@@ -232,11 +244,17 @@ impl OllamaClient {
         temperature: f32,
         max_tokens: i32,
     ) -> Result<String, OllamaError> {
-        self.generate_with_options_advanced(prompt, temperature, max_tokens, None, None).await
+        self.generate_with_options_advanced(prompt, temperature, max_tokens, None, None)
+            .await
     }
 
     /// Execute a fallible closure with retry logic (exponential backoff + request ID logging)
-    async fn execute_with_retry<F, Fut, T>(&self, request_id: &str, config: &RetryConfig, f: F) -> Result<T, OllamaError>
+    async fn execute_with_retry<F, Fut, T>(
+        &self,
+        request_id: &str,
+        config: &RetryConfig,
+        f: F,
+    ) -> Result<T, OllamaError>
     where
         F: Fn(u32, std::time::Duration) -> Fut,
         Fut: std::future::Future<Output = Result<T, OllamaError>>,
@@ -247,7 +265,10 @@ impl OllamaClient {
             let timeout = std::time::Duration::from_secs(timeout_secs);
             tracing::info!(
                 "ollama request {}: attempt={}/{}, timeout={}s",
-                request_id, attempt, config.max_retries, timeout_secs
+                request_id,
+                attempt,
+                config.max_retries,
+                timeout_secs
             );
             let start = std::time::Instant::now();
             match f(attempt, timeout).await {
@@ -255,7 +276,8 @@ impl OllamaClient {
                     let latency = start.elapsed().as_millis();
                     tracing::info!(
                         "ollama response {}: status=ok, latency={}ms",
-                        request_id, latency
+                        request_id,
+                        latency
                     );
                     return Ok(result);
                 }
@@ -263,7 +285,11 @@ impl OllamaClient {
                     let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
                     tracing::warn!(
                         "ollama retry {}: attempt={}/{}, error={}, retry_in={}ms",
-                        request_id, attempt, config.max_retries, e, backoff.as_millis()
+                        request_id,
+                        attempt,
+                        config.max_retries,
+                        e,
+                        backoff.as_millis()
                     );
                     tokio::time::sleep(backoff).await;
                     last_err = Some(e);
@@ -272,7 +298,10 @@ impl OllamaClient {
                     if attempt >= config.max_retries && is_retryable(&e) {
                         tracing::warn!(
                             "ollama retry {}: attempt={}/{}, error={} — max retries reached",
-                            request_id, attempt, config.max_retries, e
+                            request_id,
+                            attempt,
+                            config.max_retries,
+                            e
                         );
                     }
                     return Err(e);
@@ -304,7 +333,8 @@ impl OllamaClient {
             }),
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/generate", self.base_url))
             .json(&request)
             .send()
@@ -389,8 +419,9 @@ impl OllamaClient {
         }).await?;
 
         let json_str = extract_json(&response_str)?;
-        serde_json::from_str(&json_str)
-            .map_err(|e| OllamaError::Parse(format!("Invalid JSON: {} - Response was: {}", e, json_str)))
+        serde_json::from_str(&json_str).map_err(|e| {
+            OllamaError::Parse(format!("Invalid JSON: {} - Response was: {}", e, json_str))
+        })
     }
 
     /// Generate JSON response with larger token budget (FAZA 6) with retry
@@ -399,7 +430,10 @@ impl OllamaClient {
         prompt: &str,
     ) -> Result<T, OllamaError> {
         let request_id = generate_request_id();
-        let config = RetryConfig { base_timeout_secs: 60, ..Default::default() };
+        let config = RetryConfig {
+            base_timeout_secs: 60,
+            ..Default::default()
+        };
         let self_arc = Arc::new(self.clone());
 
         let response_str = self.execute_with_retry(&request_id, &config, |_attempt, timeout| {
@@ -452,8 +486,12 @@ impl OllamaClient {
             Ok(v) => Ok(v),
             Err(e) => {
                 let repaired = repair_truncated_json(&json_str);
-                serde_json::from_str(&repaired)
-                    .map_err(|e2| OllamaError::Parse(format!("Invalid JSON (even after repair): {} - Original error: {}", e2, e)))
+                serde_json::from_str(&repaired).map_err(|e2| {
+                    OllamaError::Parse(format!(
+                        "Invalid JSON (even after repair): {} - Original error: {}",
+                        e2, e
+                    ))
+                })
             }
         }
     }
@@ -470,13 +508,22 @@ impl OllamaClient {
             prompt
         );
 
-        let response = self.generate_with_options_advanced(&json_prompt, temperature, 2048, Some("json".to_string()), Some(system_prompt)).await?;
-        
+        let response = self
+            .generate_with_options_advanced(
+                &json_prompt,
+                temperature,
+                2048,
+                Some("json".to_string()),
+                Some(system_prompt),
+            )
+            .await?;
+
         // Try to extract JSON from response
         let json_str = extract_json(&response)?;
-        
-        serde_json::from_str(&json_str)
-            .map_err(|e| OllamaError::Parse(format!("Invalid JSON: {} - Response was: {}", e, json_str)))
+
+        serde_json::from_str(&json_str).map_err(|e| {
+            OllamaError::Parse(format!("Invalid JSON: {} - Response was: {}", e, json_str))
+        })
     }
 }
 
@@ -490,17 +537,17 @@ impl Default for OllamaClient {
 /// This handles the common case where LLM output is cut off mid-array/object.
 fn repair_truncated_json(json: &str) -> String {
     let mut result = json.trim_end().to_string();
-    
+
     // Remove trailing comma if present (common in truncated arrays/objects)
     if result.ends_with(',') {
         result.pop();
     }
-    
+
     // Count unclosed brackets/braces
     let mut stack: Vec<char> = Vec::new();
     let mut in_string = false;
     let mut escape_next = false;
-    
+
     for ch in result.chars() {
         if escape_next {
             escape_next = false;
@@ -520,28 +567,30 @@ fn repair_truncated_json(json: &str) -> String {
         match ch {
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => { stack.pop(); }
+            '}' | ']' => {
+                stack.pop();
+            }
             _ => {}
         }
     }
-    
+
     // If we're still inside a string, close it
     if in_string {
         result.push('"');
     }
-    
+
     // Close remaining unclosed brackets/braces in reverse order
     while let Some(closer) = stack.pop() {
         result.push(closer);
     }
-    
+
     result
 }
 
 /// Extract JSON from LLM response (handles markdown code blocks, thinking tokens, and truncation)
 fn extract_json(text: &str) -> Result<String, OllamaError> {
     let mut content = text.trim().to_string();
-    
+
     // Strip <think>...</think> blocks (DeepSeek R1, QwQ style)
     while let Some(start) = content.find("<think>") {
         if let Some(end) = content.find("</think>") {
@@ -553,20 +602,26 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
             break;
         }
     }
-    
+
     // Strip THOUGHT: ... blocks (until next clear text or start of JSON)
     if let Some(thought_pos) = content.find("THOUGHT:") {
-        if let Some(json_start) = content[thought_pos..].find('{').or_else(|| content[thought_pos..].find('[')) {
+        if let Some(json_start) = content[thought_pos..]
+            .find('{')
+            .or_else(|| content[thought_pos..].find('['))
+        {
             // JSON found after THOUGHT:, skip to it
             content = content[thought_pos + json_start..].to_string();
         } else {
             // No JSON after THOUGHT:, return error
-            return Err(OllamaError::Parse(format!("Could not extract JSON from response: {}", &text[..text.len().min(200)])));
+            return Err(OllamaError::Parse(format!(
+                "Could not extract JSON from response: {}",
+                &text[..text.len().min(200)]
+            )));
         }
     }
-    
+
     let trimmed = content.trim();
-    
+
     // Check if wrapped in code block
     if trimmed.starts_with("```json") {
         if let Some(end) = trimmed.rfind("```") {
@@ -576,7 +631,7 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
             }
         }
     }
-    
+
     if trimmed.starts_with("```") {
         if let Some(end) = trimmed.rfind("```") {
             let start = trimmed.find('\n').unwrap_or(3) + 1;
@@ -585,7 +640,7 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
             }
         }
     }
-    
+
     // Check if it's already JSON
     if (trimmed.starts_with('{') && (trimmed.ends_with('}') || trimmed.ends_with('}')))
         || (trimmed.starts_with('[') && (trimmed.ends_with(']') || trimmed.ends_with(']')))
@@ -596,7 +651,7 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
     // Try to find JSON from first { or [ to last } or ]
     let start_brace = trimmed.find('{');
     let start_bracket = trimmed.find('[');
-    
+
     match (start_brace, start_bracket) {
         (Some(s), None) => {
             if let Some(e) = trimmed.rfind('}') {
@@ -606,7 +661,7 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
                     return Ok(repair_truncated_json(&extracted));
                 }
             }
-        },
+        }
         (None, Some(s)) => {
             if let Some(e) = trimmed.rfind(']') {
                 if s < e {
@@ -614,7 +669,7 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
                     return Ok(repair_truncated_json(&extracted));
                 }
             }
-        },
+        }
         (Some(s_brace), Some(s_bracket)) => {
             let s = s_brace.min(s_bracket);
             let e_brace = trimmed.rfind('}');
@@ -624,11 +679,14 @@ fn extract_json(text: &str) -> Result<String, OllamaError> {
                 let extracted = trimmed[s..=e].to_string();
                 return Ok(repair_truncated_json(&extracted));
             }
-        },
+        }
         _ => {}
     }
-    
-    Err(OllamaError::Parse(format!("Could not extract JSON from response: {}", &trimmed[..trimmed.len().min(200)])))
+
+    Err(OllamaError::Parse(format!(
+        "Could not extract JSON from response: {}",
+        &trimmed[..trimmed.len().min(200)]
+    )))
 }
 
 #[cfg(test)]

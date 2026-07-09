@@ -207,14 +207,22 @@ async fn video_stream_handler(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", &video_url,
-            "-i", &audio_url,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-            "-f", "mp4",
+            "-loglevel",
+            "error",
+            "-i",
+            &video_url,
+            "-i",
+            &audio_url,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
@@ -226,7 +234,10 @@ async fn video_stream_handler(
             let stdout = match child.stdout.take() {
                 Some(s) => s,
                 None => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "ffmpeg stdout unavailable")
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "ffmpeg stdout unavailable",
+                    )
                         .into_response()
                 }
             };
@@ -251,7 +262,10 @@ async fn video_stream_handler(
             error!("Failed to spawn ffmpeg for {}: {}", video_id, e);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("ffmpeg not available: {}. Install ffmpeg to enable HD video.", e),
+                format!(
+                    "ffmpeg not available: {}. Install ffmpeg to enable HD video.",
+                    e
+                ),
             )
                 .into_response()
         }
@@ -308,7 +322,11 @@ async fn tts_file_handler(Path(filename): Path<String>) -> Response {
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(e) => {
             error!("TTS file not found {}: {}", filename, e);
-            (StatusCode::NOT_FOUND, format!("TTS file not found: {}", filename)).into_response()
+            (
+                StatusCode::NOT_FOUND,
+                format!("TTS file not found: {}", filename),
+            )
+                .into_response()
         }
     }
 }

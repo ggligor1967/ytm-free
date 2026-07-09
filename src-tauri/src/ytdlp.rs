@@ -46,14 +46,21 @@ impl SearchCache {
     }
 
     fn get(&self, query: &str) -> Option<&Vec<SearchResult>> {
-        self.entries.get(query)
+        self.entries
+            .get(query)
             .filter(|entry| entry.expires_at > Instant::now())
             .map(|entry| &entry.results)
     }
 
     fn set(&mut self, query: String, results: Vec<SearchResult>) {
         let expires_at = Instant::now() + Duration::from_secs(self.default_ttl_secs);
-        self.entries.insert(query, SearchCacheEntry { results, expires_at });
+        self.entries.insert(
+            query,
+            SearchCacheEntry {
+                results,
+                expires_at,
+            },
+        );
     }
 
     fn cleanup(&mut self) {
@@ -88,7 +95,7 @@ pub async fn check_installation() -> Result<String, YtdlpError> {
 pub async fn search(query: &str, max_results: i64) -> Result<Vec<SearchResult>, YtdlpError> {
     // Check cache first
     let cache_key = format!("{}:{}", query, max_results);
-    
+
     {
         let cache = SEARCH_CACHE.read().await;
         if let Some(cached) = cache.get(&cache_key) {
@@ -168,7 +175,7 @@ pub async fn cleanup_cache() {
 fn parse_search_result(json: &Value) -> Option<SearchResult> {
     let id = json.get("id")?.as_str()?.to_string();
     let title = json.get("title")?.as_str()?.to_string();
-    
+
     // Extract artist from channel or uploader
     let artist = json
         .get("channel")
@@ -237,12 +244,7 @@ pub async fn get_info(video_id: &str) -> Result<TrackInfo, YtdlpError> {
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
     let output = Command::new("yt-dlp")
-        .args([
-            "--dump-json",
-            "--no-warnings",
-            "-f", "bestaudio",
-            &url,
-        ])
+        .args(["--dump-json", "--no-warnings", "-f", "bestaudio", &url])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -255,15 +257,17 @@ pub async fn get_info(video_id: &str) -> Result<TrackInfo, YtdlpError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: Value = serde_json::from_str(&stdout)
-        .map_err(|e| YtdlpError::ParseError(e.to_string()))?;
+    let json: Value =
+        serde_json::from_str(&stdout).map_err(|e| YtdlpError::ParseError(e.to_string()))?;
 
-    let id = json.get("id")
+    let id = json
+        .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or(video_id)
         .to_string();
 
-    let title = json.get("title")
+    let title = json
+        .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown Title")
         .to_string();
@@ -277,7 +281,10 @@ pub async fn get_info(video_id: &str) -> Result<TrackInfo, YtdlpError> {
 
     let thumbnail = extract_thumbnail(&json);
     let duration = json.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
-    let audio_url = json.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let audio_url = json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Parse available formats
     let formats = parse_audio_formats(&json);
@@ -303,18 +310,20 @@ fn parse_audio_formats(json: &Value) -> Vec<AudioFormat> {
             let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
 
             if vcodec == "none" && acodec != "none" {
-                let format_id = f.get("format_id")
+                let format_id = f
+                    .get("format_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                let ext = f.get("ext")
+                let ext = f
+                    .get("ext")
                     .and_then(|v| v.as_str())
                     .unwrap_or("m4a")
                     .to_string();
 
                 let abr = f.get("abr").and_then(|v| v.as_f64());
-                
+
                 let quality = match abr {
                     Some(bitrate) if bitrate >= 256.0 => "High".to_string(),
                     Some(bitrate) if bitrate >= 128.0 => "Medium".to_string(),
@@ -337,7 +346,10 @@ fn parse_audio_formats(json: &Value) -> Vec<AudioFormat> {
 
     // Sort by bitrate (highest first)
     formats.sort_by(|a, b| {
-        b.abr.unwrap_or(0.0).partial_cmp(&a.abr.unwrap_or(0.0)).unwrap()
+        b.abr
+            .unwrap_or(0.0)
+            .partial_cmp(&a.abr.unwrap_or(0.0))
+            .unwrap()
     });
 
     formats
@@ -349,7 +361,8 @@ pub async fn get_audio_url(video_id: &str) -> Result<String, YtdlpError> {
 
     let output = Command::new("yt-dlp")
         .args([
-            "-f", "bestaudio/best",
+            "-f",
+            "bestaudio/best",
             "-g", // Get URL only
             "--no-warnings",
             &url,
@@ -366,9 +379,11 @@ pub async fn get_audio_url(video_id: &str) -> Result<String, YtdlpError> {
     }
 
     let audio_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     if audio_url.is_empty() {
-        return Err(YtdlpError::ExecutionError("No audio URL returned".to_string()));
+        return Err(YtdlpError::ExecutionError(
+            "No audio URL returned".to_string(),
+        ));
     }
 
     Ok(audio_url)
@@ -429,14 +444,16 @@ pub async fn get_video_urls(video_id: &str) -> Result<(String, String), YtdlpErr
         // Single combined stream (e.g. best[height<=720]) — use same URL for both
         Ok((lines[0].to_string(), lines[0].to_string()))
     } else {
-        Err(YtdlpError::ExecutionError("No video URL returned".to_string()))
+        Err(YtdlpError::ExecutionError(
+            "No video URL returned".to_string(),
+        ))
     }
 }
 
 /// Download audio to local file
 pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
-    
+
     // Get download directory
     let download_dir = dirs::audio_dir()
         .or_else(|| dirs::download_dir())
@@ -453,12 +470,17 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
 
     let output = Command::new("yt-dlp")
         .args([
-            "-f", "bestaudio",
+            "-f",
+            "bestaudio",
             "-x", // Extract audio
-            "--audio-format", "mp3",
-            "--audio-quality", "0", // Best quality
-            "-o", &output_template,
-            "--print", "after_move:filepath",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0", // Best quality
+            "-o",
+            &output_template,
+            "--print",
+            "after_move:filepath",
             "--no-warnings",
             &url,
         ])
@@ -474,9 +496,11 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     }
 
     let filepath = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     if filepath.is_empty() {
-        return Err(YtdlpError::DownloadError("Download completed but no file path returned".to_string()));
+        return Err(YtdlpError::DownloadError(
+            "Download completed but no file path returned".to_string(),
+        ));
     }
 
     Ok(filepath)

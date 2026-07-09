@@ -1,10 +1,8 @@
-use crate::models::{
-    EmbeddingMetadata, SemanticSearchFilter, Track,
-};
+use crate::models::{EmbeddingMetadata, SemanticSearchFilter, Track};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::VecDeque;
 
 /// LRU cache entry for tracking access order
 struct LRUEntry {
@@ -86,11 +84,11 @@ impl ANNIndex {
 
         // Calculate how many to evict
         let to_evict = self.embeddings.len() - self.max_embeddings;
-        
+
         // Sort LRU order by last accessed (ascending = oldest first)
-        self.lru_order.make_contiguous().sort_by(|a, b|
-            a.last_accessed.cmp(&b.last_accessed)
-        );
+        self.lru_order
+            .make_contiguous()
+            .sort_by(|a, b| a.last_accessed.cmp(&b.last_accessed));
 
         // Evict oldest entries
         for _ in 0..to_evict {
@@ -107,10 +105,10 @@ impl ANNIndex {
         self.track_ids.push(track_id.clone());
         self.embeddings.insert(track_id.clone(), embedding);
         self.metadata.insert(metadata.track_id.clone(), metadata);
-        
+
         // Record access for LRU
         self.record_access(&track_id);
-        
+
         // Evict if over limit
         self.evict_if_needed();
     }
@@ -465,7 +463,10 @@ mod tests {
         assert!(index.len() <= 2, "LRU should evict to stay at max 2");
         assert!(index.is_lru_enabled());
         assert_eq!(index.max_embeddings(), 2);
-        assert!(!index.embeddings.contains_key("a"), "Oldest entry 'a' should be evicted");
+        assert!(
+            !index.embeddings.contains_key("a"),
+            "Oldest entry 'a' should be evicted"
+        );
     }
 
     #[test]

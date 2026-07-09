@@ -1,18 +1,18 @@
 mod db;
 mod models;
 mod ollama;
-mod server;
 mod semantic;
+mod server;
 mod spotify_import;
 mod ytdlp;
 
+use chrono::{Datelike, Timelike};
 use db::Database;
 use models::*;
 use ollama::OllamaClient;
 use semantic::{ANNIndex, SharedANNIndex};
 use server::StreamServer;
 use std::sync::Arc;
-use chrono::{Timelike, Datelike};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -28,9 +28,14 @@ pub struct AppState {
 // ============================================================================
 
 #[tauri::command]
-async fn search_youtube(query: String, max_results: Option<i64>) -> Result<Vec<SearchResult>, String> {
+async fn search_youtube(
+    query: String,
+    max_results: Option<i64>,
+) -> Result<Vec<SearchResult>, String> {
     let count = max_results.unwrap_or(25);
-    ytdlp::search(&query, count).await.map_err(|e| e.to_string())
+    ytdlp::search(&query, count)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -39,10 +44,7 @@ async fn get_track_info(video_id: String) -> Result<TrackInfo, String> {
 }
 
 #[tauri::command]
-async fn get_stream_url(
-    state: State<'_, AppState>,
-    video_id: String,
-) -> Result<String, String> {
+async fn get_stream_url(state: State<'_, AppState>, video_id: String) -> Result<String, String> {
     let server = state.server.lock().await;
     let url = server.get_stream_url(&video_id);
     Ok(url)
@@ -73,7 +75,11 @@ async fn check_edge_tts() -> Result<String, String> {
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(if version.is_empty() { "edge-tts installed".to_string() } else { version })
+        Ok(if version.is_empty() {
+            "edge-tts installed".to_string()
+        } else {
+            version
+        })
     } else {
         Err("edge-tts not found. Install with: pip install edge-tts".to_string())
     }
@@ -97,11 +103,16 @@ async fn speak_with_edge_tts(
 
     let output = tokio::process::Command::new("edge-tts")
         .args([
-            "--voice", &voice,
-            "--text", &text,
-            "--rate", &rate_str,
-            "--pitch", &pitch_str,
-            "--write-media", &temp_path_str,
+            "--voice",
+            &voice,
+            "--text",
+            &text,
+            "--rate",
+            &rate_str,
+            "--pitch",
+            &pitch_str,
+            "--write-media",
+            &temp_path_str,
         ])
         .output()
         .await
@@ -140,13 +151,16 @@ async fn download_track(
     thumbnail: String,
 ) -> Result<Track, String> {
     // Get download path
-    let download_path = ytdlp::download(&video_id).await.map_err(|e| e.to_string())?;
-    
+    let download_path = ytdlp::download(&video_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
     // Save to database
     let db = state.db.lock().await;
-    let track = db.add_track(&video_id, &title, &artist, &thumbnail, Some(&download_path))
+    let track = db
+        .add_track(&video_id, &title, &artist, &thumbnail, Some(&download_path))
         .map_err(|e| e.to_string())?;
-    
+
     Ok(track)
 }
 
@@ -306,19 +320,13 @@ async fn get_recently_played(
 }
 
 #[tauri::command]
-async fn update_play_count(
-    state: State<'_, AppState>,
-    video_id: String,
-) -> Result<(), String> {
+async fn update_play_count(state: State<'_, AppState>, video_id: String) -> Result<(), String> {
     let db = state.db.lock().await;
     db.update_play_count(&video_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn toggle_favorite(
-    state: State<'_, AppState>,
-    video_id: String,
-) -> Result<bool, String> {
+async fn toggle_favorite(state: State<'_, AppState>, video_id: String) -> Result<bool, String> {
     let db = state.db.lock().await;
     db.toggle_favorite(&video_id).map_err(|e| e.to_string())
 }
@@ -366,13 +374,19 @@ async fn parse_spotify_csv(content: String) -> Result<Vec<spotify_import::Spotif
 }
 
 #[tauri::command]
-async fn search_track_on_youtube(track: spotify_import::SpotifyTrack) -> Result<spotify_import::ImportResult, String> {
+async fn search_track_on_youtube(
+    track: spotify_import::SpotifyTrack,
+) -> Result<spotify_import::ImportResult, String> {
     Ok(spotify_import::search_youtube_for_track(&track).await)
 }
 
 #[tauri::command]
-async fn import_spotify_csv_file(file_path: String) -> Result<Vec<spotify_import::ImportResult>, String> {
-    spotify_import::import_from_csv(&file_path).await.map_err(|e| e.to_string())
+async fn import_spotify_csv_file(
+    file_path: String,
+) -> Result<Vec<spotify_import::ImportResult>, String> {
+    spotify_import::import_from_csv(&file_path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -395,9 +409,7 @@ fn read_csv_file(file_path: String) -> Result<String, String> {
 // ============================================================================
 
 /// Helper function to get or create OllamaClient from AppState
-async fn get_ollama_client(
-    state: &State<'_, AppState>,
-) -> Result<(String, String), String> {
+async fn get_ollama_client(state: &State<'_, AppState>) -> Result<(String, String), String> {
     let db = state.db.lock().await;
     let settings = db.get_settings().map_err(|e| e.to_string())?;
     drop(db);
@@ -447,13 +459,10 @@ async fn ollama_enhance_search(
     model: Option<String>,
 ) -> Result<Vec<String>, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::enhance_search(&query, &recent_genres);
-    
+
     #[derive(serde::Deserialize)]
     struct Response {
         queries: Vec<String>,
@@ -475,13 +484,10 @@ async fn ollama_analyze_track(
     model: Option<String>,
 ) -> Result<ollama::TrackMetadataAI, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::analyze_track(&title, &artist);
-    
+
     // Use temperature 0.2 for consistency in tagging (FAZA 2)
     client
         .generate_json_with_temp(&prompt, 0.2)
@@ -496,17 +502,22 @@ async fn ollama_parse_command(
     model: Option<String>,
 ) -> Result<ollama::PlayerCommand, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let available_views = vec![
-        "home", "search", "library", "playlists", "favorites",
-        "downloads", "settings", "import", "smart-playlist", "smart-queue",
+        "home",
+        "search",
+        "library",
+        "playlists",
+        "favorites",
+        "downloads",
+        "settings",
+        "import",
+        "smart-playlist",
+        "smart-queue",
     ];
     let prompt = ollama::Prompts::parse_command(&input, &available_views);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -522,13 +533,11 @@ async fn ollama_generate_playlist(
     model: Option<String>,
 ) -> Result<ollama::PlaylistSuggestion, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
-    let prompt = ollama::Prompts::generate_playlist(&description, duration_minutes, &existing_artists);
-    
+    let prompt =
+        ollama::Prompts::generate_playlist(&description, duration_minutes, &existing_artists);
+
     client
         .generate_json(&prompt)
         .await
@@ -553,10 +562,7 @@ async fn ollama_verify_spotify_match(
     model: Option<String>,
 ) -> Result<SpotifyMatchResult, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::verify_spotify_match(
         &spotify_title,
@@ -565,7 +571,7 @@ async fn ollama_verify_spotify_match(
         spotify_duration_sec,
         &youtube_results,
     );
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -580,13 +586,10 @@ async fn ollama_mood_search(
     model: Option<String>,
 ) -> Result<ollama::MoodSearchResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::mood_search(&mood, &user_library_genres);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -601,13 +604,10 @@ async fn ollama_activity_search(
     model: Option<String>,
 ) -> Result<ollama::ActivitySearchResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::activity_search(&activity, duration_minutes);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -622,13 +622,10 @@ async fn ollama_era_search(
     model: Option<String>,
 ) -> Result<ollama::EraSearchResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::era_search(&era, genre_filter.as_deref());
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -643,13 +640,10 @@ async fn ollama_similar_artists(
     model: Option<String>,
 ) -> Result<ollama::SimilarArtistsResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::similar_artists(&artist_name, &user_favorites);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -663,13 +657,10 @@ async fn ollama_lyric_search(
     model: Option<String>,
 ) -> Result<ollama::LyricSearchResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::lyric_search(&theme);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -684,13 +675,10 @@ async fn ollama_cross_language_search(
     model: Option<String>,
 ) -> Result<ollama::CrossLanguageSearchResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::cross_language_search(&query, &target_languages);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -706,13 +694,11 @@ async fn ollama_contextual_suggestions(
     model: Option<String>,
 ) -> Result<ollama::ContextualSuggestionsResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
-    let prompt = ollama::Prompts::contextual_suggestions(&recent_tracks, &time_of_day, &day_of_week);
-    
+    let prompt =
+        ollama::Prompts::contextual_suggestions(&recent_tracks, &time_of_day, &day_of_week);
+
     client
         .generate_json(&prompt)
         .await
@@ -727,13 +713,10 @@ async fn ollama_smart_autocomplete(
     model: Option<String>,
 ) -> Result<ollama::SmartAutocompleteResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::smart_autocomplete(&partial_query, &popular_searches);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -748,13 +731,10 @@ async fn ollama_resolve_vague_query(
     model: Option<String>,
 ) -> Result<ollama::VagueQueryResponse, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::resolve_vague_query(&vague_query, &context_tracks);
-    
+
     client
         .generate_json(&prompt)
         .await
@@ -790,9 +770,7 @@ async fn ollama_get_track_metadata(
 }
 
 #[tauri::command]
-async fn ollama_get_untagged_count(
-    state: State<'_, AppState>,
-) -> Result<usize, String> {
+async fn ollama_get_untagged_count(state: State<'_, AppState>) -> Result<usize, String> {
     let db = state.db.lock().await;
     ollama_get_untagged_count_db_helper(&db)
 }
@@ -805,14 +783,11 @@ async fn ollama_batch_analyze_tracks(
     app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    
+
     // Clone values for later use
     let model_to_use = model.as_ref().unwrap_or(&ollama_model).clone();
-    
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model_to_use,
-    );
+
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model_to_use);
 
     let total = track_ids.len();
     let mut analyzed = Vec::new();
@@ -820,10 +795,12 @@ async fn ollama_batch_analyze_tracks(
 
     // Get tracks info (supports both UUID id and video_id)
     let db_lock = state.db.lock().await;
-    let tracks: Vec<(String, String, String)> = track_ids.iter()
+    let tracks: Vec<(String, String, String)> = track_ids
+        .iter()
         .filter_map(|id| {
             // Try video_id first, then fall back to UUID lookup
-            db_lock.get_track_by_video_id(id)
+            db_lock
+                .get_track_by_video_id(id)
                 .or_else(|_| db_lock.get_track_by_uuid(id))
                 .ok()
                 .map(|t| (t.id.clone(), t.title.clone(), t.artist.clone()))
@@ -851,18 +828,24 @@ async fn ollama_batch_analyze_tracks(
             let progress = ((idx + 1) as f32 / total as f32 * 100.0) as u32;
 
             // Emit progress event
-            let _ = app_handle.emit("ai-tagging-progress", serde_json::json!({
-                "current": idx + 1,
-                "total": total,
-                "progress": progress,
-                "track_id": id,
-                "title": title,
-            }));
+            let _ = app_handle.emit(
+                "ai-tagging-progress",
+                serde_json::json!({
+                    "current": idx + 1,
+                    "total": total,
+                    "progress": progress,
+                    "track_id": id,
+                    "title": title,
+                }),
+            );
 
             // Analyze track
             let prompt = ollama::Prompts::analyze_track(&title, &artist);
 
-            match client.generate_json_with_temp::<ollama::TrackMetadataAI>(&prompt, 0.2).await {
+            match client
+                .generate_json_with_temp::<ollama::TrackMetadataAI>(&prompt, 0.2)
+                .await
+            {
                 Ok(metadata) => {
                     // Save to DB
                     let db = db.lock().await;
@@ -871,7 +854,7 @@ async fn ollama_batch_analyze_tracks(
                     } else {
                         Some(Ok(id))
                     }
-                },
+                }
                 Err(e) => Some(Err(format!("{}: {}", title, e))),
             }
         });
@@ -891,11 +874,14 @@ async fn ollama_batch_analyze_tracks(
     }
 
     // Emit completion event
-    let _ = app.emit("ai-tagging-complete", serde_json::json!({
-        "analyzed": analyzed.len(),
-        "errors": errors.len(),
-        "error_messages": errors,
-    }));
+    let _ = app.emit(
+        "ai-tagging-complete",
+        serde_json::json!({
+            "analyzed": analyzed.len(),
+            "errors": errors.len(),
+            "error_messages": errors,
+        }),
+    );
 
     Ok(analyzed)
 }
@@ -930,10 +916,7 @@ async fn smart_playlist_generate_plan(
     model: Option<String>,
 ) -> Result<ollama::SmartPlaylistPlan, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     // Get library context for better suggestions
     let db = state.db.lock().await;
@@ -1087,10 +1070,7 @@ async fn smart_playlist_from_seed(
     model: Option<String>,
 ) -> Result<ollama::SmartPlaylistPlan, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     // Try to get existing metadata for better results
     let (genre, mood, energy, decade) = if let Some(ref tid) = track_id {
@@ -1141,7 +1121,8 @@ async fn smart_playlist_save(
     }
 
     // Create the playlist
-    let playlist = db.create_playlist(&name, description.as_deref())
+    let playlist = db
+        .create_playlist(&name, description.as_deref())
         .map_err(|e| e.to_string())?;
 
     // Add tracks to playlist - track_ids can be UUIDs or video_ids
@@ -1197,16 +1178,21 @@ async fn smart_queue_next(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks_with_meta = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks_with_meta = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
     drop(db);
-    
+
     if tracks_with_meta.is_empty() {
         return Ok(vec![]);
     }
 
     // Get current track metadata if available
     let current_meta = current_track_id.as_ref().and_then(|id| {
-        tracks_with_meta.iter().find(|(t, _)| t.id == *id).map(|(_, m)| m.clone())
+        tracks_with_meta
+            .iter()
+            .find(|(t, _)| t.id == *id)
+            .map(|(_, m)| m.clone())
     });
 
     let library_summary = build_library_summary(&tracks_with_meta);
@@ -1231,7 +1217,12 @@ async fn smart_queue_next(
     // Map IDs back to Track objects
     let tracks: Vec<Track> = result
         .iter()
-        .filter_map(|id| tracks_with_meta.iter().find(|(t, _)| t.id == *id).map(|(t, _)| t.clone()))
+        .filter_map(|id| {
+            tracks_with_meta
+                .iter()
+                .find(|(t, _)| t.id == *id)
+                .map(|(t, _)| t.clone())
+        })
         .collect();
 
     Ok(tracks)
@@ -1285,7 +1276,9 @@ async fn smart_queue_sequence(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks_with_meta = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks_with_meta = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
     drop(db);
 
     if tracks_with_meta.is_empty() {
@@ -1313,7 +1306,12 @@ async fn smart_queue_sequence(
 
     let tracks: Vec<Track> = result
         .iter()
-        .filter_map(|id| tracks_with_meta.iter().find(|(t, _)| t.id == *id).map(|(t, _)| t.clone()))
+        .filter_map(|id| {
+            tracks_with_meta
+                .iter()
+                .find(|(t, _)| t.id == *id)
+                .map(|(t, _)| t.clone())
+        })
         .collect();
 
     Ok(tracks)
@@ -1329,7 +1327,9 @@ async fn smart_queue_contextual(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks_with_meta = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks_with_meta = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
 
     if tracks_with_meta.is_empty() {
         return Ok(vec![]);
@@ -1360,12 +1360,8 @@ async fn smart_queue_contextual(
     };
     drop(db);
 
-    let prompt = ollama::Prompts::context_aware_autoplay(
-        &library_summary,
-        hour,
-        &day_of_week,
-        &recent_str,
-    );
+    let prompt =
+        ollama::Prompts::context_aware_autoplay(&library_summary, hour, &day_of_week, &recent_str);
 
     let result: Vec<String> = client
         .generate_json_with_temp(&prompt, 0.6)
@@ -1374,7 +1370,12 @@ async fn smart_queue_contextual(
 
     let tracks: Vec<Track> = result
         .iter()
-        .filter_map(|id| tracks_with_meta.iter().find(|(t, _)| t.id == *id).map(|(t, _)| t.clone()))
+        .filter_map(|id| {
+            tracks_with_meta
+                .iter()
+                .find(|(t, _)| t.id == *id)
+                .map(|(t, _)| t.clone())
+        })
         .collect();
 
     Ok(tracks)
@@ -1394,10 +1395,14 @@ async fn ollama_daily_mix(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks_with_meta = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks_with_meta = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
 
     if tracks_with_meta.is_empty() {
-        return Err("Library is empty or no tracks have been tagged. Tag some tracks first.".to_string());
+        return Err(
+            "Library is empty or no tracks have been tagged. Tag some tracks first.".to_string(),
+        );
     }
 
     let library_summary = build_library_summary(&tracks_with_meta);
@@ -1432,7 +1437,12 @@ async fn ollama_daily_mix(
     // Delete previous Daily Mix playlists (keep it fresh)
     let playlists = db.get_playlists().unwrap_or_default();
     for pl in &playlists {
-        if pl.name.starts_with("Daily Mix") && pl.description.as_deref().map_or(false, |d| d.contains("🧠")) {
+        if pl.name.starts_with("Daily Mix")
+            && pl
+                .description
+                .as_deref()
+                .map_or(false, |d| d.contains("🧠"))
+        {
             let _ = db.delete_playlist(&pl.id);
         }
     }
@@ -1480,7 +1490,8 @@ async fn ollama_daily_mix(
     // Save as a real playlist with 🧠 badge in description
     let db = state.db.lock().await;
     let description = format!("🧠 {}", plan.description);
-    let playlist = db.create_playlist(&plan.name, Some(&description))
+    let playlist = db
+        .create_playlist(&plan.name, Some(&description))
         .map_err(|e| e.to_string())?;
 
     for track in &matched_tracks {
@@ -1506,11 +1517,7 @@ async fn smart_search_track_on_youtube(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let model_to_use = model.unwrap_or(ollama_model);
 
-    Ok(spotify_import::search_youtube_for_track_smart(
-        &track,
-        &ollama_url,
-        &model_to_use,
-    ).await)
+    Ok(spotify_import::search_youtube_for_track_smart(&track, &ollama_url, &model_to_use).await)
 }
 
 /// D1 + D3: Smart search with fallback to AI-generated alternative queries
@@ -1523,11 +1530,14 @@ async fn smart_search_track_with_fallback(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let model_to_use = model.unwrap_or(ollama_model);
 
-    Ok(spotify_import::search_youtube_for_track_smart_with_fallback(
-        &track,
-        &ollama_url,
-        &model_to_use,
-    ).await)
+    Ok(
+        spotify_import::search_youtube_for_track_smart_with_fallback(
+            &track,
+            &ollama_url,
+            &model_to_use,
+        )
+        .await,
+    )
 }
 
 /// D2: Disambiguate YouTube results for a track via AI
@@ -1541,10 +1551,7 @@ async fn smart_disambiguate_track(
     model: Option<String>,
 ) -> Result<spotify_import::DisambiguationResult, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(
-        &ollama_url,
-        &model.unwrap_or(ollama_model),
-    );
+    let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::disambiguate_track(&title, &artist, &album, &youtube_results);
 
@@ -1564,13 +1571,9 @@ async fn smart_alternative_queries(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let model_to_use = model.unwrap_or(ollama_model);
 
-    spotify_import::get_alternative_queries(
-        &track,
-        &ollama_url,
-        &model_to_use,
-    )
-    .await
-    .map_err(|e| e.to_string())
+    spotify_import::get_alternative_queries(&track, &ollama_url, &model_to_use)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// D4: Assess match quality between Spotify track and YouTube result
@@ -1608,13 +1611,9 @@ async fn smart_suggest_similar_track(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let model_to_use = model.unwrap_or(ollama_model);
 
-    spotify_import::suggest_similar_tracks(
-        &track,
-        &ollama_url,
-        &model_to_use,
-    )
-    .await
-    .map_err(|e| e.to_string())
+    spotify_import::suggest_similar_tracks(&track, &ollama_url, &model_to_use)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// D1 batch: Smart import multiple tracks with progress events
@@ -1633,48 +1632,60 @@ async fn smart_import_batch(
 
     for (idx, track) in tracks.iter().enumerate() {
         // Emit progress event
-        let _ = app.emit("smart-import-progress", serde_json::json!({
-            "current": idx + 1,
-            "total": total,
-            "progress": ((idx + 1) as f32 / total as f32 * 100.0) as u32,
-            "track_name": track.track_name,
-            "artist_name": track.artist_name,
-        }));
+        let _ = app.emit(
+            "smart-import-progress",
+            serde_json::json!({
+                "current": idx + 1,
+                "total": total,
+                "progress": ((idx + 1) as f32 / total as f32 * 100.0) as u32,
+                "track_name": track.track_name,
+                "artist_name": track.artist_name,
+            }),
+        );
 
         let result = if use_fallback {
             spotify_import::search_youtube_for_track_smart_with_fallback(
                 track,
                 &ollama_url,
                 &model_to_use,
-            ).await
+            )
+            .await
         } else {
-            spotify_import::search_youtube_for_track_smart(
-                track,
-                &ollama_url,
-                &model_to_use,
-            ).await
+            spotify_import::search_youtube_for_track_smart(track, &ollama_url, &model_to_use).await
         };
 
         results.push(result);
     }
 
     // Emit completion event
-    let found = results.iter().filter(|r| r.status == spotify_import::ImportStatus::Found).count();
-    let alt = results.iter().filter(|r| r.status == spotify_import::ImportStatus::AlternativeFound).count();
-    let not_found = results.iter().filter(|r| r.status == spotify_import::ImportStatus::NotFound).count();
+    let found = results
+        .iter()
+        .filter(|r| r.status == spotify_import::ImportStatus::Found)
+        .count();
+    let alt = results
+        .iter()
+        .filter(|r| r.status == spotify_import::ImportStatus::AlternativeFound)
+        .count();
+    let not_found = results
+        .iter()
+        .filter(|r| r.status == spotify_import::ImportStatus::NotFound)
+        .count();
     let avg_quality = if results.is_empty() {
         0
     } else {
         results.iter().map(|r| r.quality_score as u64).sum::<u64>() as u32 / total as u32
     };
 
-    let _ = app.emit("smart-import-complete", serde_json::json!({
-        "total": total,
-        "found": found,
-        "alternatives": alt,
-        "not_found": not_found,
-        "average_quality": avg_quality,
-    }));
+    let _ = app.emit(
+        "smart-import-complete",
+        serde_json::json!({
+            "total": total,
+            "found": found,
+            "alternatives": alt,
+            "not_found": not_found,
+            "average_quality": avg_quality,
+        }),
+    );
 
     Ok(results)
 }
@@ -1711,9 +1722,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 
 /// Build indexing text from track + metadata
 fn build_track_text(track: &Track, metadata: Option<&TrackMetadataDB>) -> String {
-    let mut parts = vec![
-        format!("{} by {}", track.title, track.artist),
-    ];
+    let mut parts = vec![format!("{} by {}", track.title, track.artist)];
 
     if let Some(meta) = metadata {
         if let Some(genre) = &meta.genre {
@@ -1776,10 +1785,7 @@ fn semantic_search_with_embedding_db_helper(
         .collect();
 
     scored.retain(|(_id, sim)| *sim > 0.3);
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
     let mut results = Vec::new();
@@ -1838,10 +1844,7 @@ fn semantic_search_filtered_with_embedding_db_helper(
         });
     }
 
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
     let mut results = Vec::new();
@@ -1864,9 +1867,7 @@ fn semantic_index_track_with_embedding_db_helper(
     embedding: &[f32],
     model_used: &str,
 ) -> Result<TrackEmbedding, String> {
-    let track = db
-        .get_track_by_uuid(track_id)
-        .map_err(|e| e.to_string())?;
+    let track = db.get_track_by_uuid(track_id).map_err(|e| e.to_string())?;
     let metadata = db.get_track_metadata(track_id).ok();
     let text = build_track_text(&track, metadata.as_ref());
     let dimensions = embedding.len() as i32;
@@ -1896,10 +1897,8 @@ async fn semantic_index_track(
     let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
 
     // Get track + metadata
-    let track = db
-        .get_track_by_uuid(&track_id)
-        .map_err(|e| e.to_string())?;
-    
+    let track = db.get_track_by_uuid(&track_id).map_err(|e| e.to_string())?;
+
     let metadata = db.get_track_metadata(&track_id).ok();
 
     let text = build_track_text(&track, metadata.as_ref());
@@ -1949,10 +1948,7 @@ async fn semantic_index_all(
         let metadata = db.get_track_metadata(&track.id).ok();
         let text = build_track_text(&track, metadata.as_ref());
 
-        match ollama
-            .embed_single(&text, &settings.embedding_model)
-            .await
-        {
+        match ollama.embed_single(&text, &settings.embedding_model).await {
             Ok(embedding) => {
                 let dimensions = embedding.len() as i32;
                 let _ = db.save_embedding(
@@ -1986,13 +1982,16 @@ async fn semantic_index_all(
         };
 
         // Emit progress
-        let _ = app_handle.emit("semantic-index-progress", serde_json::json!({
-            "indexed": indexed,
-            "total": total,
-            "current_track": track.title,
-            "percentage": ((indexed as f64 / total as f64) * 100.0) as i32,
-            "estimated_time_remaining_seconds": eta,
-        }));
+        let _ = app_handle.emit(
+            "semantic-index-progress",
+            serde_json::json!({
+                "indexed": indexed,
+                "total": total,
+                "current_track": track.title,
+                "percentage": ((indexed as f64 / total as f64) * 100.0) as i32,
+                "estimated_time_remaining_seconds": eta,
+            }),
+        );
     }
 
     Ok(SemanticIndexStatus {
@@ -2030,9 +2029,7 @@ async fn semantic_search(
 
 /// Get semantic index status
 #[tauri::command]
-async fn get_semantic_status(
-    state: State<'_, AppState>,
-) -> Result<SemanticIndexStatus, String> {
+async fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticIndexStatus, String> {
     let db = state.db.lock().await;
     get_semantic_status_db_helper(&db)
 }
@@ -2129,7 +2126,11 @@ fn create_semantic_playlist_from_scored_results_db_helper(
     };
 
     let name = playlist_name.unwrap_or_else(|| {
-        format!("🎵 Like {} — {}", query, chrono::Local::now().format("%Y-%m-%d"))
+        format!(
+            "🎵 Like {} — {}",
+            query,
+            chrono::Local::now().format("%Y-%m-%d")
+        )
     });
 
     let description = format!("Auto-generated semantic playlist from: {}", query);
@@ -2185,10 +2186,7 @@ async fn create_semantic_playlist(
 
     // Filter and sort
     scored.retain(|(_id, sim)| *sim > 0.3);
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(50); // Max 50 songs per semantic playlist
 
     // Resolve scored track IDs to SemanticSearchResult for the DB-only helper.
@@ -2350,7 +2348,10 @@ async fn insights_listening_profile(
     );
 
     let prompt = ollama::Prompts::listening_profile(&stats_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// F2: Weekly summary
@@ -2373,12 +2374,17 @@ async fn insights_weekly_summary(
         stats.top_genres, stats.top_artists, stats.top_moods,
     );
 
-    let top_tracks_text = top_tracks.iter()
+    let top_tracks_text = top_tracks
+        .iter()
         .map(|(t, c)| format!("{} by {} ({} plays)", t.title, t.artist, c))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let prompt = ollama::Prompts::weekly_summary(&stats_text, &top_tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// F3: Time patterns
@@ -2394,12 +2400,17 @@ async fn insights_time_patterns(
     let hourly = db.get_hourly_stats(30).map_err(|e| e.to_string())?;
     drop(db);
 
-    let hourly_text = hourly.iter()
+    let hourly_text = hourly
+        .iter()
         .map(|(h, c)| format!("{}:00 → {} plays", h, c))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let prompt = ollama::Prompts::time_patterns(&hourly_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// F4+F5: Stats (non-AI, direct data)
@@ -2451,12 +2462,22 @@ async fn insights_forgotten_gems(
         });
     }
 
-    let gems_text = gems.iter()
-        .map(|t| format!("{} | {} by {} | {} plays", t.id, t.title, t.artist, t.play_count))
-        .collect::<Vec<_>>().join("\n");
+    let gems_text = gems
+        .iter()
+        .map(|t| {
+            format!(
+                "{} | {} by {} | {} plays",
+                t.id, t.title, t.artist, t.play_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let prompt = ollama::Prompts::forgotten_gems(&gems_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G1: More like this
@@ -2471,21 +2492,32 @@ async fn insights_more_like_this(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
     drop(db);
 
-    let library_summary = tracks.iter().take(200)
+    let library_summary = tracks
+        .iter()
+        .take(200)
         .map(|(t, m)| {
-            format!("{} | {} | {} | {} | {}",
-                t.id, t.title, t.artist,
+            format!(
+                "{} | {} | {} | {} | {}",
+                t.id,
+                t.title,
+                t.artist,
                 m.genre.clone().unwrap_or_default(),
                 m.mood.clone().unwrap_or_default(),
             )
         })
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let prompt = ollama::Prompts::more_like_this(&title, &artist, &library_summary);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G2: Artist deep dive
@@ -2499,7 +2531,10 @@ async fn insights_artist_deep_dive(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::artist_deep_dive(&artist);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G3: Genre explorer
@@ -2513,7 +2548,10 @@ async fn insights_genre_explorer(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let prompt = ollama::Prompts::genre_explorer(&genre);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G5: Because you liked
@@ -2526,27 +2564,36 @@ async fn insights_because_you_liked(
     let client = ollama::OllamaClient::with_config(&ollama_url, &model.unwrap_or(ollama_model));
 
     let db = state.db.lock().await;
-    let tracks = db.get_all_tracks_with_metadata().map_err(|e| e.to_string())?;
+    let tracks = db
+        .get_all_tracks_with_metadata()
+        .map_err(|e| e.to_string())?;
     drop(db);
 
-    let favorites_summary = tracks.iter()
+    let favorites_summary = tracks
+        .iter()
         .filter(|(t, _)| t.is_favorite)
         .take(30)
         .map(|(t, m)| {
-            format!("{} | {} | {} | {}",
-                t.title, t.artist,
+            format!(
+                "{} | {} | {} | {}",
+                t.title,
+                t.artist,
                 m.genre.clone().unwrap_or_default(),
                 m.mood.clone().unwrap_or_default(),
             )
         })
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
 
     if favorites_summary.is_empty() {
         return Err("No favorites found. Add some favorites first!".to_string());
     }
 
     let prompt = ollama::Prompts::because_you_liked(&favorites_summary);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G6: Surprise me
@@ -2568,7 +2615,10 @@ async fn insights_surprise_me(
     );
 
     let prompt = ollama::Prompts::surprise_me(&profile);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// G8: Seasonal recommendations
@@ -2598,7 +2648,10 @@ async fn insights_seasonal(
     );
 
     let prompt = ollama::Prompts::seasonal_recommendations(season, &preferences);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -2607,19 +2660,20 @@ async fn insights_seasonal(
 
 /// H1+H6: Find duplicate tracks
 #[tauri::command]
-async fn cleanup_find_duplicates(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn cleanup_find_duplicates(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
 
     if tracks.len() < 2 {
-        return Ok(serde_json::json!({ "duplicates": [], "summary": "Not enough tracks to check" }));
+        return Ok(
+            serde_json::json!({ "duplicates": [], "summary": "Not enough tracks to check" }),
+        );
     }
 
     // Build track pairs text (title - artist)
-    let track_list: Vec<String> = tracks.iter()
+    let track_list: Vec<String> = tracks
+        .iter()
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect();
     let tracks_text = track_list.join("\n");
@@ -2627,30 +2681,40 @@ async fn cleanup_find_duplicates(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::detect_duplicates(&tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// H3: Clean/fix track metadata
 #[tauri::command]
-async fn cleanup_fix_metadata(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn cleanup_fix_metadata(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
 
     // Only send tracks that look like they need cleaning
-    let dirty: Vec<String> = tracks.iter()
+    let dirty: Vec<String> = tracks
+        .iter()
         .filter(|t| {
             let title = &t.title;
-            title.contains("(Official") || title.contains("[Official") ||
-            title.contains("(Audio") || title.contains("[Audio") ||
-            title.contains("(Lyrics") || title.contains("[Lyrics") ||
-            title.contains("(HQ") || title.contains("[HQ") ||
-            title.contains("(HD") || title.contains("[HD") ||
-            title.contains("(Live") || title.contains("ft.") ||
-            title.contains("feat.") || title.contains("  ") ||
-            title.contains("(Music Video") || title.contains("[MV]")
+            title.contains("(Official")
+                || title.contains("[Official")
+                || title.contains("(Audio")
+                || title.contains("[Audio")
+                || title.contains("(Lyrics")
+                || title.contains("[Lyrics")
+                || title.contains("(HQ")
+                || title.contains("[HQ")
+                || title.contains("(HD")
+                || title.contains("[HD")
+                || title.contains("(Live")
+                || title.contains("ft.")
+                || title.contains("feat.")
+                || title.contains("  ")
+                || title.contains("(Music Video")
+                || title.contains("[MV]")
         })
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect();
@@ -2663,7 +2727,10 @@ async fn cleanup_fix_metadata(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::clean_metadata(&tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// H3: Apply cleaned metadata to tracks
@@ -2680,7 +2747,10 @@ async fn cleanup_apply_metadata(
         let clean_title = fix["clean_title"].as_str().unwrap_or("");
         let clean_artist = fix["clean_artist"].as_str().unwrap_or("");
         if !clean_title.is_empty() && !orig_title.is_empty() {
-            if db.update_track_metadata_cleanup(orig_title, orig_artist, clean_title, clean_artist).is_ok() {
+            if db
+                .update_track_metadata_cleanup(orig_title, orig_artist, clean_title, clean_artist)
+                .is_ok()
+            {
                 count += 1;
             }
         }
@@ -2710,37 +2780,47 @@ async fn cleanup_normalize_artists(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::normalize_artists(&artists_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// H2: Auto-organize library suggestions
 #[tauri::command]
-async fn cleanup_auto_organize(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn cleanup_auto_organize(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     let metadata = db.get_all_metadata().map_err(|e| e.to_string())?;
     drop(db);
 
     // Build summary with metadata
-    let summary_lines: Vec<String> = tracks.iter().map(|t| {
-        let meta = metadata.iter().find(|m| m.track_id == t.id);
-        match meta {
-            Some(m) => format!("{} - {} [genre: {}, mood: {}, energy: {}]",
-                t.title, t.artist,
-                m.genre.as_deref().unwrap_or("unknown"),
-                m.mood.as_deref().unwrap_or("unknown"),
-                m.energy_level.unwrap_or(5)),
-            None => format!("{} - {}", t.title, t.artist),
-        }
-    }).collect();
+    let summary_lines: Vec<String> = tracks
+        .iter()
+        .map(|t| {
+            let meta = metadata.iter().find(|m| m.track_id == t.id);
+            match meta {
+                Some(m) => format!(
+                    "{} - {} [genre: {}, mood: {}, energy: {}]",
+                    t.title,
+                    t.artist,
+                    m.genre.as_deref().unwrap_or("unknown"),
+                    m.mood.as_deref().unwrap_or("unknown"),
+                    m.energy_level.unwrap_or(5)
+                ),
+                None => format!("{} - {}", t.title, t.artist),
+            }
+        })
+        .collect();
 
     let summary = summary_lines.join("\n");
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::auto_organize(&summary);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// H7: Suggest tracks to delete
@@ -2752,28 +2832,31 @@ async fn cleanup_suggest_deletions(
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
 
-    let never_played: Vec<String> = tracks.iter()
+    let never_played: Vec<String> = tracks
+        .iter()
         .filter(|t| t.play_count == 0)
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect();
 
     if never_played.is_empty() {
-        return Ok(serde_json::json!({ "safe_to_delete": [], "keep": [], "summary": "All tracks have been played!" }));
+        return Ok(
+            serde_json::json!({ "safe_to_delete": [], "keep": [], "summary": "All tracks have been played!" }),
+        );
     }
 
     let tracks_text = never_played.join("\n");
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::suggest_deletions(&tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a track by ID
 #[tauri::command]
-async fn cleanup_delete_track(
-    state: State<'_, AppState>,
-    track_id: String,
-) -> Result<(), String> {
+async fn cleanup_delete_track(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
     let db = state.db.lock().await;
     cleanup_delete_track_db_helper(&db, &track_id)
 }
@@ -2802,9 +2885,17 @@ async fn ai_chat_send(
     // Get top artists
     let mut top_artists: Vec<_> = artists.into_iter().collect();
     top_artists.sort_by(|a, b| b.1.cmp(&a.1));
-    let top_artists_text: Vec<String> = top_artists.iter().take(5).map(|(a, c)| format!("{} ({})", a, c)).collect();
+    let top_artists_text: Vec<String> = top_artists
+        .iter()
+        .take(5)
+        .map(|(a, c)| format!("{} ({})", a, c))
+        .collect();
 
-    let library_summary = format!("{} tracks. Top artists: {}", total, top_artists_text.join(", "));
+    let library_summary = format!(
+        "{} tracks. Top artists: {}",
+        total,
+        top_artists_text.join(", ")
+    );
     let current_track = "None";
 
     let system_prompt = ollama::Prompts::chat_system(&library_summary, current_track);
@@ -2820,7 +2911,10 @@ async fn ai_chat_send(
 
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    let response = client.generate(&conversation).await.map_err(|e| e.to_string())?;
+    let response = client
+        .generate(&conversation)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(response.trim().to_string())
 }
 
@@ -2834,20 +2928,22 @@ async fn ai_chat_trivia(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::track_trivia(&title, &artist);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// J5: Music quiz
 #[tauri::command]
-async fn ai_chat_quiz(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn ai_chat_quiz(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
 
     // Sample ~20 tracks for quiz context
-    let sample: Vec<String> = tracks.iter()
+    let sample: Vec<String> = tracks
+        .iter()
         .take(20)
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect();
@@ -2856,7 +2952,10 @@ async fn ai_chat_quiz(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::music_quiz(&tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -2871,16 +2970,20 @@ async fn smart_playlist_by_mood(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
+
     let db = state.db.lock().await;
     let library = db.get_all_tracks().map_err(|e| e.to_string())?;
-    let tracks_text = library.iter()
+    let tracks_text = library
+        .iter()
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect::<Vec<_>>()
         .join("\n");
-    
+
     let prompt = ollama::Prompts::mood_playlist(&mood, &tracks_text);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C3: Generate a duration-limited playlist
@@ -2892,16 +2995,20 @@ async fn smart_playlist_by_duration(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
+
     let db = state.db.lock().await;
     let library = db.get_all_tracks().map_err(|e| e.to_string())?;
-    let tracks_text = library.iter()
+    let tracks_text = library
+        .iter()
         .map(|t| format!("{} - {} ({} seconds)", t.title, t.artist, 240)) // hardcode avg 4min for now
         .collect::<Vec<_>>()
         .join("\n");
-    
+
     let prompt = ollama::Prompts::duration_playlist(duration_min, &theme, &tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C4: Generate a mood-transition playlist
@@ -2913,33 +3020,43 @@ async fn smart_playlist_mood_journey(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
+
     let db = state.db.lock().await;
     let library = db.get_all_tracks().map_err(|e| e.to_string())?;
-    let tracks_text = library.iter()
+    let tracks_text = library
+        .iter()
         .map(|t| format!("{} - {}", t.title, t.artist))
         .collect::<Vec<_>>()
         .join("\n");
-    
+
     let prompt = ollama::Prompts::transition_playlist(&start_mood, &end_mood, &tracks_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C7: Discovery playlist
 #[tauri::command]
-async fn smart_playlist_discovery(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn smart_playlist_discovery(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
+
     let db = state.db.lock().await;
     let library = db.get_all_tracks().map_err(|e| e.to_string())?;
-    let artists: Vec<String> = library.iter().map(|t| t.artist.clone()).collect::<std::collections::HashSet<_>>().into_iter().collect();
+    let artists: Vec<String> = library
+        .iter()
+        .map(|t| t.artist.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     let artists_text = artists.join(", ");
-    
+
     let prompt = ollama::Prompts::discovery_playlist(&artists_text, "");
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C8: Name a playlist
@@ -2950,14 +3067,18 @@ async fn smart_playlist_name(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
-    let tracks = track_ids.iter()
+
+    let tracks = track_ids
+        .iter()
         .map(|id| format!("(id: {})", id))
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     let prompt = ollama::Prompts::name_playlist(&tracks);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C9: Describe playlist cover
@@ -2968,14 +3089,18 @@ async fn smart_playlist_cover_idea(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
-    let tracks = track_ids.iter()
+
+    let tracks = track_ids
+        .iter()
         .map(|id| format!("(id: {})", id))
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     let prompt = ollama::Prompts::describe_playlist_cover(&tracks);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C10: Reorder a playlist
@@ -2986,14 +3111,18 @@ async fn smart_playlist_reorder(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
-    let tracks = track_ids.iter()
+
+    let tracks = track_ids
+        .iter()
         .map(|id| format!("(id: {})", id))
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     let prompt = ollama::Prompts::reorder_playlist(&tracks);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C11: Merge playlists
@@ -3005,12 +3134,15 @@ async fn smart_playlist_merge(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
+
     let a_text = playlist_a_tracks.join(", ");
     let b_text = playlist_b_tracks.join(", ");
-    
+
     let prompt = ollama::Prompts::merge_playlists(&a_text, &b_text);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// C12: Split a playlist
@@ -3021,14 +3153,18 @@ async fn smart_playlist_split(
 ) -> Result<serde_json::Value, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
-    
-    let tracks = track_ids.iter()
+
+    let tracks = track_ids
+        .iter()
         .map(|id| format!("(id: {})", id))
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     let prompt = ollama::Prompts::split_playlist(&tracks);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -3046,7 +3182,10 @@ async fn share_generate_message(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::share_message(&title, &artist, &mood);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// K2: Generate playlist description
@@ -3058,14 +3197,15 @@ async fn share_playlist_description(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::playlist_description(&track_list);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// K3: Year in Review / Wrapped
 #[tauri::command]
-async fn share_year_in_review(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn share_year_in_review(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     let metadata = db.get_all_metadata().map_err(|e| e.to_string())?;
@@ -3084,7 +3224,11 @@ async fn share_year_in_review(
     }
     let mut top_artists: Vec<_> = artists.into_iter().collect();
     top_artists.sort_by(|a, b| b.1.cmp(&a.1));
-    let top_artists_text: Vec<String> = top_artists.iter().take(5).map(|(a, c)| format!("{} ({})", a, c)).collect();
+    let top_artists_text: Vec<String> = top_artists
+        .iter()
+        .take(5)
+        .map(|(a, c)| format!("{} ({})", a, c))
+        .collect();
 
     // Top genres
     let mut genres: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -3095,7 +3239,11 @@ async fn share_year_in_review(
     }
     let mut top_genres: Vec<_> = genres.into_iter().collect();
     top_genres.sort_by(|a, b| b.1.cmp(&a.1));
-    let top_genres_text: Vec<String> = top_genres.iter().take(5).map(|(g, c)| format!("{} ({})", g, c)).collect();
+    let top_genres_text: Vec<String> = top_genres
+        .iter()
+        .take(5)
+        .map(|(g, c)| format!("{} ({})", g, c))
+        .collect();
 
     let stats = format!(
         "Total tracks: {}\nTotal plays: {}\nFavorites: {}\nDownloaded: {}\nTop artists: {}\nTop genres: {}",
@@ -3107,7 +3255,10 @@ async fn share_year_in_review(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::year_in_review(&stats);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -3123,14 +3274,15 @@ async fn ai_explain_error(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::explain_error(&error_message);
-    client.generate_json(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// L2: Settings advisor
 #[tauri::command]
-async fn ai_settings_advice(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn ai_settings_advice(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
@@ -3168,14 +3320,15 @@ async fn ai_settings_advice(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::settings_advice(&current_settings, &usage_stats);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// L3: Storage analyzer
 #[tauri::command]
-async fn ai_storage_analysis(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn ai_storage_analysis(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let db = state.db.lock().await;
     let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     drop(db);
@@ -3183,7 +3336,8 @@ async fn ai_storage_analysis(
     let total = tracks.len();
     let downloaded = tracks.iter().filter(|t| t.is_downloaded).count();
     let not_downloaded = total - downloaded;
-    let never_played_downloaded = tracks.iter()
+    let never_played_downloaded = tracks
+        .iter()
         .filter(|t| t.is_downloaded && t.play_count == 0)
         .count();
 
@@ -3198,7 +3352,10 @@ async fn ai_storage_analysis(
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
     let client = ollama::OllamaClient::with_config(&ollama_url, &ollama_model);
     let prompt = ollama::Prompts::storage_analysis(&storage_info);
-    client.generate_json_large(&prompt).await.map_err(|e| e.to_string())
+    client
+        .generate_json_large(&prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -3214,13 +3371,13 @@ pub struct DjCommentary {
 
 #[derive(serde::Deserialize)]
 pub struct DjEventContext {
-    pub trigger_type: String,  // "TrackStart" | "QueueEmpty" | etc.
+    pub trigger_type: String, // "TrackStart" | "QueueEmpty" | etc.
     pub current_title: Option<String>,
     pub current_artist: Option<String>,
     pub current_track_id: Option<String>,
     pub next_title: Option<String>,
     pub next_artist: Option<String>,
-    pub time_of_day: Option<String>,  // "morning" | "afternoon" | "evening" | "night"
+    pub time_of_day: Option<String>, // "morning" | "afternoon" | "evening" | "night"
     pub session_duration_minutes: Option<u32>,
     pub total_tracks_played: Option<u32>,
     pub milestone_count: Option<u32>,
@@ -3281,13 +3438,20 @@ async fn ai_dj_event(
     context: DjEventContext,
 ) -> Result<DjCommentary, String> {
     let (ollama_url, ollama_model) = get_ollama_client(&state).await?;
-    let client = ollama::OllamaClient::with_config(&ollama_url, &context.model.unwrap_or(ollama_model));
+    let client =
+        ollama::OllamaClient::with_config(&ollama_url, &context.model.unwrap_or(ollama_model));
 
     // Get metadata for current track if available
     let db = state.db.lock().await;
-    let current_meta = context.current_track_id.as_ref().and_then(|id| db.get_track_metadata(id).ok());
+    let current_meta = context
+        .current_track_id
+        .as_ref()
+        .and_then(|id| db.get_track_metadata(id).ok());
     let _next_meta = context.next_title.as_ref().and_then(|_| {
-        context.current_track_id.as_ref().and_then(|id| db.get_track_metadata(id).ok())
+        context
+            .current_track_id
+            .as_ref()
+            .and_then(|id| db.get_track_metadata(id).ok())
     });
     drop(db);
 
@@ -3343,10 +3507,19 @@ async fn ai_dj_event(
         }
         "MoodShift" => {
             let prev = context.prev_mood.unwrap_or_else(|| "unknown".to_string());
-            let current = context.current_mood.unwrap_or_else(|| "unknown".to_string());
+            let current = context
+                .current_mood
+                .unwrap_or_else(|| "unknown".to_string());
             let prev_title = context.current_title.unwrap_or_default();
             let next_title = context.next_title.unwrap_or_default();
-            ollama::Prompts::dj_mood_shift(&prev, &current, &prev_title, &next_title, &dj_style, &lang)
+            ollama::Prompts::dj_mood_shift(
+                &prev,
+                &current,
+                &prev_title,
+                &next_title,
+                &dj_style,
+                &lang,
+            )
         }
         "UserRequest" => {
             let title = context.current_title.unwrap_or_default();
@@ -3379,10 +3552,10 @@ pub fn run() {
         .setup(|app| {
             // Initialize database
             let db = Database::new().expect("Failed to initialize database");
-            
+
             // Initialize streaming server
             let server = StreamServer::new(3456);
-            
+
             // Start the HTTP server in background
             let server_handle = server.clone();
             tauri::async_runtime::spawn(async move {

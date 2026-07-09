@@ -2,9 +2,9 @@ use crate::ollama;
 use crate::ytdlp;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use std::sync::Arc;
 
 #[derive(Error, Debug)]
 pub enum ImportError {
@@ -55,35 +55,56 @@ pub enum ImportStatus {
 pub fn parse_exportify_csv(content: &str) -> Result<Vec<SpotifyTrack>, ImportError> {
     let mut tracks = Vec::new();
     let mut lines = content.lines();
-    
+
     // Find header line and determine column indices
-    let header = lines.next().ok_or_else(|| ImportError::ParseError("Empty CSV".to_string()))?;
+    let header = lines
+        .next()
+        .ok_or_else(|| ImportError::ParseError("Empty CSV".to_string()))?;
     let headers: Vec<&str> = parse_csv_line(header);
-    
+
     // Find column indices (Exportify format)
     let track_name_idx = find_column_index(&headers, &["Track Name", "track_name", "name", "Name"]);
-    let artist_name_idx = find_column_index(&headers, &["Artist Name(s)", "Artist Names", "artist_name", "artist", "Artist"]);
-    let album_name_idx = find_column_index(&headers, &["Album Name", "album_name", "album", "Album"]);
+    let artist_name_idx = find_column_index(
+        &headers,
+        &[
+            "Artist Name(s)",
+            "Artist Names",
+            "artist_name",
+            "artist",
+            "Artist",
+        ],
+    );
+    let album_name_idx =
+        find_column_index(&headers, &["Album Name", "album_name", "album", "Album"]);
     let duration_idx = find_column_index(&headers, &["Duration (ms)", "duration_ms", "Duration"]);
-    let spotify_id_idx = find_column_index(&headers, &["Spotify ID", "spotify_id", "URI", "Track URI"]);
+    let spotify_id_idx =
+        find_column_index(&headers, &["Spotify ID", "spotify_id", "URI", "Track URI"]);
 
-    let track_idx = track_name_idx.ok_or_else(|| ImportError::ParseError("Could not find track name column".to_string()))?;
-    let artist_idx = artist_name_idx.ok_or_else(|| ImportError::ParseError("Could not find artist name column".to_string()))?;
+    let track_idx = track_name_idx
+        .ok_or_else(|| ImportError::ParseError("Could not find track name column".to_string()))?;
+    let artist_idx = artist_name_idx
+        .ok_or_else(|| ImportError::ParseError("Could not find artist name column".to_string()))?;
 
     for line in lines {
         if line.trim().is_empty() {
             continue;
         }
-        
+
         let fields = parse_csv_line(line);
-        
+
         if fields.len() <= track_idx || fields.len() <= artist_idx {
             continue;
         }
 
-        let track_name = fields.get(track_idx).map(|s| s.to_string()).unwrap_or_default();
-        let artist_name = fields.get(artist_idx).map(|s| s.to_string()).unwrap_or_default();
-        
+        let track_name = fields
+            .get(track_idx)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let artist_name = fields
+            .get(artist_idx)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
         if track_name.is_empty() || artist_name.is_empty() {
             continue;
         }
@@ -92,11 +113,11 @@ pub fn parse_exportify_csv(content: &str) -> Result<Vec<SpotifyTrack>, ImportErr
             .and_then(|idx| fields.get(idx))
             .map(|s| s.to_string())
             .unwrap_or_default();
-        
+
         let duration_ms = duration_idx
             .and_then(|idx| fields.get(idx))
             .and_then(|s| s.parse::<i64>().ok());
-        
+
         let spotify_id = spotify_id_idx
             .and_then(|idx| fields.get(idx))
             .map(|s| s.to_string());
@@ -126,7 +147,7 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
     let mut fields = Vec::new();
     let mut in_quotes = false;
     let mut start_byte = 0;
-    
+
     // Iterate with byte indices for proper UTF-8 handling
     for (byte_idx, ch) in line.char_indices() {
         if ch == '"' {
@@ -137,12 +158,12 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
             start_byte = byte_idx + 1; // ',' is 1 byte
         }
     }
-    
+
     // Add last field
     if start_byte < line.len() {
         fields.push(line[start_byte..].trim().trim_matches('"'));
     }
-    
+
     fields
 }
 
@@ -150,13 +171,14 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
 pub async fn search_youtube_for_track(track: &SpotifyTrack) -> ImportResult {
     // Primary search: exact artist + track name
     let primary_query = format!("{} {}", track.artist_name, track.track_name);
-    
+
     match ytdlp::search(&primary_query, 5).await {
         Ok(results) if !results.is_empty() => {
             let best = &results[0];
-            
+
             // Collect alternatives (other results)
-            let alternatives: Vec<Alternative> = results.iter()
+            let alternatives: Vec<Alternative> = results
+                .iter()
                 .skip(1)
                 .take(3)
                 .map(|r| Alternative {
@@ -187,7 +209,8 @@ pub async fn search_youtube_for_track(track: &SpotifyTrack) -> ImportResult {
                 if let Ok(results) = ytdlp::search(&alt_query, 5).await {
                     if !results.is_empty() {
                         let best = &results[0];
-                        let alternatives: Vec<Alternative> = results.iter()
+                        let alternatives: Vec<Alternative> = results
+                            .iter()
                             .skip(1)
                             .take(3)
                             .map(|r| Alternative {
@@ -222,21 +245,21 @@ pub async fn search_youtube_for_track(track: &SpotifyTrack) -> ImportResult {
 
 /// Import all tracks from a CSV file with parallel processing
 pub async fn import_from_csv(file_path: &str) -> Result<Vec<ImportResult>, ImportError> {
-    let content = std::fs::read_to_string(file_path)
-        .map_err(|e| ImportError::FileError(e.to_string()))?;
-    
+    let content =
+        std::fs::read_to_string(file_path).map_err(|e| ImportError::FileError(e.to_string()))?;
+
     let tracks = parse_exportify_csv(&content)?;
-    
+
     // Use semaphore to limit concurrent requests (max 10)
     let semaphore = Arc::new(Semaphore::new(10));
     let mut results = Vec::new();
-    
+
     // Process tracks in parallel with controlled concurrency
     let mut tasks = Vec::new();
     for track in tracks {
         let semaphore = Arc::clone(&semaphore);
         let track = track.clone();
-        
+
         let task = tokio::spawn(async move {
             let permit = match semaphore.acquire().await {
                 Ok(p) => p,
@@ -246,15 +269,18 @@ pub async fn import_from_csv(file_path: &str) -> Result<Vec<ImportResult>, Impor
             drop(permit);
             Ok(result)
         });
-        
+
         tasks.push(task);
     }
-    
+
     // Collect results
     for task in tasks {
-        results.push(task.await.map_err(|e| ImportError::SearchError(format!("Task failed: {}", e)))??);
+        results.push(
+            task.await
+                .map_err(|e| ImportError::SearchError(format!("Task failed: {}", e)))??,
+        );
     }
-    
+
     Ok(results)
 }
 
@@ -269,30 +295,35 @@ pub struct CsvFileInfo {
 /// Scan a folder for CSV files and return info about each
 pub fn scan_folder_for_csv(folder_path: &str) -> Result<Vec<CsvFileInfo>, ImportError> {
     let path = Path::new(folder_path);
-    
+
     if !path.exists() {
-        return Err(ImportError::FileError(format!("Folder not found: {}", folder_path)));
+        return Err(ImportError::FileError(format!(
+            "Folder not found: {}",
+            folder_path
+        )));
     }
-    
+
     if !path.is_dir() {
-        return Err(ImportError::FileError(format!("Not a directory: {}", folder_path)));
+        return Err(ImportError::FileError(format!(
+            "Not a directory: {}",
+            folder_path
+        )));
     }
-    
+
     let mut csv_files = Vec::new();
-    
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| ImportError::FileError(e.to_string()))?;
-    
+
+    let entries = std::fs::read_dir(path).map_err(|e| ImportError::FileError(e.to_string()))?;
+
     for entry in entries.flatten() {
         let file_path = entry.path();
-        
+
         if file_path.extension().map(|e| e == "csv").unwrap_or(false) {
             let name = file_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Unknown")
                 .to_string();
-            
+
             // Try to count tracks
             let track_count = if let Ok(content) = std::fs::read_to_string(&file_path) {
                 parse_exportify_csv(&content)
@@ -301,7 +332,7 @@ pub fn scan_folder_for_csv(folder_path: &str) -> Result<Vec<CsvFileInfo>, Import
             } else {
                 0
             };
-            
+
             csv_files.push(CsvFileInfo {
                 name,
                 path: file_path.to_string_lossy().to_string(),
@@ -309,10 +340,10 @@ pub fn scan_folder_for_csv(folder_path: &str) -> Result<Vec<CsvFileInfo>, Import
             });
         }
     }
-    
+
     // Sort by name
     csv_files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    
+
     Ok(csv_files)
 }
 
@@ -325,7 +356,7 @@ pub fn get_default_spotify_folder() -> String {
             return ytm_spotify.to_string_lossy().to_string();
         }
     }
-    
+
     // Fallback to data directory
     dirs::data_dir()
         .or_else(|| dirs::home_dir())
@@ -444,7 +475,14 @@ pub async fn search_youtube_for_track_smart(
     let yt_tuples: Vec<(String, String, String, Option<i64>)> = yt_results
         .iter()
         .take(5)
-        .map(|r| (r.id.clone(), r.title.clone(), r.artist.clone(), r.duration.map(|d| d as i64)))
+        .map(|r| {
+            (
+                r.id.clone(),
+                r.title.clone(),
+                r.artist.clone(),
+                r.duration.map(|d| d as i64),
+            )
+        })
         .collect();
 
     // Try AI verification
@@ -705,8 +743,13 @@ mod tests {
     fn test_parse_csv_missing_columns() {
         let csv = "Name,Value\nSong,123\n";
         let err = parse_exportify_csv(csv).unwrap_err();
-        let is_not_found = matches!(&err, ImportError::ParseError(msg) if msg.contains("Could not find"));
-        assert!(is_not_found, "Expected column-not-found error, got: {:?}", err);
+        let is_not_found =
+            matches!(&err, ImportError::ParseError(msg) if msg.contains("Could not find"));
+        assert!(
+            is_not_found,
+            "Expected column-not-found error, got: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -734,7 +777,8 @@ mod tests {
 
     #[test]
     fn test_parse_csv_line_quoted_fields() {
-        let line = r#""Song, feat. Artist","Artist, Jr.",1234,"https://open.spotify.com/track/abc""#;
+        let line =
+            r#""Song, feat. Artist","Artist, Jr.",1234,"https://open.spotify.com/track/abc""#;
         let fields = parse_csv_line(line);
         assert_eq!(fields.len(), 4, "Should parse 4 quoted fields");
         assert_eq!(fields[0], "Song, feat. Artist");

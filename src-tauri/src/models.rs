@@ -208,9 +208,9 @@ pub struct PlayEvent {
 pub struct ListeningStats {
     pub total_tracks: i64,
     pub total_time_seconds: i64,
-    pub top_genres: Vec<(String, i64)>,     // (genre, count)
-    pub top_artists: Vec<(String, i64)>,    // (artist, count)
-    pub top_moods: Vec<(String, i64)>,      // (mood, count)
+    pub top_genres: Vec<(String, i64)>,      // (genre, count)
+    pub top_artists: Vec<(String, i64)>,     // (artist, count)
+    pub top_moods: Vec<(String, i64)>,       // (mood, count)
     pub daily_breakdown: Vec<(String, i64)>, // (date, count)
 }
 
