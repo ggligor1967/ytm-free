@@ -1809,8 +1809,8 @@ fn semantic_search_filtered_with_embedding_db_helper(
     genres: Option<Vec<String>>,
     moods: Option<Vec<String>>,
     activities: Option<Vec<String>>,
+    min_similarity: Option<f64>,
 ) -> Result<Vec<SemanticSearchResult>, String> {
-    let _ = activities;
     let embeddings = db.get_all_embeddings().map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(20) as usize;
 
@@ -1821,6 +1821,14 @@ fn semantic_search_filtered_with_embedding_db_helper(
             (emb.track_id.clone(), similarity)
         })
         .collect();
+
+    // Apply minimum similarity threshold (parity with the ANNIndex path, which
+    // receives `min_similarity: Some(0.3)` from the `semantic_search_filtered`
+    // wrapper). When `Some(x)`, exclude results whose similarity is strictly
+    // below `x`. When `None`, keep the existing behavior (no threshold filtering).
+    if let Some(threshold) = min_similarity {
+        scored.retain(|(_, sim)| (*sim as f64) >= threshold);
+    }
 
     if let Some(g) = &genres {
         scored.retain(|(track_id, _)| {
@@ -1838,6 +1846,18 @@ fn semantic_search_filtered_with_embedding_db_helper(
             if let Ok(metadata) = db.get_track_metadata(track_id) {
                 if let Some(mood) = &metadata.mood {
                     return m.contains(mood);
+                }
+            }
+            true
+        });
+    }
+
+    if let Some(a) = &activities {
+        scored.retain(|(track_id, _)| {
+            if let Ok(metadata) = db.get_track_metadata(track_id) {
+                if let Some(tags_json) = &metadata.activity_tags {
+                    let tags = crate::semantic::parse_json_array(tags_json);
+                    return tags.iter().any(|t| a.contains(t));
                 }
             }
             true
@@ -2088,6 +2108,7 @@ async fn semantic_search_filtered(
             genres,
             moods,
             activities,
+            filter.min_similarity,
         );
     };
 
@@ -4369,6 +4390,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper without filters");
         assert_eq!(all_results.len(), 3);
@@ -4386,6 +4408,7 @@ mod tests {
             Some(vec!["rock".to_string()]),
             None,
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper with genre filter");
         let genre_ids: Vec<&str> = genre_results
@@ -4404,6 +4427,7 @@ mod tests {
             None,
             Some(vec!["happy".to_string()]),
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper with mood filter");
         let mood_ids: Vec<&str> = mood_results
@@ -4422,6 +4446,7 @@ mod tests {
             Some(vec!["rock".to_string()]),
             Some(vec!["happy".to_string()]),
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper with combined filters");
         assert_eq!(combined_results.len(), 1);
@@ -4437,6 +4462,7 @@ mod tests {
             Some(vec!["rock".to_string()]),
             None,
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper with limit");
         assert_eq!(limited_results.len(), 1);
@@ -4444,7 +4470,10 @@ mod tests {
             limited_results[0].track.video_id,
             "semantic-filtered-video-001"
         );
-        // Existing DB fallback applies genre and mood only; activities/min_similarity remain unverified here.
+        // DB fallback now applies genre, mood, activities and min_similarity. This
+        // existing test exercises genre/mood/limit/reopen with activities=None and
+        // min_similarity=Some(0.3); activities + sub-threshold exclusion are covered
+        // by test_controlled_semantic_filtered_search_stub_respects_activities_and_min_similarity.
 
         drop(db);
 
@@ -4456,6 +4485,7 @@ mod tests {
             Some(vec!["rock".to_string()]),
             Some(vec!["happy".to_string()]),
             None,
+            Some(0.3),
         )
         .expect("Failed to run filtered semantic helper after reopen");
         assert_eq!(reopened_results.len(), 1);
@@ -4473,6 +4503,199 @@ mod tests {
             mood_results.len(),
             reopened_results.len(),
             temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_filtered_search_stub_respects_activities_and_min_similarity() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-filtered-parity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let query_embedding = vec![1.0_f32, 0.0, 0.0];
+        let db = Database::new().expect("Failed to create temp database for parity test");
+
+        // Deterministic synthetic tracks. Embeddings are unit-length so the true
+        // cosine returned by lib::cosine_similarity matches the dot product.
+        //   over_match   : sim 1.0, activity_tags=["coding"]  -> over threshold AND activity match
+        //   over_mismatch: sim 0.9, activity_tags=["driving"] -> over threshold, activity mismatch
+        //   sub_match    : sim 0.2, activity_tags=["coding"]  -> sub threshold, activity match
+        let add = |video_id: &str, title: &str| {
+            db.add_track(
+                video_id,
+                title,
+                "Parity Artist",
+                &format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                None,
+            )
+            .expect("Failed to add synthetic parity track")
+        };
+        let over_match = add("semantic-parity-video-001", "Parity Over Match");
+        let over_mismatch = add("semantic-parity-video-002", "Parity Over Mismatch");
+        let sub_match = add("semantic-parity-video-003", "Parity Sub Match");
+
+        let save_metadata = |track_id: &str, genre: &str, mood: &str, activities: Vec<String>| {
+            let metadata = crate::ollama::TrackMetadataAI {
+                genre: genre.to_string(),
+                sub_genre: None,
+                mood: mood.to_string(),
+                energy_level: 5,
+                tempo: "medium".to_string(),
+                danceability: 5,
+                vocal_type: "mixed vocals".to_string(),
+                decade: "2020s".to_string(),
+                language: "English".to_string(),
+                activity_tags: activities,
+                occasion_tags: vec![],
+                keywords: vec![genre.to_string(), mood.to_string()],
+            };
+            db.save_track_metadata(
+                track_id,
+                &metadata,
+                "synthetic-semantic-filtered-parity-harness",
+            )
+            .expect("Failed to save synthetic parity metadata");
+        };
+        save_metadata(&over_match.id, "rock", "happy", vec!["coding".to_string()]);
+        save_metadata(
+            &over_mismatch.id,
+            "rock",
+            "happy",
+            vec!["driving".to_string()],
+        );
+        save_metadata(&sub_match.id, "rock", "happy", vec!["coding".to_string()]);
+
+        db.save_embedding(
+            &over_match.id,
+            &[1.0, 0.0, 0.0],
+            "Parity Over Match text",
+            "synthetic-parity-model",
+            3,
+        )
+        .expect("Failed to save over_match embedding");
+        db.save_embedding(
+            &over_mismatch.id,
+            &[0.9, 0.435889894, 0.0],
+            "Parity Over Mismatch text",
+            "synthetic-parity-model",
+            3,
+        )
+        .expect("Failed to save over_mismatch embedding");
+        db.save_embedding(
+            &sub_match.id,
+            &[0.2, 0.979795897, 0.0],
+            "Parity Sub Match text",
+            "synthetic-parity-model",
+            3,
+        )
+        .expect("Failed to save sub_match embedding");
+
+        // 1. threshold only (0.3): over_match + over_mismatch; sub_match excluded by threshold.
+        let threshold_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            None,
+            None,
+            Some(0.3),
+        )
+        .expect("Failed to run parity helper with threshold only");
+        let threshold_ids: Vec<&str> = threshold_results
+            .iter()
+            .map(|r| r.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            threshold_ids,
+            vec!["semantic-parity-video-001", "semantic-parity-video-002"],
+            "min_similarity=0.3 must exclude the sub-threshold track"
+        );
+        assert!(!threshold_ids.contains(&"semantic-parity-video-003"));
+
+        // 2. activities only (["coding"]), no threshold: over_match + sub_match; over_mismatch excluded by activity.
+        let activity_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            None,
+            Some(vec!["coding".to_string()]),
+            None,
+        )
+        .expect("Failed to run parity helper with activities only");
+        let activity_ids: Vec<&str> = activity_results
+            .iter()
+            .map(|r| r.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            activity_ids,
+            vec!["semantic-parity-video-001", "semantic-parity-video-003"],
+            "activities=[coding] must exclude the driving-only track; sub_match kept (no threshold)"
+        );
+        assert!(!activity_ids.contains(&"semantic-parity-video-002"));
+
+        // 3. activities + threshold: only over_match (sub_match excluded by threshold, over_mismatch by activity).
+        let combined_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            None,
+            Some(vec!["coding".to_string()]),
+            Some(0.3),
+        )
+        .expect("Failed to run parity helper with activities + threshold");
+        let combined_ids: Vec<&str> = combined_results
+            .iter()
+            .map(|r| r.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            combined_ids,
+            vec!["semantic-parity-video-001"],
+            "activities + threshold must isolate the single over-threshold coding track"
+        );
+
+        // 4. no filters: all three, deterministic descending-similarity ordering.
+        let all_results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &query_embedding,
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("Failed to run parity helper without filters");
+        let all_ids: Vec<&str> = all_results
+            .iter()
+            .map(|r| r.track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            all_ids,
+            vec![
+                "semantic-parity-video-001",
+                "semantic-parity-video-002",
+                "semantic-parity-video-003"
+            ],
+            "no filters must keep deterministic descending-similarity ordering"
+        );
+
+        drop(db);
+
+        println!(
+            "SEMANTIC_FILTERED_PARITY_HARNESS results={} activity={} threshold={} top={}",
+            all_results.len(),
+            activity_results.len(),
+            threshold_results.len(),
+            all_results[0].track.video_id,
         );
 
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");

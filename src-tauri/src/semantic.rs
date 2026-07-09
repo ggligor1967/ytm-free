@@ -201,6 +201,13 @@ impl ANNIndex {
             })
             .collect();
 
+        // Apply minimum similarity threshold (parity with the DB fallback helper).
+        // When `Some(x)`, exclude results whose similarity is strictly below `x`.
+        // When `None`, keep the existing behavior (no threshold filtering).
+        if let Some(threshold) = filter.min_similarity {
+            results.retain(|(_, sim)| (*sim as f64) >= threshold);
+        }
+
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results
@@ -442,6 +449,89 @@ mod tests {
         };
         let results = index.search_filtered(&query, 10, &filter);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filtered_search_respects_min_similarity() {
+        let mut index = ANNIndex::new();
+
+        // Synthetic unit-length embeddings so the dot-product cosine matches the
+        // true cosine. Query is [1.0, 0.0, 0.0].
+        let meta = |track_id: &str, activities: Vec<String>| EmbeddingMetadata {
+            track_id: track_id.to_string(),
+            genres: vec![],
+            moods: vec![],
+            activities,
+            energy_level: None,
+        };
+
+        // sim == 1.0 (identical, over any reasonable threshold)
+        index.add(
+            "over_a".to_string(),
+            make_embedding(&[1.0, 0.0, 0.0]),
+            meta("over_a", vec!["coding".to_string()]),
+        );
+        // sim == 0.9 (over 0.3 threshold)
+        index.add(
+            "over_b".to_string(),
+            make_embedding(&[0.9, 0.435889894_f32, 0.0]),
+            meta("over_b", vec!["driving".to_string()]),
+        );
+        // sim == 0.2 (below 0.3 threshold)
+        index.add(
+            "sub_c".to_string(),
+            make_embedding(&[0.2, 0.979795897_f32, 0.0]),
+            meta("sub_c", vec!["coding".to_string()]),
+        );
+
+        let query = make_embedding(&[1.0, 0.0, 0.0]);
+
+        // min_similarity = Some(0.3): excludes the sub-threshold track only.
+        let filter = SemanticSearchFilter {
+            genres: None,
+            moods: None,
+            activities: None,
+            min_similarity: Some(0.3),
+        };
+        let results = index.search_filtered(&query, 10, &filter);
+        let ids: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["over_a", "over_b"],
+            "sub-threshold track must be excluded"
+        );
+        // Similarity ordering is deterministic (descending).
+        assert!(results[0].1 > results[1].1);
+
+        // min_similarity = None: keeps the prior behavior (no threshold filtering).
+        let filter_none = SemanticSearchFilter {
+            genres: None,
+            moods: None,
+            activities: None,
+            min_similarity: None,
+        };
+        let results_none = index.search_filtered(&query, 10, &filter_none);
+        let ids_none: Vec<&str> = results_none.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids_none,
+            vec!["over_a", "over_b", "sub_c"],
+            "None threshold must keep the existing behavior"
+        );
+
+        // min_similarity combined with activities: only the over-threshold coding track.
+        let filter_combo = SemanticSearchFilter {
+            genres: None,
+            moods: None,
+            activities: Some(vec!["coding".to_string()]),
+            min_similarity: Some(0.3),
+        };
+        let results_combo = index.search_filtered(&query, 10, &filter_combo);
+        let ids_combo: Vec<&str> = results_combo.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids_combo,
+            vec!["over_a"],
+            "activities + threshold must isolate the single matching over-threshold track"
+        );
     }
 
     #[test]
