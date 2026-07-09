@@ -1791,6 +1791,39 @@ fn semantic_search_prepare_embedding_input_db_helper(
     })
 }
 
+#[derive(Debug, Clone)]
+struct SemanticSearchFilteredPrepareInput {
+    query: String,
+    ollama_url: String,
+    embedding_model: String,
+    filter: SemanticSearchFilter,
+}
+
+fn semantic_search_filtered_prepare_embedding_input_db_helper(
+    db: &Database,
+    query: &str,
+    genres: Option<Vec<String>>,
+    moods: Option<Vec<String>>,
+    activities: Option<Vec<String>>,
+) -> Result<SemanticSearchFilteredPrepareInput, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    if !settings.semantic_search_enabled {
+        return Err("Semantic search is disabled".to_string());
+    }
+
+    Ok(SemanticSearchFilteredPrepareInput {
+        query: query.to_string(),
+        ollama_url: settings.ollama_url,
+        embedding_model: settings.embedding_model,
+        filter: SemanticSearchFilter {
+            genres,
+            moods,
+            activities,
+            min_similarity: Some(0.3),
+        },
+    })
+}
+
 fn semantic_search_with_embedding_db_helper(
     db: &Database,
     query_embedding: &[f32],
@@ -2116,27 +2149,22 @@ async fn semantic_search_filtered(
     moods: Option<Vec<String>>,
     activities: Option<Vec<String>>,
 ) -> Result<Vec<SemanticSearchResult>, String> {
-    let db = state.db.lock().await;
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    let prepared = {
+        let db = state.db.lock().await;
+        semantic_search_filtered_prepare_embedding_input_db_helper(
+            &db, &query, genres, moods, activities,
+        )?
+    };
 
-    if !settings.semantic_search_enabled {
-        return Err("Semantic search is disabled".to_string());
-    }
-
-    let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
+    let ollama = OllamaClient::with_config(&prepared.ollama_url, &prepared.embedding_model);
 
     // Embed query
     let query_embedding = ollama
-        .embed_single(&query, &settings.embedding_model)
+        .embed_single(&prepared.query, &prepared.embedding_model)
         .await
         .map_err(|e| e.to_string())?;
 
-    let filter = SemanticSearchFilter {
-        genres: genres.clone(),
-        moods: moods.clone(),
-        activities: activities.clone(),
-        min_similarity: Some(0.3),
-    };
+    let filter = prepared.filter.clone();
 
     // Try ANN search first, fall back to brute force if ANN is empty
     let ann = state.ann_index.read().await;
@@ -2146,18 +2174,21 @@ async fn semantic_search_filtered(
         ann.search_filtered(&query_embedding, limit, &filter)
     } else {
         drop(ann); // Release lock
+        let db = state.db.lock().await;
         return semantic_search_filtered_with_embedding_db_helper(
             &db,
             &query_embedding,
             Some(limit as i32),
-            genres,
-            moods,
-            activities,
+            filter.genres.clone(),
+            filter.moods.clone(),
+            filter.activities.clone(),
             filter.min_similarity,
         );
     };
 
     // Build results with track data
+    drop(ann);
+    let db = state.db.lock().await;
     let mut results = Vec::new();
     for (track_id, similarity) in scored {
         if let Ok(track) = db.get_track_by_uuid(&track_id) {
@@ -4401,6 +4432,126 @@ mod tests {
             prepared.query,
             prepared.embedding_model,
             results.len(),
+            temp_dir.display()
+        );
+
+        drop(db);
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_filtered_search_prepare_embedding_input_uses_temp_db_settings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-filtered-search-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://semantic-filtered-lock-scope.invalid:11434".to_string();
+        settings.embedding_model = "semantic-filtered-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic filtered settings");
+
+        let prepared = semantic_search_filtered_prepare_embedding_input_db_helper(
+            &db,
+            "semantic-filtered-lock-scope-query",
+            Some(vec!["rock".to_string()]),
+            Some(vec!["focus".to_string()]),
+            Some(vec!["coding".to_string()]),
+        )
+        .expect("Failed to prepare semantic filtered search embedding input");
+        assert_eq!(prepared.query, "semantic-filtered-lock-scope-query");
+        assert_eq!(
+            prepared.ollama_url,
+            "http://semantic-filtered-lock-scope.invalid:11434"
+        );
+        assert_eq!(
+            prepared.embedding_model,
+            "semantic-filtered-lock-scope-model"
+        );
+        assert_eq!(prepared.filter.genres, Some(vec!["rock".to_string()]));
+        assert_eq!(prepared.filter.moods, Some(vec!["focus".to_string()]));
+        assert_eq!(prepared.filter.activities, Some(vec!["coding".to_string()]));
+        assert_eq!(prepared.filter.min_similarity, Some(0.3));
+        assert_eq!(
+            db.count_embeddings()
+                .expect("Failed to count embeddings before filtered post helper"),
+            0,
+            "Prepare helper must not persist embeddings"
+        );
+
+        let track = db
+            .add_track(
+                "semantic-filtered-lock-scope-video-001",
+                "Semantic Filtered Lock Scope Song",
+                "Semantic Filtered Lock Scope Artist",
+                "https://i.ytimg.com/vi/semantic-filtered-lock-scope-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add filtered lock-scope synthetic track");
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "rock".to_string(),
+            sub_genre: None,
+            mood: "focus".to_string(),
+            energy_level: 5,
+            tempo: "medium".to_string(),
+            danceability: 5,
+            vocal_type: "mixed vocals".to_string(),
+            decade: "2020s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["coding".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["filtered".to_string(), "lock-scope".to_string()],
+        };
+        db.save_track_metadata(
+            &track.id,
+            &metadata,
+            "synthetic-semantic-filtered-lock-scope-harness",
+        )
+        .expect("Failed to save filtered lock-scope synthetic metadata");
+        db.save_embedding(
+            &track.id,
+            &[1.0, 0.0, 0.0],
+            "Semantic Filtered Lock Scope Song by Semantic Filtered Lock Scope Artist",
+            &prepared.embedding_model,
+            3,
+        )
+        .expect("Failed to save filtered lock-scope synthetic embedding");
+
+        let results = semantic_search_filtered_with_embedding_db_helper(
+            &db,
+            &[1.0, 0.0, 0.0],
+            Some(10),
+            prepared.filter.genres.clone(),
+            prepared.filter.moods.clone(),
+            prepared.filter.activities.clone(),
+            prepared.filter.min_similarity,
+        )
+        .expect("Failed to run semantic filtered post-embedding helper");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].track.video_id,
+            "semantic-filtered-lock-scope-video-001"
+        );
+        assert_eq!(
+            db.count_embeddings()
+                .expect("Failed to count embeddings after filtered post helper"),
+            1
+        );
+
+        println!(
+            "SEMANTIC_FILTERED_LOCK_SCOPE_HARNESS query={} model={} results={} activities={} temp_dir={}",
+            prepared.query,
+            prepared.embedding_model,
+            results.len(),
+            prepared.filter.activities.as_ref().map(|a| a.len()).unwrap_or(0),
             temp_dir.display()
         );
 
