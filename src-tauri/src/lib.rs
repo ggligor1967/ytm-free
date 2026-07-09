@@ -1881,6 +1881,37 @@ fn semantic_search_filtered_with_embedding_db_helper(
     Ok(results)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticIndexTrackPrepareInput {
+    track_id: String,
+    video_id: String,
+    embedding_text: String,
+    ollama_url: String,
+    embedding_model: String,
+}
+
+fn semantic_index_track_prepare_embedding_input_db_helper(
+    db: &Database,
+    track_id: &str,
+) -> Result<SemanticIndexTrackPrepareInput, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    if !settings.semantic_search_enabled {
+        return Err("Semantic search is disabled".to_string());
+    }
+
+    let track = db.get_track_by_uuid(track_id).map_err(|e| e.to_string())?;
+    let metadata = db.get_track_metadata(track_id).ok();
+    let embedding_text = build_track_text(&track, metadata.as_ref());
+
+    Ok(SemanticIndexTrackPrepareInput {
+        track_id: track.id,
+        video_id: track.video_id,
+        embedding_text,
+        ollama_url: settings.ollama_url,
+        embedding_model: settings.embedding_model,
+    })
+}
+
 fn semantic_index_track_with_embedding_db_helper(
     db: &Database,
     track_id: &str,
@@ -1906,34 +1937,26 @@ async fn semantic_index_track(
     state: State<'_, AppState>,
     track_id: String,
 ) -> Result<bool, String> {
-    let db = state.db.lock().await;
+    let prepared = {
+        let db = state.db.lock().await;
+        semantic_index_track_prepare_embedding_input_db_helper(&db, &track_id)?
+    };
 
-    // Get settings
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
-    if !settings.semantic_search_enabled {
-        return Err("Semantic search is disabled".to_string());
-    }
-
-    let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
-
-    // Get track + metadata
-    let track = db.get_track_by_uuid(&track_id).map_err(|e| e.to_string())?;
-
-    let metadata = db.get_track_metadata(&track_id).ok();
-
-    let text = build_track_text(&track, metadata.as_ref());
+    let ollama = OllamaClient::with_config(&prepared.ollama_url, &prepared.embedding_model);
 
     // Generate embedding
     let embedding = ollama
-        .embed_single(&text, &settings.embedding_model)
+        .embed_single(&prepared.embedding_text, &prepared.embedding_model)
         .await
         .map_err(|e| e.to_string())?;
 
+    let db = state.db.lock().await;
+
     semantic_index_track_with_embedding_db_helper(
         &db,
-        &track_id,
+        &prepared.track_id,
         &embedding,
-        &settings.embedding_model,
+        &prepared.embedding_model,
     )?;
 
     Ok(true)
@@ -4823,6 +4846,127 @@ mod tests {
             temp_dir.display()
         );
 
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_index_track_prepare_embedding_input_uses_temp_db_metadata() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-index-track-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://127.0.0.1:11434".to_string();
+        settings.embedding_model = "semantic-index-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        let track = db
+            .add_track(
+                "semantic-index-lock-scope-video-001",
+                "Semantic Index Lock Scope Song",
+                "Semantic Index Lock Scope Artist",
+                "https://i.ytimg.com/vi/semantic-index-lock-scope-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add lock-scope synthetic track");
+
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-lock-scope-genre-ambient".to_string(),
+            sub_genre: Some("synthetic-subgenre".to_string()),
+            mood: "semantic-index-lock-scope-mood-calm".to_string(),
+            energy_level: 3,
+            tempo: "slow".to_string(),
+            danceability: 2,
+            vocal_type: "synthetic vocals".to_string(),
+            decade: "2010s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-lock-scope-activity-focus".to_string()],
+            occasion_tags: vec!["reading".to_string()],
+            keywords: vec![
+                "lock".to_string(),
+                "scope".to_string(),
+                "prepare".to_string(),
+            ],
+        };
+        db.save_track_metadata(
+            &track.id,
+            &metadata,
+            "semantic-index-lock-scope-metadata-model",
+        )
+        .expect("Failed to save lock-scope synthetic metadata");
+
+        let embeddings_before = db
+            .count_embeddings()
+            .expect("Failed to count embeddings before prepare");
+        assert_eq!(embeddings_before, 0);
+
+        let prepared = semantic_index_track_prepare_embedding_input_db_helper(&db, &track.id)
+            .expect("Failed to prepare semantic index track embedding input");
+
+        assert_eq!(prepared.track_id, track.id);
+        assert_eq!(prepared.video_id, "semantic-index-lock-scope-video-001");
+        assert_eq!(prepared.ollama_url, "http://127.0.0.1:11434");
+        assert_eq!(prepared.embedding_model, "semantic-index-lock-scope-model");
+        assert!(prepared
+            .embedding_text
+            .contains("Semantic Index Lock Scope Song"));
+        assert!(prepared
+            .embedding_text
+            .contains("Semantic Index Lock Scope Artist"));
+        assert!(prepared
+            .embedding_text
+            .contains("semantic-index-lock-scope-genre-ambient"));
+        assert!(prepared
+            .embedding_text
+            .contains("semantic-index-lock-scope-mood-calm"));
+        assert!(prepared.embedding_text.contains("Activities:"));
+        assert!(prepared
+            .embedding_text
+            .contains("semantic-index-lock-scope-activity-focus"));
+        assert!(prepared.embedding_text.contains("Keywords:"));
+        assert!(prepared.embedding_text.contains("lock"));
+        assert!(prepared.embedding_text.contains("Tempo: slow"));
+        assert!(prepared.embedding_text.contains("Decade: 2010s"));
+        assert_eq!(
+            db.count_embeddings()
+                .expect("Failed to count embeddings after prepare"),
+            0
+        );
+
+        let embedding = vec![1.0_f32, 0.0, 0.0];
+        let saved = semantic_index_track_with_embedding_db_helper(
+            &db,
+            &prepared.track_id,
+            &embedding,
+            &prepared.embedding_model,
+        )
+        .expect("Failed to save prepared semantic index embedding");
+        let embeddings_after = db
+            .count_embeddings()
+            .expect("Failed to count embeddings after save");
+        assert_eq!(embeddings_after, 1);
+        assert_eq!(saved.track_id, track.id);
+        assert_eq!(saved.model_used, "semantic-index-lock-scope-model");
+
+        println!(
+            "SEMANTIC_INDEX_TRACK_LOCK_SCOPE_HARNESS video={} text_len={} embeddings_before={} embeddings_after={}",
+            prepared.video_id,
+            prepared.embedding_text.len(),
+            embeddings_before,
+            embeddings_after
+        );
+
+        drop(db);
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
     }
 
