@@ -1946,6 +1946,22 @@ struct SemanticIndexTrackPrepareInput {
     embedding_model: String,
 }
 
+#[derive(Debug, Clone)]
+struct SemanticIndexAllPreparedTrack {
+    track: Track,
+    embedding_text: String,
+    genre: Option<String>,
+    mood: Option<String>,
+    activity_tags: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticIndexAllPreparedBatch {
+    ollama_url: String,
+    embedding_model: String,
+    tracks: Vec<SemanticIndexAllPreparedTrack>,
+}
+
 fn semantic_index_track_prepare_embedding_input_db_helper(
     db: &Database,
     track_id: &str,
@@ -1968,6 +1984,38 @@ fn semantic_index_track_prepare_embedding_input_db_helper(
     })
 }
 
+fn semantic_index_all_prepare_batch_db_helper(
+    db: &Database,
+) -> Result<SemanticIndexAllPreparedBatch, String> {
+    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    if !settings.semantic_search_enabled {
+        return Err("Semantic search is disabled".to_string());
+    }
+
+    let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
+    let prepared_tracks = tracks
+        .into_iter()
+        .map(|track| {
+            let metadata = db.get_track_metadata(&track.id).ok();
+            let embedding_text = build_track_text(&track, metadata.as_ref());
+
+            SemanticIndexAllPreparedTrack {
+                track,
+                embedding_text,
+                genre: metadata.as_ref().and_then(|m| m.genre.clone()),
+                mood: metadata.as_ref().and_then(|m| m.mood.clone()),
+                activity_tags: metadata.as_ref().and_then(|m| m.activity_tags.clone()),
+            }
+        })
+        .collect();
+
+    Ok(SemanticIndexAllPreparedBatch {
+        ollama_url: settings.ollama_url,
+        embedding_model: settings.embedding_model,
+        tracks: prepared_tracks,
+    })
+}
+
 fn semantic_index_track_with_embedding_db_helper(
     db: &Database,
     track_id: &str,
@@ -1980,6 +2028,23 @@ fn semantic_index_track_with_embedding_db_helper(
     let dimensions = embedding.len() as i32;
 
     db.save_embedding(track_id, embedding, &text, model_used, dimensions)
+        .map_err(|e| e.to_string())?;
+
+    db.get_embedding(track_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Embedding was not saved for track: {}", track_id))
+}
+
+fn semantic_index_all_save_embedding_db_helper(
+    db: &Database,
+    track_id: &str,
+    embedding: &[f32],
+    text_used: &str,
+    model_used: &str,
+) -> Result<TrackEmbedding, String> {
+    let dimensions = embedding.len() as i32;
+
+    db.save_embedding(track_id, embedding, text_used, model_used, dimensions)
         .map_err(|e| e.to_string())?;
 
     db.get_embedding(track_id)
@@ -2024,48 +2089,57 @@ async fn semantic_index_all(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<SemanticIndexStatus, String> {
-    let db = state.db.lock().await;
-    let settings = db.get_settings().map_err(|e| e.to_string())?;
+    let prepared = {
+        let db = state.db.lock().await;
+        semantic_index_all_prepare_batch_db_helper(&db)?
+    };
 
-    if !settings.semantic_search_enabled {
-        return Err("Semantic search is disabled".to_string());
-    }
+    let SemanticIndexAllPreparedBatch {
+        ollama_url,
+        embedding_model,
+        tracks,
+    } = prepared;
 
-    let ollama = OllamaClient::with_config(&settings.ollama_url, &settings.embedding_model);
+    let ollama = OllamaClient::with_config(&ollama_url, &embedding_model);
+    let mut rebuilt_ann = {
+        let ann = state.ann_index.read().await;
+        if ann.is_lru_enabled() {
+            ANNIndex::with_lru_eviction(ann.max_embeddings())
+        } else {
+            ANNIndex::new()
+        }
+    };
 
-    // Clear ANN index for rebuild
-    let mut ann = state.ann_index.write().await;
-    ann.clear();
-
-    // Get all tracks
-    let tracks = db.get_all_tracks().map_err(|e| e.to_string())?;
     let total = tracks.len() as i64;
     let mut indexed = 0i64;
     let start_time = std::time::Instant::now();
 
-    for track in tracks {
-        let metadata = db.get_track_metadata(&track.id).ok();
-        let text = build_track_text(&track, metadata.as_ref());
+    for prepared_track in tracks {
+        let current_track = prepared_track.track.title.clone();
 
-        match ollama.embed_single(&text, &settings.embedding_model).await {
+        match ollama
+            .embed_single(&prepared_track.embedding_text, &embedding_model)
+            .await
+        {
             Ok(embedding) => {
-                let dimensions = embedding.len() as i32;
-                let _ = db.save_embedding(
-                    &track.id,
-                    &embedding,
-                    &text,
-                    &settings.embedding_model,
-                    dimensions,
-                );
+                {
+                    let db = state.db.lock().await;
+                    let _ = semantic_index_all_save_embedding_db_helper(
+                        &db,
+                        &prepared_track.track.id,
+                        &embedding,
+                        &prepared_track.embedding_text,
+                        &embedding_model,
+                    );
+                }
 
-                // Add to ANN index
                 let meta = semantic::build_metadata(
-                    &track,
-                    metadata.as_ref().and_then(|m| m.genre.clone()),
-                    metadata.as_ref().and_then(|m| m.mood.clone()),
-                    metadata.as_ref().and_then(|m| m.activity_tags.clone()),
+                    &prepared_track.track,
+                    prepared_track.genre.clone(),
+                    prepared_track.mood.clone(),
+                    prepared_track.activity_tags.clone(),
                 );
-                ann.add(track.id.clone(), embedding, meta);
+                rebuilt_ann.add(prepared_track.track.id.clone(), embedding, meta);
 
                 indexed += 1;
             }
@@ -2086,17 +2160,22 @@ async fn semantic_index_all(
             serde_json::json!({
                 "indexed": indexed,
                 "total": total,
-                "current_track": track.title,
+                "current_track": current_track,
                 "percentage": ((indexed as f64 / total as f64) * 100.0) as i32,
                 "estimated_time_remaining_seconds": eta,
             }),
         );
     }
 
+    {
+        let mut ann = state.ann_index.write().await;
+        *ann = rebuilt_ann;
+    }
+
     Ok(SemanticIndexStatus {
         total_tracks: total,
         indexed_tracks: indexed,
-        model_used: settings.embedding_model.clone(),
+        model_used: embedding_model,
         is_indexing: false,
     })
 }
@@ -5610,6 +5689,334 @@ mod tests {
             "SEMANTIC_INDEX_TRACK_STUB_HARNESS video=semantic-index-video-001 dimensions={} embeddings={} temp_dir={}",
             reopened.dimensions,
             reopened_count,
+            temp_dir.display()
+        );
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_index_all_prepare_batch_uses_temp_db_metadata() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-index-all-lock-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://semantic-index-all-lock-scope.invalid:11434".to_string();
+        settings.embedding_model = "semantic-index-all-lock-scope-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        let track_one = db
+            .add_track(
+                "semantic-index-all-lock-scope-video-001",
+                "Semantic Index All Lock Scope Song One",
+                "Semantic Index All Lock Scope Artist One",
+                "https://i.ytimg.com/vi/semantic-index-all-lock-scope-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track one");
+        let track_two = db
+            .add_track(
+                "semantic-index-all-lock-scope-video-002",
+                "Semantic Index All Lock Scope Song Two",
+                "Semantic Index All Lock Scope Artist Two",
+                "https://i.ytimg.com/vi/semantic-index-all-lock-scope-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track two");
+        let track_three = db
+            .add_track(
+                "semantic-index-all-lock-scope-video-003",
+                "Semantic Index All Lock Scope Song Three",
+                "Semantic Index All Lock Scope Artist Three",
+                "https://i.ytimg.com/vi/semantic-index-all-lock-scope-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic track three");
+
+        let metadata_one = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-all-lock-scope-genre-ambient".to_string(),
+            sub_genre: Some("synthetic-subgenre-one".to_string()),
+            mood: "semantic-index-all-lock-scope-mood-calm".to_string(),
+            energy_level: 3,
+            tempo: "slow".to_string(),
+            danceability: 2,
+            vocal_type: "synthetic vocals".to_string(),
+            decade: "2010s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-all-lock-scope-activity-focus".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["batch".to_string(), "prepare".to_string()],
+        };
+        db.save_track_metadata(
+            &track_one.id,
+            &metadata_one,
+            "semantic-index-all-lock-scope-metadata-model",
+        )
+        .expect("Failed to save synthetic metadata for track one");
+
+        let metadata_two = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-all-lock-scope-genre-rock".to_string(),
+            sub_genre: Some("synthetic-subgenre-two".to_string()),
+            mood: "semantic-index-all-lock-scope-mood-energetic".to_string(),
+            energy_level: 8,
+            tempo: "fast".to_string(),
+            danceability: 8,
+            vocal_type: "mixed vocals".to_string(),
+            decade: "2020s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-all-lock-scope-activity-running".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["batch".to_string(), "secondary".to_string()],
+        };
+        db.save_track_metadata(
+            &track_two.id,
+            &metadata_two,
+            "semantic-index-all-lock-scope-metadata-model",
+        )
+        .expect("Failed to save synthetic metadata for track two");
+
+        let embeddings_before = db
+            .count_embeddings()
+            .expect("Failed to count embeddings before prepare batch");
+        assert_eq!(embeddings_before, 0);
+
+        let prepared = semantic_index_all_prepare_batch_db_helper(&db)
+            .expect("Failed to prepare semantic index-all batch");
+
+        assert_eq!(
+            prepared.ollama_url,
+            "http://semantic-index-all-lock-scope.invalid:11434"
+        );
+        assert_eq!(
+            prepared.embedding_model,
+            "semantic-index-all-lock-scope-model"
+        );
+        assert_eq!(prepared.tracks.len(), 3);
+
+        let prepared_one = prepared
+            .tracks
+            .iter()
+            .find(|item| item.track.id == track_one.id)
+            .expect("Prepared batch missing track one");
+        assert_eq!(
+            prepared_one.track.video_id,
+            "semantic-index-all-lock-scope-video-001"
+        );
+        assert!(prepared_one
+            .embedding_text
+            .contains("Semantic Index All Lock Scope Song One"));
+        assert!(prepared_one
+            .embedding_text
+            .contains("Semantic Index All Lock Scope Artist One"));
+        assert!(prepared_one
+            .embedding_text
+            .contains("semantic-index-all-lock-scope-genre-ambient"));
+        assert!(prepared_one
+            .embedding_text
+            .contains("semantic-index-all-lock-scope-mood-calm"));
+        assert!(prepared_one.embedding_text.contains("Activities:"));
+        assert!(prepared_one
+            .embedding_text
+            .contains("semantic-index-all-lock-scope-activity-focus"));
+        assert!(prepared_one.embedding_text.contains("Keywords:"));
+        assert!(prepared_one.embedding_text.contains("batch"));
+        assert!(prepared_one.embedding_text.contains("Tempo: slow"));
+        assert!(prepared_one.embedding_text.contains("Decade: 2010s"));
+        assert_eq!(
+            prepared_one.genre.as_deref(),
+            Some("semantic-index-all-lock-scope-genre-ambient")
+        );
+        assert_eq!(
+            prepared_one.mood.as_deref(),
+            Some("semantic-index-all-lock-scope-mood-calm")
+        );
+        assert_eq!(
+            prepared_one.activity_tags.as_deref(),
+            Some("[\"semantic-index-all-lock-scope-activity-focus\"]")
+        );
+
+        let prepared_three = prepared
+            .tracks
+            .iter()
+            .find(|item| item.track.id == track_three.id)
+            .expect("Prepared batch missing track three");
+        assert_eq!(
+            prepared_three.embedding_text,
+            "Semantic Index All Lock Scope Song Three by Semantic Index All Lock Scope Artist Three"
+        );
+        assert!(prepared_three.genre.is_none());
+        assert!(prepared_three.mood.is_none());
+        assert!(prepared_three.activity_tags.is_none());
+
+        let embeddings_after = db
+            .count_embeddings()
+            .expect("Failed to count embeddings after prepare batch");
+        assert_eq!(embeddings_after, 0);
+
+        println!(
+            "SEMANTIC_INDEX_ALL_LOCK_SCOPE_HARNESS tracks={} embeddings_before={} embeddings_after={} temp_dir={}",
+            prepared.tracks.len(),
+            embeddings_before,
+            embeddings_after,
+            temp_dir.display()
+        );
+
+        drop(db);
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_controlled_semantic_index_all_save_batch_uses_temp_db_embeddings() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-index-all-stub-harness-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        let mut settings = db.get_settings().expect("Failed to read temp settings");
+        settings.semantic_search_enabled = true;
+        settings.ollama_url = "http://semantic-index-all-save-batch.invalid:11434".to_string();
+        settings.embedding_model = "semantic-index-all-save-batch-model".to_string();
+        db.update_settings(&settings)
+            .expect("Failed to update temp semantic settings");
+
+        let track_one = db
+            .add_track(
+                "semantic-index-all-stub-video-001",
+                "Semantic Index All Stub Song One",
+                "Semantic Index All Stub Artist One",
+                "https://i.ytimg.com/vi/semantic-index-all-stub-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic save-batch track one");
+        let track_two = db
+            .add_track(
+                "semantic-index-all-stub-video-002",
+                "Semantic Index All Stub Song Two",
+                "Semantic Index All Stub Artist Two",
+                "https://i.ytimg.com/vi/semantic-index-all-stub-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add synthetic save-batch track two");
+
+        let metadata_one = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-all-stub-genre-one".to_string(),
+            sub_genre: None,
+            mood: "semantic-index-all-stub-mood-one".to_string(),
+            energy_level: 5,
+            tempo: "medium".to_string(),
+            danceability: 5,
+            vocal_type: "synthetic vocals".to_string(),
+            decade: "2020s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-all-stub-activity-one".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["save".to_string(), "batch".to_string()],
+        };
+        let metadata_two = crate::ollama::TrackMetadataAI {
+            genre: "semantic-index-all-stub-genre-two".to_string(),
+            sub_genre: None,
+            mood: "semantic-index-all-stub-mood-two".to_string(),
+            energy_level: 6,
+            tempo: "fast".to_string(),
+            danceability: 6,
+            vocal_type: "mixed vocals".to_string(),
+            decade: "2010s".to_string(),
+            language: "English".to_string(),
+            activity_tags: vec!["semantic-index-all-stub-activity-two".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["save".to_string(), "secondary".to_string()],
+        };
+        db.save_track_metadata(
+            &track_one.id,
+            &metadata_one,
+            "semantic-index-all-save-batch-model",
+        )
+        .expect("Failed to save metadata for save-batch track one");
+        db.save_track_metadata(
+            &track_two.id,
+            &metadata_two,
+            "semantic-index-all-save-batch-model",
+        )
+        .expect("Failed to save metadata for save-batch track two");
+
+        let prepared = semantic_index_all_prepare_batch_db_helper(&db)
+            .expect("Failed to prepare semantic index-all save batch");
+        let embeddings_before = db
+            .count_embeddings()
+            .expect("Failed to count embeddings before save batch");
+        assert_eq!(embeddings_before, 0);
+
+        for prepared_track in &prepared.tracks {
+            let embedding = if prepared_track.track.id == track_one.id {
+                vec![1.0_f32, 0.0, 0.0]
+            } else {
+                vec![0.0_f32, 1.0, 0.0]
+            };
+
+            let saved = semantic_index_all_save_embedding_db_helper(
+                &db,
+                &prepared_track.track.id,
+                &embedding,
+                &prepared_track.embedding_text,
+                &prepared.embedding_model,
+            )
+            .expect("Failed to save semantic index-all embedding through DB-only helper");
+
+            assert_eq!(saved.track_id, prepared_track.track.id);
+            assert_eq!(saved.embedding, embedding);
+            assert_eq!(saved.dimensions, 3);
+            assert_eq!(saved.model_used, prepared.embedding_model);
+            assert_eq!(saved.text_used, prepared_track.embedding_text);
+        }
+
+        let embeddings_after = db
+            .count_embeddings()
+            .expect("Failed to count embeddings after save batch");
+        assert_eq!(embeddings_after, 2);
+
+        drop(db);
+
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        assert_eq!(
+            db2.count_embeddings()
+                .expect("Failed to count reopened embeddings after save batch"),
+            2
+        );
+        for track_id in [&track_one.id, &track_two.id] {
+            let reopened = db2
+                .get_embedding(track_id)
+                .expect("Failed to read reopened save-batch embedding")
+                .expect("Expected persisted save-batch embedding after reopen");
+            assert_eq!(reopened.track_id, *track_id);
+            assert_eq!(reopened.model_used, "semantic-index-all-save-batch-model");
+            assert_eq!(reopened.dimensions, 3);
+            assert!(reopened.text_used.contains("Semantic Index All Stub Song"));
+        }
+        drop(db2);
+
+        println!(
+            "SEMANTIC_INDEX_ALL_LOCK_SCOPE_HARNESS tracks={} embeddings_before={} embeddings_after={} temp_dir={}",
+            prepared.tracks.len(),
+            embeddings_before,
+            embeddings_after,
             temp_dir.display()
         );
 
