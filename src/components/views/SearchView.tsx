@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "../../store";
 import { TrackCard } from "../TrackCard";
 import { Search, Loader2, Sparkles, Zap, Clock, Brain } from "lucide-react";
@@ -12,6 +12,23 @@ interface SemanticResult {
   similarity: number;
   match_reason: string;
 }
+
+function parseSemanticFilterInput(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+type AppliedSemanticFilters = {
+  genres?: string[];
+  moods?: string[];
+  activities?: string[];
+};
 
 export function SearchView() {
   const {
@@ -37,6 +54,35 @@ export function SearchView() {
   const [searchMode, setSearchMode] = useState<'youtube' | 'semantic'>('youtube');
   const [semanticResults, setSemanticResults] = useState<SemanticResult[]>([]);
   const [isSemanticSearching, setIsSemanticSearching] = useState(false);
+  const [semanticGenreFilterInput, setSemanticGenreFilterInput] = useState("");
+  const [semanticMoodFilterInput, setSemanticMoodFilterInput] = useState("");
+  const [semanticActivityFilterInput, setSemanticActivityFilterInput] = useState("");
+  const [appliedSemanticFilters, setAppliedSemanticFilters] = useState<AppliedSemanticFilters>({});
+
+  const hasActiveSemanticFilters =
+    Boolean(appliedSemanticFilters.genres?.length) ||
+    Boolean(appliedSemanticFilters.moods?.length) ||
+    Boolean(appliedSemanticFilters.activities?.length);
+
+  const semanticFilterCount = useMemo(
+    () =>
+      (appliedSemanticFilters.genres?.length ?? 0) +
+      (appliedSemanticFilters.moods?.length ?? 0) +
+      (appliedSemanticFilters.activities?.length ?? 0),
+    [appliedSemanticFilters]
+  );
+
+  const buildAppliedSemanticFilters = (): AppliedSemanticFilters => {
+    const genres = parseSemanticFilterInput(semanticGenreFilterInput);
+    const moods = parseSemanticFilterInput(semanticMoodFilterInput);
+    const activities = parseSemanticFilterInput(semanticActivityFilterInput);
+
+    return {
+      genres: genres.length > 0 ? genres : undefined,
+      moods: moods.length > 0 ? moods : undefined,
+      activities: activities.length > 0 ? activities : undefined,
+    };
+  };
 
   // Helper: set query and execute YouTube search
   const searchWithQuery = async (query: string) => {
@@ -56,13 +102,30 @@ export function SearchView() {
     }
   };
 
-  // Semantic search handler
-  const performSemanticSearch = async (query: string) => {
+  const performSemanticSearch = async (
+    query: string,
+    filters?: AppliedSemanticFilters
+  ) => {
     setSearchQuery(query);
     setIsSemanticSearching(true);
     setSearchResults([]);
     try {
-      const results = await api.semanticSearch(query, 20);
+      const hasFilters = Boolean(
+        filters?.genres?.length ||
+        filters?.moods?.length ||
+        filters?.activities?.length
+      );
+
+      const results = hasFilters
+        ? await api.semanticSearchFiltered(
+            query,
+            20,
+            filters?.genres?.length ? filters.genres : undefined,
+            filters?.moods?.length ? filters.moods : undefined,
+            filters?.activities?.length ? filters.activities : undefined
+          )
+        : await api.semanticSearch(query, 20);
+
       setSemanticResults(results);
     } catch (error) {
       console.error("Semantic search error:", error);
@@ -74,14 +137,12 @@ export function SearchView() {
     }
   };
 
-  // Handle semantic search when mode is changed to semantic with existing query
   useEffect(() => {
-    if (searchMode === 'semantic' && searchQuery && semanticResults.length === 0) {
-      performSemanticSearch(searchQuery);
+    if (searchMode === 'semantic' && searchQuery) {
+      void performSemanticSearch(searchQuery, appliedSemanticFilters);
     }
-  }, [searchMode]);
+  }, [searchMode, searchQuery]);
 
-  // AI-enhanced search
   useEffect(() => {
     const enhanceSearch = async () => {
       if (!searchQuery || !settings?.ollama_enabled || !settings?.smart_search_enabled || !ollamaAvailable) {
@@ -91,26 +152,28 @@ export function SearchView() {
       setIsAISearching(true);
       try {
         const suggestions = await api.ollamaEnhanceSearch(searchQuery, []);
-        setAISearchResults(suggestions.filter(s => s !== searchQuery)); // Remove original query
+        setAISearchResults(suggestions.filter((suggestion) => suggestion !== searchQuery));
       } catch (error) {
         console.error("AI search enhancement failed:", error);
-      showToast("AI search enhancement failed");
+        showToast("AI search enhancement failed");
         setAISearchResults([]);
       } finally {
         setIsAISearching(false);
       }
     };
 
-    // Debounce: wait for search to complete
     if (!isSearching && searchResults.length > 0) {
-      enhanceSearch();
+      void enhanceSearch();
     }
   }, [searchQuery, isSearching, searchResults.length, settings, ollamaAvailable]);
 
+  const currentResults = searchMode === 'semantic' ? semanticResults : searchResults;
+  const hasResults = currentResults.length > 0;
+
   const handlePlayAll = () => {
     if (currentResults.length === 0) return;
-    const tracksToPlay = searchMode === 'semantic' 
-      ? semanticResults.map(r => r.track)
+    const tracksToPlay = searchMode === 'semantic'
+      ? semanticResults.map((result) => result.track)
       : searchResults;
     setQueue(tracksToPlay);
     setQueueIndex(0);
@@ -120,12 +183,32 @@ export function SearchView() {
 
   const handlePlayTrack = (index: number) => {
     const tracksToPlay = searchMode === 'semantic'
-      ? semanticResults.map(r => r.track)
+      ? semanticResults.map((result) => result.track)
       : searchResults;
     setQueue(tracksToPlay);
     setQueueIndex(index);
     setCurrentTrack(tracksToPlay[index]);
     setIsPlaying(true);
+  };
+
+  const applySemanticFilters = async () => {
+    if (!searchQuery) return;
+
+    const nextAppliedSemanticFilters = buildAppliedSemanticFilters();
+    setAppliedSemanticFilters(nextAppliedSemanticFilters);
+
+    await performSemanticSearch(searchQuery, nextAppliedSemanticFilters);
+  };
+
+  const clearSemanticFilters = async () => {
+    setSemanticGenreFilterInput("");
+    setSemanticMoodFilterInput("");
+    setSemanticActivityFilterInput("");
+    setAppliedSemanticFilters({});
+
+    if (searchMode === 'semantic' && searchQuery) {
+      await performSemanticSearch(searchQuery, {});
+    }
   };
 
   if (isSearching || isSemanticSearching) {
@@ -153,45 +236,8 @@ export function SearchView() {
     );
   }
 
-  const currentResults = searchMode === 'semantic' ? semanticResults : searchResults;
-  const hasResults = currentResults.length > 0;
-
-  if (!hasResults) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <div className="w-24 h-24 bg-ytm-surface rounded-full flex items-center justify-center mb-4">
-          {searchMode === 'semantic' ? (
-            <Brain className="w-12 h-12 text-ytm-text-secondary" />
-          ) : (
-            <Search className="w-12 h-12 text-ytm-text-secondary" />
-          )}
-        </div>
-        <h2 className="text-xl font-bold mb-2">
-          {searchMode === 'semantic' ? 'No similar tracks found' : 'No results found'}
-        </h2>
-        <p className="text-ytm-text-secondary mb-4">
-          {searchMode === 'semantic'
-            ? 'Try indexing your library or searching for different keywords'
-            : 'Try different keywords or check your spelling'}
-        </p>
-        {searchMode === 'semantic' && (
-          <button
-            onClick={() => {
-              setSearchMode('youtube');
-              setSemanticResults([]);
-            }}
-            className="px-4 py-2 bg-ytm-accent/20 text-ytm-accent rounded-lg hover:bg-ytm-accent/30 transition-colors text-sm"
-          >
-            Try YouTube Search →
-          </button>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
-      {/* Header with Mode Toggle */}
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
@@ -207,7 +253,7 @@ export function SearchView() {
           </div>
           <p className="text-ytm-text-secondary">
             {searchMode === 'semantic'
-              ? `${semanticResults.length} similar tracks`
+              ? `${semanticResults.length} ${hasActiveSemanticFilters ? 'filtered similar tracks' : 'similar tracks'}`
               : `${searchResults.length} results for "${searchQuery}"`}
           </p>
         </div>
@@ -255,10 +301,108 @@ export function SearchView() {
         </div>
       )}
 
-      {/* Smart Search Quick Access Pills - YouTube Mode Only */}
+      {searchMode === 'semantic' && (
+        <div className="bg-ytm-surface rounded-xl p-4 space-y-4 border border-ytm-border">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold">Semantic filters</h2>
+              <p className="text-xs text-ytm-text-secondary mt-1">
+                Folosește valori separate prin virgulă. Dacă toate câmpurile sunt goale, căutarea semantică rămâne nefiltrată.
+              </p>
+            </div>
+            {hasActiveSemanticFilters && (
+              <span className="px-2 py-1 bg-ytm-accent/10 text-ytm-accent rounded-full text-xs font-medium">
+                {semanticFilterCount} filter{semanticFilterCount === 1 ? '' : 's'} active
+              </span>
+            )}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div>
+              <label htmlFor="semantic-genres-filter" className="block text-sm font-medium mb-2">
+                Genres
+              </label>
+              <input
+                id="semantic-genres-filter"
+                aria-label="Semantic genres filter"
+                type="text"
+                value={semanticGenreFilterInput}
+                onChange={(e) => setSemanticGenreFilterInput(e.target.value)}
+                placeholder="rock, synthwave"
+                className="w-full px-3 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="semantic-moods-filter" className="block text-sm font-medium mb-2">
+                Moods
+              </label>
+              <input
+                id="semantic-moods-filter"
+                aria-label="Semantic moods filter"
+                type="text"
+                value={semanticMoodFilterInput}
+                onChange={(e) => setSemanticMoodFilterInput(e.target.value)}
+                placeholder="focus, calm"
+                className="w-full px-3 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="semantic-activities-filter" className="block text-sm font-medium mb-2">
+                Activities
+              </label>
+              <input
+                id="semantic-activities-filter"
+                aria-label="Semantic activities filter"
+                type="text"
+                value={semanticActivityFilterInput}
+                onChange={(e) => setSemanticActivityFilterInput(e.target.value)}
+                placeholder="coding, driving"
+                className="w-full px-3 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void applySemanticFilters()}
+              disabled={!searchQuery || isSemanticSearching}
+              className={clsx(
+                'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                !searchQuery || isSemanticSearching
+                  ? 'bg-ytm-border text-ytm-text-secondary cursor-not-allowed'
+                  : 'bg-ytm-accent text-white hover:bg-ytm-accent-hover'
+              )}
+            >
+              Apply Filters
+            </button>
+            <button
+              onClick={() => void clearSemanticFilters()}
+              disabled={
+                !semanticGenreFilterInput &&
+                !semanticMoodFilterInput &&
+                !semanticActivityFilterInput &&
+                !hasActiveSemanticFilters
+              }
+              className={clsx(
+                'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                !semanticGenreFilterInput &&
+                !semanticMoodFilterInput &&
+                !semanticActivityFilterInput &&
+                !hasActiveSemanticFilters
+                  ? 'bg-ytm-border text-ytm-text-secondary cursor-not-allowed'
+                  : 'bg-ytm-bg border border-ytm-border text-ytm-text-secondary hover:border-ytm-accent hover:text-ytm-accent'
+              )}
+            >
+              Clear Filters
+            </button>
+          </div>
+        </div>
+      )}
+
       {searchMode === 'youtube' && settings?.ollama_enabled && settings?.smart_search_enabled && ollamaAvailable && (
         <div className="flex flex-col gap-3">
-          {/* Moods */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="w-4 h-4 text-ytm-accent" />
@@ -280,7 +424,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Mood search failed:", error);
-      showToast("Mood search failed");
+                      showToast("Mood search failed");
                       setActivePill(null);
                     }
                   }}
@@ -299,7 +443,6 @@ export function SearchView() {
             </div>
           </div>
 
-          {/* Activities */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Zap className="w-4 h-4 text-ytm-accent" />
@@ -321,7 +464,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Activity search failed:", error);
-      showToast("Activity search failed");
+                      showToast("Activity search failed");
                       setActivePill(null);
                     }
                   }}
@@ -340,7 +483,6 @@ export function SearchView() {
             </div>
           </div>
 
-          {/* Eras */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Clock className="w-4 h-4 text-ytm-accent" />
@@ -362,7 +504,7 @@ export function SearchView() {
                       }
                     } catch (error) {
                       console.error("Era search failed:", error);
-      showToast("Era search failed");
+                      showToast("Era search failed");
                       setActivePill(null);
                     }
                   }}
@@ -383,7 +525,6 @@ export function SearchView() {
         </div>
       )}
 
-      {/* AI Search Suggestions */}
       {settings?.ollama_enabled && settings?.smart_search_enabled && ollamaAvailable && aiSearchResults.length > 0 && (
         <div className="bg-ytm-surface rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
@@ -409,24 +550,51 @@ export function SearchView() {
         </div>
       )}
 
-      {/* Results */}
       <div className="space-y-1">
-        {searchMode === 'semantic' ? (
-          // Semantic search results with similarity scores
+        {!hasResults ? (
+          <div className="flex flex-col items-center justify-center py-20">
+            <div className="w-24 h-24 bg-ytm-surface rounded-full flex items-center justify-center mb-4">
+              {searchMode === 'semantic' ? (
+                <Brain className="w-12 h-12 text-ytm-text-secondary" />
+              ) : (
+                <Search className="w-12 h-12 text-ytm-text-secondary" />
+              )}
+            </div>
+            <h2 className="text-xl font-bold mb-2">
+              {searchMode === 'semantic' ? 'No similar tracks found' : 'No results found'}
+            </h2>
+            <p className="text-ytm-text-secondary mb-4 text-center max-w-md">
+              {searchMode === 'semantic'
+                ? hasActiveSemanticFilters
+                  ? 'Try adjusting or clearing the semantic filters, or search for different keywords.'
+                  : 'Try indexing your library or searching for different keywords'
+                : 'Try different keywords or check your spelling'}
+            </p>
+            {searchMode === 'semantic' && (
+              <button
+                onClick={() => {
+                  setSearchMode('youtube');
+                  setSemanticResults([]);
+                }}
+                className="px-4 py-2 bg-ytm-accent/20 text-ytm-accent rounded-lg hover:bg-ytm-accent/30 transition-colors text-sm"
+              >
+                Try YouTube Search →
+              </button>
+            )}
+          </div>
+        ) : searchMode === 'semantic' ? (
           semanticResults.map((result, index) => (
             <div
               key={result.track.id}
               className="group flex items-center gap-3 p-3 rounded-lg hover:bg-ytm-surface transition-colors cursor-pointer"
               onClick={() => handlePlayTrack(index)}
             >
-              {/* Similarity Badge */}
               <div className="flex-shrink-0 w-12 h-12 bg-ytm-accent/20 rounded-lg flex items-center justify-center">
                 <span className="text-sm font-bold text-ytm-accent">
                   {Math.round(result.similarity * 100)}%
                 </span>
               </div>
 
-              {/* Track Info */}
               <div className="flex-grow min-w-0">
                 <p className="font-medium truncate">{result.track.title}</p>
                 <p className="text-sm text-ytm-text-secondary truncate">
@@ -437,7 +605,6 @@ export function SearchView() {
                 </p>
               </div>
 
-              {/* Thumbnail */}
               {result.track.thumbnail && (
                 <img
                   src={result.track.thumbnail}
@@ -448,7 +615,6 @@ export function SearchView() {
             </div>
           ))
         ) : (
-          // YouTube search results
           searchResults.map((track, index) => (
             <TrackCard
               key={track.id}
