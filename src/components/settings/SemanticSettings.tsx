@@ -111,8 +111,7 @@ export function SemanticSettings({ settings, onUpdate }: Props) {
   async function registerProgressListener() {
     cleanupProgressListener();
 
-    const listenerId = progressListenerIdRef.current + 1;
-    progressListenerIdRef.current = listenerId;
+    const listenerId = progressListenerIdRef.current;
 
     const unlisten = await listen<SemanticIndexProgressPayload>("semantic-index-progress", (event) => {
       if (!isMountedRef.current) {
