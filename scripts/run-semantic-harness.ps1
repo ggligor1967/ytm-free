@@ -2,7 +2,8 @@
 param(
     [string]$EvidenceRoot,
     [ValidateRange(1, 65535)]
-    [int]$EmbeddedPort = 4445
+    [int]$EmbeddedPort = 4445,
+    [string]$ExpectedHeadSha
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,23 +19,8 @@ $TempRuntimeRoot = Join-Path $env:TEMP ("ytm-free-semantic-runtime-{0}" -f $Time
 $DataDir = Join-Path $TempRuntimeRoot 'data'
 $CommandLogRoot = Join-Path $EvidenceRoot 'commands'
 $AppBinaryPath = Join-Path $RepoRoot 'src-tauri\target\debug\ytm-free.exe'
-$BaselineSha = 'd905f75713d3c8ae7f04d3b05a53bb0fc2a69199'
-$AllowedPaths = @(
-    'package.json',
-    'package-lock.json',
-    'src/main.tsx',
-    'src-tauri/Cargo.toml',
-    'src-tauri/src/lib.rs',
-    'src-tauri/tauri.conf.json',
-    'src-tauri/tauri.wdio.conf.json',
-    'wdio.conf.ts',
-    'tsconfig.wdio.json',
-    'tests/e2e/schema-bootstrap.spec.ts',
-    'tests/e2e/semantic-progress.spec.ts',
-    'scripts/seed-semantic-fixture.py',
-    'scripts/run-semantic-harness.ps1',
-    'PROJECT_STATE.md'
-)
+$PackageLockPath = Join-Path $RepoRoot 'package-lock.json'
+$ExpectedHeadShaNormalized = if ([string]::IsNullOrWhiteSpace($ExpectedHeadSha)) { $null } else { $ExpectedHeadSha.Trim() }
 $AllowedUntrackedProtected = @(
     'AGENTS.md',
     'docs/GDPR_REMEDIATION_PLAN.md',
@@ -118,7 +104,8 @@ function Invoke-CapturedProcess {
         [Parameter(Mandatory)] [string]$Name,
         [Parameter(Mandatory)] [string]$FilePath,
         [string[]]$Arguments = @(),
-        [string]$WorkingDirectory = $RepoRoot
+        [string]$WorkingDirectory = $RepoRoot,
+        [switch]$AllowNonZeroExit
     )
 
     $safeName = $Name -replace '[^A-Za-z0-9._-]', '_'
@@ -144,7 +131,7 @@ function Invoke-CapturedProcess {
     }
     $CommandLedger.Add([pscustomobject]$entry)
     Write-JsonFile -Path (Join-Path $EvidenceRoot 'command-ledger.json') -Value $CommandLedger
-    if ($process.ExitCode -ne 0) {
+    if ($process.ExitCode -ne 0 -and -not $AllowNonZeroExit) {
         if ($stdout) { Write-Host ($stdout.TrimEnd()) }
         if ($stderr) { Write-Warning ($stderr.TrimEnd()) }
         throw "Command '$Name' failed with exit code $($process.ExitCode)"
@@ -270,27 +257,45 @@ function Assert-EqualJson {
     if ($beforeJson -ne $afterJson) { throw $Failure }
 }
 
-function Assert-GitScope {
+function Get-GitState {
     $branch = (Invoke-CapturedProcess -Name 'git-branch' -FilePath $GitExe -Arguments @('branch', '--show-current')).Stdout.Trim()
-    if ($branch -ne 'test/semantic-progress-runtime-harness') { throw "Unexpected branch: $branch" }
-
-    $main = (Invoke-CapturedProcess -Name 'git-main-sha' -FilePath $GitExe -Arguments @('rev-parse', 'main')).Stdout.Trim()
-    $originMain = (Invoke-CapturedProcess -Name 'git-origin-main-sha' -FilePath $GitExe -Arguments @('rev-parse', 'origin/main')).Stdout.Trim()
-    if ($main -ne $BaselineSha -or $originMain -ne $BaselineSha) {
-        throw "main/origin-main baseline changed: main=$main origin/main=$originMain"
+    $headSha = (Invoke-CapturedProcess -Name 'git-head-sha' -FilePath $GitExe -Arguments @('rev-parse', 'HEAD')).Stdout.Trim()
+    $originMain = Invoke-CapturedProcess -Name 'git-origin-main-sha' -FilePath $GitExe -Arguments @('rev-parse', 'origin/main') -AllowNonZeroExit
+    $originMainSha = if ($originMain.ExitCode -eq 0) { $originMain.Stdout.Trim() } else { $null }
+    return [pscustomobject]@{
+        Branch = $branch
+        HeadSha = $headSha
+        OriginMainSha = $originMainSha
     }
-    Invoke-CapturedProcess -Name 'git-baseline-ancestor' -FilePath $GitExe -Arguments @('merge-base', '--is-ancestor', $BaselineSha, 'HEAD') | Out-Null
+}
 
-    $staged = (Invoke-CapturedProcess -Name 'git-staged-files' -FilePath $GitExe -Arguments @('diff', '--cached', '--name-only')).Stdout.Trim()
-    if ($staged) { throw "Staged changes are not allowed during harness execution: $staged" }
+function Assert-GitScope {
+    # Durable scope check: no branch pin, no main/origin-main SHA pin, so the
+    # harness runs unchanged on the feature branch, on main after merge, and
+    # after main advances. It only proves the tracked tree is clean and that
+    # no unexpected untracked files exist.
+    $diff = Invoke-CapturedProcess -Name 'git-diff-tracked' -FilePath $GitExe -Arguments @('diff', '--quiet') -AllowNonZeroExit
+    if ($diff.ExitCode -ne 0) {
+        throw "Tracked working tree has unstaged modifications; refusing to run harness"
+    }
+    $cached = Invoke-CapturedProcess -Name 'git-diff-cached' -FilePath $GitExe -Arguments @('diff', '--cached', '--quiet') -AllowNonZeroExit
+    if ($cached.ExitCode -ne 0) {
+        throw "Tracked index has staged modifications; refusing to run harness"
+    }
 
     $status = (Invoke-CapturedProcess -Name 'git-scope-status' -FilePath $GitExe -Arguments @('status', '--porcelain=v1', '-uall')).Stdout
     foreach ($line in ($status -split "`r?`n")) {
         if (-not $line) { continue }
+        $code = $line.Substring(0, 2)
         $path = $line.Substring(3).Replace('\', '/')
         if ($path -match ' -> ') { $path = ($path -split ' -> ')[-1] }
-        if ($AllowedPaths -notcontains $path -and $AllowedUntrackedProtected -notcontains $path) {
-            throw "Out-of-scope repository path detected: $path"
+        if ($code -eq '??') {
+            if ($AllowedUntrackedProtected -notcontains $path) {
+                throw "Out-of-scope untracked repository path detected: $path"
+            }
+        }
+        else {
+            throw "Out-of-scope tracked repository change detected: $line"
         }
     }
 }
@@ -304,11 +309,40 @@ $result = 'FAIL'
 $failureMessage = $null
 $protectedBefore = $null
 $appDataBefore = $null
+$currentBranch = $null
+$currentHeadSha = $null
+$originMainSha = $null
+$gitTrackedClean = $false
+$packageLockSha256 = $null
+$harnessBinarySha256 = $null
 
 try {
     Set-Location $RepoRoot
     if (Test-Path -LiteralPath (Join-Path $RepoRoot '.git\index.lock')) { throw 'BLOCKED-INDEX-LOCK' }
+
+    $gitState = Get-GitState
+    $currentBranch = $gitState.Branch
+    $currentHeadSha = $gitState.HeadSha
+    $originMainSha = $gitState.OriginMainSha
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'git-state-before.json') -Value ([ordered]@{
+        branch = $currentBranch
+        head_sha = $currentHeadSha
+        origin_main_sha = $originMainSha
+        expected_head_sha = $ExpectedHeadShaNormalized
+        captured_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+    })
+
+    if ($ExpectedHeadShaNormalized -and $currentHeadSha -ne $ExpectedHeadShaNormalized) {
+        throw "ExpectedHeadSha mismatch: expected=$ExpectedHeadShaNormalized actual=$currentHeadSha"
+    }
+
     Assert-GitScope
+    $gitTrackedClean = $true
+
+    if (Test-Path -LiteralPath $PackageLockPath -PathType Leaf) {
+        $packageLockSha256 = Get-Sha256Hex -Path $PackageLockPath
+    }
+
     Assert-PortFree -Port 3456
     Assert-PortFree -Port $EmbeddedPort
     if (@(Get-HarnessProcesses).Count -gt 0) { throw 'A pre-existing harness binary process is running' }
@@ -335,7 +369,9 @@ try {
     Invoke-CapturedProcess -Name 'harness-build' -FilePath $NpmExe -Arguments @('run', 'harness:build') | Out-Null
     Write-PhaseMarker -Phase 'harness-build:done'
     if (-not (Test-Path -LiteralPath $AppBinaryPath -PathType Leaf)) { throw "Harness binary missing: $AppBinaryPath" }
-    Write-JsonFile -Path (Join-Path $EvidenceRoot 'harness-binary.json') -Value (Get-FileMetadata -Path $AppBinaryPath)
+    $harnessBinaryMetadata = Get-FileMetadata -Path $AppBinaryPath
+    $harnessBinarySha256 = $harnessBinaryMetadata.sha256
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'harness-binary.json') -Value $harnessBinaryMetadata
 
     Write-PhaseMarker -Phase 'harness-schema:start'
     Invoke-CapturedProcess -Name 'harness-schema' -FilePath $NpmExe -Arguments @('run', 'harness:schema') | Out-Null
@@ -435,8 +471,13 @@ finally {
     $manifest = [ordered]@{
         result = $result
         failure = $failureMessage
-        branch = 'test/semantic-progress-runtime-harness'
-        baseline_sha = $BaselineSha
+        branch = $currentBranch
+        head_sha = $currentHeadSha
+        origin_main_sha = $originMainSha
+        expected_head_sha = $ExpectedHeadShaNormalized
+        git_tracked_clean = $gitTrackedClean
+        package_lock_sha256 = $packageLockSha256
+        harness_binary_sha256 = $harnessBinarySha256
         temp_runtime_root = $TempRuntimeRoot
         evidence_root = $EvidenceRoot
         embedded_port = $EmbeddedPort
