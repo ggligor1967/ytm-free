@@ -3783,8 +3783,16 @@ async fn ai_dj_event(
 pub fn run() {
     tracing_subscriber::fmt::init();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
+
+    #[cfg(feature = "wdio")]
+    {
+        builder = builder
+            .plugin(tauri_plugin_wdio::init())
+            .plugin(tauri_plugin_wdio_webdriver::init());
+    }
+
+    builder
         .setup(|app| {
             // Initialize database
             let db = Database::new().expect("Failed to initialize database");

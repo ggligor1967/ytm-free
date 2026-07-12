@@ -1,0 +1,451 @@
+[CmdletBinding()]
+param(
+    [string]$EvidenceRoot,
+    [ValidateRange(1, 65535)]
+    [int]$EmbeddedPort = 4445
+)
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+    $EvidenceRoot = Join-Path $env:TEMP ("ytm-free-semantic-evidence-{0}" -f $Timestamp)
+}
+$EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+$TempRuntimeRoot = Join-Path $env:TEMP ("ytm-free-semantic-runtime-{0}" -f $Timestamp)
+$DataDir = Join-Path $TempRuntimeRoot 'data'
+$CommandLogRoot = Join-Path $EvidenceRoot 'commands'
+$AppBinaryPath = Join-Path $RepoRoot 'src-tauri\target\debug\ytm-free.exe'
+$BaselineSha = 'd905f75713d3c8ae7f04d3b05a53bb0fc2a69199'
+$AllowedPaths = @(
+    'package.json',
+    'package-lock.json',
+    'src/main.tsx',
+    'src-tauri/Cargo.toml',
+    'src-tauri/src/lib.rs',
+    'src-tauri/tauri.conf.json',
+    'src-tauri/tauri.wdio.conf.json',
+    'wdio.conf.ts',
+    'tsconfig.wdio.json',
+    'tests/e2e/schema-bootstrap.spec.ts',
+    'tests/e2e/semantic-progress.spec.ts',
+    'scripts/seed-semantic-fixture.py',
+    'scripts/run-semantic-harness.ps1',
+    'PROJECT_STATE.md'
+)
+$AllowedUntrackedProtected = @(
+    'AGENTS.md',
+    'docs/GDPR_REMEDIATION_PLAN.md',
+    'docs/plan-remediere-gdpr-complete.md',
+    'gdpr-compliance-audit-report.md'
+)
+$CommandLedger = [System.Collections.Generic.List[object]]::new()
+$NetstatSequence = 0
+$OriginalEnvironment = @{
+    YTM_FREE_DATA_DIR = $env:YTM_FREE_DATA_DIR
+    EVIDENCE_ROOT = $env:EVIDENCE_ROOT
+    WDIO_EMBEDDED_PORT = $env:WDIO_EMBEDDED_PORT
+    TAURI_WEBDRIVER_PORT = $env:TAURI_WEBDRIVER_PORT
+}
+
+New-Item -ItemType Directory -Force -Path $EvidenceRoot, $CommandLogRoot, $DataDir | Out-Null
+
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [object]$Value
+    )
+    $json = $Value | ConvertTo-Json -Depth 100
+    [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+function Write-PhaseMarker {
+    param([Parameter(Mandatory)] [string]$Phase)
+
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'phase-marker.json') -Value ([ordered]@{
+        phase = $Phase
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+    })
+}
+
+function Get-RelativePathCompatible {
+    param(
+        [Parameter(Mandatory)] [string]$BasePath,
+        [Parameter(Mandatory)] [string]$TargetPath
+    )
+
+    $baseFullPath = [IO.Path]::GetFullPath($BasePath)
+    if (-not $baseFullPath.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $baseFullPath += [IO.Path]::DirectorySeparatorChar
+    }
+
+    $baseUri = [Uri]$baseFullPath
+    $targetUri = [Uri]([IO.Path]::GetFullPath($TargetPath))
+    $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+    return [Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', [IO.Path]::DirectorySeparatorChar)
+}
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    return ([BitConverter]::ToString($hashBytes)).Replace('-', '')
+}
+
+function Resolve-Application {
+    param([Parameter(Mandatory)] [string]$Name)
+    $command = Get-Command $Name -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    return $command.Source
+}
+
+function Invoke-CapturedProcess {
+    param(
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory = $RepoRoot
+    )
+
+    $safeName = $Name -replace '[^A-Za-z0-9._-]', '_'
+    $stdoutPath = Join-Path $CommandLogRoot ($safeName + '.stdout.log')
+    $stderrPath = Join-Path $CommandLogRoot ($safeName + '.stderr.log')
+    $startedAt = (Get-Date).ToUniversalTime()
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -Wait -PassThru
+    $finishedAt = (Get-Date).ToUniversalTime()
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath) } else { '' }
+
+    $entry = [ordered]@{
+        name = $Name
+        file = $FilePath
+        arguments = $Arguments
+        working_directory = $WorkingDirectory
+        started_at_utc = $startedAt.ToString('o')
+        finished_at_utc = $finishedAt.ToString('o')
+        exit_code = $process.ExitCode
+        stdout = $stdoutPath
+        stderr = $stderrPath
+    }
+    $CommandLedger.Add([pscustomobject]$entry)
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'command-ledger.json') -Value $CommandLedger
+    if ($process.ExitCode -ne 0) {
+        if ($stdout) { Write-Host ($stdout.TrimEnd()) }
+        if ($stderr) { Write-Warning ($stderr.TrimEnd()) }
+        throw "Command '$Name' failed with exit code $($process.ExitCode)"
+    }
+
+    return [pscustomobject]@{ Stdout = $stdout; Stderr = $stderr; ExitCode = $process.ExitCode }
+}
+
+function Get-ListeningPids {
+    param([Parameter(Mandatory)] [int]$Port)
+    $script:NetstatSequence += 1
+    $result = Invoke-CapturedProcess -Name ("netstat-{0:D3}-port-{1}" -f $script:NetstatSequence, $Port) `
+        -FilePath $NetstatExe -Arguments @('-ano', '-p', 'tcp')
+    $pids = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($line in ($result.Stdout -split "`r?`n")) {
+        $columns = $line.Trim() -split '\s+'
+        if ($columns.Count -lt 5 -or $columns[0] -ne 'TCP' -or $columns[3] -ne 'LISTENING') { continue }
+        if ($columns[1] -match ':(\d+)$' -and [int]$Matches[1] -eq $Port) {
+            [void]$pids.Add([int]$columns[4])
+        }
+    }
+    return @($pids | Sort-Object)
+}
+
+function Assert-PortFree {
+    param([Parameter(Mandatory)] [int]$Port)
+    $pids = @(Get-ListeningPids -Port $Port)
+    if ($pids.Count -gt 0) {
+        throw "Foreign listener detected on TCP port $Port (PID $($pids -join ', ')); no process was terminated"
+    }
+}
+
+function Get-HarnessProcesses {
+    $resolvedBinary = [IO.Path]::GetFullPath($AppBinaryPath)
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name = 'ytm-free.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $resolvedBinary } |
+            Select-Object ProcessId, Name, ExecutablePath, CommandLine, CreationDate
+    )
+}
+
+function Save-PidSnapshot {
+    param([Parameter(Mandatory)] [string]$Name)
+    $snapshot = [ordered]@{
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+        phase = $Name
+        processes = @(Get-HarnessProcesses)
+        port_3456_pids = @(Get-ListeningPids -Port 3456)
+        embedded_port = $EmbeddedPort
+        embedded_port_pids = @(Get-ListeningPids -Port $EmbeddedPort)
+    }
+    Write-JsonFile -Path (Join-Path $EvidenceRoot ("pid-{0}.json" -f $Name)) -Value $snapshot
+    return $snapshot
+}
+
+function Wait-HarnessClean {
+    param([Parameter(Mandatory)] [string]$Phase)
+    for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+        $processes = @(Get-HarnessProcesses)
+        $port3456 = @(Get-ListeningPids -Port 3456)
+        $embedded = @(Get-ListeningPids -Port $EmbeddedPort)
+        if ($processes.Count -eq 0 -and $port3456.Count -eq 0 -and $embedded.Count -eq 0) {
+            Save-PidSnapshot -Name ($Phase + '-clean') | Out-Null
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Save-PidSnapshot -Name ($Phase + '-residual') | Out-Null
+    throw "Residual harness process or listener detected after $Phase; no process was terminated"
+}
+
+function Get-FileMetadata {
+    param([Parameter(Mandatory)] [string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [ordered]@{ path = $Path; exists = $false }
+    }
+    $item = Get-Item -LiteralPath $Path
+    return [ordered]@{
+        path = $Path
+        exists = $true
+        size = $item.Length
+        last_write_time_utc = $item.LastWriteTimeUtc.ToString('o')
+        sha256 = Get-Sha256Hex -Path $Path
+    }
+}
+
+function Get-RealAppDataSnapshot {
+    $database = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'ytm-free\ytm-free.db'
+    return [ordered]@{
+        database = Get-FileMetadata -Path $database
+        wal = Get-FileMetadata -Path ($database + '-wal')
+        shm = Get-FileMetadata -Path ($database + '-shm')
+    }
+}
+
+function Get-ProtectedSnapshot {
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($relative in $AllowedUntrackedProtected) {
+        $full = Join-Path $RepoRoot $relative
+        $entries.Add([pscustomobject](Get-FileMetadata -Path $full))
+    }
+    foreach ($tree in @('Spotify', '.omx')) {
+        $root = Join-Path $RepoRoot $tree
+        if (-not (Test-Path -LiteralPath $root)) {
+            $entries.Add([pscustomobject]@{ path = $root; exists = $false })
+            continue
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName) {
+            $entries.Add([pscustomobject](Get-FileMetadata -Path $file.FullName))
+        }
+    }
+    return @($entries)
+}
+
+function Assert-EqualJson {
+    param(
+        [Parameter(Mandatory)] [object]$Before,
+        [Parameter(Mandatory)] [object]$After,
+        [Parameter(Mandatory)] [string]$Failure
+    )
+    $beforeJson = $Before | ConvertTo-Json -Depth 100 -Compress
+    $afterJson = $After | ConvertTo-Json -Depth 100 -Compress
+    if ($beforeJson -ne $afterJson) { throw $Failure }
+}
+
+function Assert-GitScope {
+    $branch = (Invoke-CapturedProcess -Name 'git-branch' -FilePath $GitExe -Arguments @('branch', '--show-current')).Stdout.Trim()
+    if ($branch -ne 'test/semantic-progress-runtime-harness') { throw "Unexpected branch: $branch" }
+
+    $main = (Invoke-CapturedProcess -Name 'git-main-sha' -FilePath $GitExe -Arguments @('rev-parse', 'main')).Stdout.Trim()
+    $originMain = (Invoke-CapturedProcess -Name 'git-origin-main-sha' -FilePath $GitExe -Arguments @('rev-parse', 'origin/main')).Stdout.Trim()
+    if ($main -ne $BaselineSha -or $originMain -ne $BaselineSha) {
+        throw "main/origin-main baseline changed: main=$main origin/main=$originMain"
+    }
+    Invoke-CapturedProcess -Name 'git-baseline-ancestor' -FilePath $GitExe -Arguments @('merge-base', '--is-ancestor', $BaselineSha, 'HEAD') | Out-Null
+
+    $staged = (Invoke-CapturedProcess -Name 'git-staged-files' -FilePath $GitExe -Arguments @('diff', '--cached', '--name-only')).Stdout.Trim()
+    if ($staged) { throw "Staged changes are not allowed during harness execution: $staged" }
+
+    $status = (Invoke-CapturedProcess -Name 'git-scope-status' -FilePath $GitExe -Arguments @('status', '--porcelain=v1', '-uall')).Stdout
+    foreach ($line in ($status -split "`r?`n")) {
+        if (-not $line) { continue }
+        $path = $line.Substring(3).Replace('\', '/')
+        if ($path -match ' -> ') { $path = ($path -split ' -> ')[-1] }
+        if ($AllowedPaths -notcontains $path -and $AllowedUntrackedProtected -notcontains $path) {
+            throw "Out-of-scope repository path detected: $path"
+        }
+    }
+}
+
+$GitExe = Resolve-Application 'git.exe'
+$NpmExe = Resolve-Application 'npm.cmd'
+$PythonExe = Resolve-Application 'py.exe'
+$NetstatExe = Resolve-Application 'netstat.exe'
+$exitCode = 1
+$result = 'FAIL'
+$failureMessage = $null
+$protectedBefore = $null
+$appDataBefore = $null
+
+try {
+    Set-Location $RepoRoot
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot '.git\index.lock')) { throw 'BLOCKED-INDEX-LOCK' }
+    Assert-GitScope
+    Assert-PortFree -Port 3456
+    Assert-PortFree -Port $EmbeddedPort
+    if (@(Get-HarnessProcesses).Count -gt 0) { throw 'A pre-existing harness binary process is running' }
+
+    $protectedBefore = Get-ProtectedSnapshot
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'protected-before.json') -Value $protectedBefore
+    $appDataBefore = Get-RealAppDataSnapshot
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'real-appdata-before.json') -Value $appDataBefore
+    Save-PidSnapshot -Name 'before' | Out-Null
+
+    $ollamaTags = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 10
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'ollama-tags.json') -Value $ollamaTags
+    $modelNames = @($ollamaTags.models | ForEach-Object { $_.name })
+    if (-not ($modelNames | Where-Object { ($_ -split ':')[0] -eq 'all-minilm' })) {
+        throw 'Ollama model all-minilm is absent; model pull is prohibited'
+    }
+
+    $env:YTM_FREE_DATA_DIR = $DataDir
+    $env:EVIDENCE_ROOT = $EvidenceRoot
+    $env:WDIO_EMBEDDED_PORT = [string]$EmbeddedPort
+    $env:TAURI_WEBDRIVER_PORT = [string]$EmbeddedPort
+
+    Write-PhaseMarker -Phase 'harness-build:start'
+    Invoke-CapturedProcess -Name 'harness-build' -FilePath $NpmExe -Arguments @('run', 'harness:build') | Out-Null
+    Write-PhaseMarker -Phase 'harness-build:done'
+    if (-not (Test-Path -LiteralPath $AppBinaryPath -PathType Leaf)) { throw "Harness binary missing: $AppBinaryPath" }
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'harness-binary.json') -Value (Get-FileMetadata -Path $AppBinaryPath)
+
+    Write-PhaseMarker -Phase 'harness-schema:start'
+    Invoke-CapturedProcess -Name 'harness-schema' -FilePath $NpmExe -Arguments @('run', 'harness:schema') | Out-Null
+    Write-PhaseMarker -Phase 'harness-schema:done'
+    Wait-HarnessClean -Phase 'schema'
+    Invoke-CapturedProcess -Name 'schema-db-unlock' -FilePath $PythonExe -Arguments @(
+        '-3', 'scripts/seed-semantic-fixture.py', '--data-dir', $DataDir, '--check-only'
+    ) | Out-Null
+
+    Write-PhaseMarker -Phase 'seed-fixture:start'
+    Invoke-CapturedProcess -Name 'seed-semantic-fixture' -FilePath $PythonExe -Arguments @(
+        '-3', 'scripts/seed-semantic-fixture.py', '--data-dir', $DataDir, '--evidence-root', $EvidenceRoot
+    ) | Out-Null
+    Write-PhaseMarker -Phase 'seed-fixture:done'
+
+    Assert-PortFree -Port 3456
+    Assert-PortFree -Port $EmbeddedPort
+    Write-PhaseMarker -Phase 'harness-semantic:start'
+    Invoke-CapturedProcess -Name 'harness-semantic' -FilePath $NpmExe -Arguments @('run', 'harness:semantic') | Out-Null
+    Write-PhaseMarker -Phase 'harness-semantic:done'
+    Wait-HarnessClean -Phase 'semantic'
+    Invoke-CapturedProcess -Name 'semantic-db-unlock' -FilePath $PythonExe -Arguments @(
+        '-3', 'scripts/seed-semantic-fixture.py', '--data-dir', $DataDir, '--check-only'
+    ) | Out-Null
+    $finalDb = Invoke-CapturedProcess -Name 'semantic-db-final' -FilePath $PythonExe -Arguments @(
+        '-3', 'scripts/seed-semantic-fixture.py', '--data-dir', $DataDir, '--verify-final'
+    )
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'db-final.json'), $finalDb.Stdout, [Text.UTF8Encoding]::new($false))
+
+    $appDataAfter = Get-RealAppDataSnapshot
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'real-appdata-after.json') -Value $appDataAfter
+    Assert-EqualJson -Before $appDataBefore -After $appDataAfter -Failure 'FAIL — REAL-APPDATA-MUTATED'
+
+    $protectedAfter = Get-ProtectedSnapshot
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'protected-after.json') -Value $protectedAfter
+    Assert-EqualJson -Before $protectedBefore -After $protectedAfter -Failure 'Protected files changed during harness execution'
+    Assert-GitScope
+
+    $result = 'PASS — EMBEDDED-WDIO-HARNESS-RUNTIME-PROVEN'
+    $exitCode = 0
+}
+catch {
+    $failureMessage = $_.Exception.Message
+    Write-Error $failureMessage
+}
+finally {
+    $tempInventory = if (Test-Path -LiteralPath $TempRuntimeRoot) {
+        @(Get-ChildItem -LiteralPath $TempRuntimeRoot -Recurse -Force | Select-Object FullName, Length, LastWriteTimeUtc)
+    } else { @() }
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'temp-runtime-inventory.json') -Value $tempInventory
+
+    $cleanup = [ordered]@{
+        attempted_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        temp_runtime_root = $TempRuntimeRoot
+        evidence_root = $EvidenceRoot
+        temp_removed = $false
+        evidence_preserved = (Test-Path -LiteralPath $EvidenceRoot)
+        error = $null
+    }
+    try {
+        if (Test-Path -LiteralPath $TempRuntimeRoot) {
+            $resolvedTempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+            $resolvedRuntimeRoot = [IO.Path]::GetFullPath($TempRuntimeRoot)
+            if (-not $resolvedRuntimeRoot.StartsWith($resolvedTempBase, [StringComparison]::OrdinalIgnoreCase) -or
+                -not ([IO.Path]::GetFileName($resolvedRuntimeRoot)).StartsWith('ytm-free-semantic-runtime-', [StringComparison]::Ordinal)) {
+                throw "Refusing recursive cleanup outside the owned temp runtime root: $resolvedRuntimeRoot"
+            }
+            Remove-Item -LiteralPath $TempRuntimeRoot -Recurse -Force
+        }
+        $cleanup.temp_removed = -not (Test-Path -LiteralPath $TempRuntimeRoot)
+    }
+    catch {
+        $cleanup.error = $_.Exception.Message
+        $exitCode = 1
+        $result = 'FAIL'
+        if (-not $failureMessage) { $failureMessage = "TEMP_RUNTIME_ROOT cleanup failed: $($cleanup.error)" }
+    }
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'cleanup-ledger.json') -Value $cleanup
+
+    $env:YTM_FREE_DATA_DIR = $OriginalEnvironment.YTM_FREE_DATA_DIR
+    $env:EVIDENCE_ROOT = $OriginalEnvironment.EVIDENCE_ROOT
+    $env:WDIO_EMBEDDED_PORT = $OriginalEnvironment.WDIO_EMBEDDED_PORT
+    $env:TAURI_WEBDRIVER_PORT = $OriginalEnvironment.TAURI_WEBDRIVER_PORT
+
+    $evidenceFiles = @(
+        Get-ChildItem -LiteralPath $EvidenceRoot -Recurse -File |
+            Where-Object { $_.Name -ne 'final-manifest.json' } |
+            Sort-Object FullName |
+            ForEach-Object {
+                [ordered]@{
+                    path = Get-RelativePathCompatible -BasePath $EvidenceRoot -TargetPath $_.FullName
+                    size = $_.Length
+                    sha256 = Get-Sha256Hex -Path $_.FullName
+                }
+            }
+    )
+    $manifest = [ordered]@{
+        result = $result
+        failure = $failureMessage
+        branch = 'test/semantic-progress-runtime-harness'
+        baseline_sha = $BaselineSha
+        temp_runtime_root = $TempRuntimeRoot
+        evidence_root = $EvidenceRoot
+        embedded_port = $EmbeddedPort
+        generated_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        evidence_files = $evidenceFiles
+    }
+    Write-JsonFile -Path (Join-Path $EvidenceRoot 'final-manifest.json') -Value $manifest
+    Write-Host "RESULT: $result"
+    Write-Host "EVIDENCE_ROOT: $EvidenceRoot"
+}
+
+exit $exitCode

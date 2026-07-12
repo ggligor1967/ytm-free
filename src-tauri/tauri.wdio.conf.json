@@ -1,0 +1,22 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run build:wdio",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "wdio",
+          "description": "Test-only WebdriverIO capability",
+          "windows": ["main"],
+          "permissions": [
+            "wdio:default",
+            "wdio-webdriver:default"
+          ]
+        }
+      ]
+    }
+  }
+}

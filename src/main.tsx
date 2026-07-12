@@ -3,8 +3,22 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+type ImportMetaWithMode = ImportMeta & {
+  readonly env?: {
+    readonly MODE?: string;
+  };
+};
+
+async function bootstrap(): Promise<void> {
+  if ((import.meta as ImportMetaWithMode).env?.MODE === "wdio") {
+    await import("@wdio/tauri-plugin");
+  }
+
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+}
+
+void bootstrap();
