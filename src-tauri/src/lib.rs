@@ -1886,37 +1886,37 @@ fn semantic_search_filtered_with_embedding_db_helper(
         scored.retain(|(_, sim)| (*sim as f64) >= threshold);
     }
 
-    if let Some(g) = &genres {
+    let metadata_filters_active = genres.is_some() || moods.is_some() || activities.is_some();
+    if metadata_filters_active {
         scored.retain(|(track_id, _)| {
-            if let Ok(metadata) = db.get_track_metadata(track_id) {
-                if let Some(genre) = &metadata.genre {
-                    return g.contains(genre);
-                }
-            }
-            true
-        });
-    }
+            let Ok(metadata) = db.get_track_metadata(track_id) else {
+                return false;
+            };
 
-    if let Some(m) = &moods {
-        scored.retain(|(track_id, _)| {
-            if let Ok(metadata) = db.get_track_metadata(track_id) {
-                if let Some(mood) = &metadata.mood {
-                    return m.contains(mood);
-                }
-            }
-            true
-        });
-    }
+            let genre_matches = match &genres {
+                Some(filters) => metadata
+                    .genre
+                    .as_ref()
+                    .is_some_and(|genre| filters.contains(genre)),
+                None => true,
+            };
+            let mood_matches = match &moods {
+                Some(filters) => metadata
+                    .mood
+                    .as_ref()
+                    .is_some_and(|mood| filters.contains(mood)),
+                None => true,
+            };
+            let activity_matches = match &activities {
+                Some(filters) => metadata.activity_tags.as_ref().is_some_and(|tags_json| {
+                    crate::semantic::parse_json_array(tags_json)
+                        .iter()
+                        .any(|tag| filters.contains(tag))
+                }),
+                None => true,
+            };
 
-    if let Some(a) = &activities {
-        scored.retain(|(track_id, _)| {
-            if let Ok(metadata) = db.get_track_metadata(track_id) {
-                if let Some(tags_json) = &metadata.activity_tags {
-                    let tags = crate::semantic::parse_json_array(tags_json);
-                    return tags.iter().any(|t| a.contains(t));
-                }
-            }
-            true
+            genre_matches && mood_matches && activity_matches
         });
     }
 
@@ -5121,6 +5121,179 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    #[test]
+    fn test_semantic_filtered_ann_db_parity_excludes_missing_metadata() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-filtered-ann-db-parity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create parity temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        fn build_ann_from_db(db: &Database) -> ANNIndex {
+            let mut ann = ANNIndex::new();
+            for embedding in db
+                .get_all_embeddings()
+                .expect("Failed to load parity embeddings for ANN")
+            {
+                let track = db
+                    .get_track_by_uuid(&embedding.track_id)
+                    .expect("Failed to load parity track for ANN");
+                let metadata = db.get_track_metadata(&track.id).ok();
+                let ann_metadata = semantic::build_metadata(
+                    &track,
+                    metadata.as_ref().and_then(|value| value.genre.clone()),
+                    metadata.as_ref().and_then(|value| value.mood.clone()),
+                    metadata
+                        .as_ref()
+                        .and_then(|value| value.activity_tags.clone()),
+                );
+                ann.add(track.id.clone(), embedding.embedding, ann_metadata);
+            }
+            ann
+        }
+
+        fn ann_ids(
+            ann: &ANNIndex,
+            query_embedding: &[f32],
+            filter: &SemanticSearchFilter,
+        ) -> Vec<String> {
+            ann.search_filtered(query_embedding, 10, filter)
+                .into_iter()
+                .map(|(track_id, _)| track_id)
+                .collect()
+        }
+
+        fn db_ids(
+            db: &Database,
+            query_embedding: &[f32],
+            filter: &SemanticSearchFilter,
+        ) -> Vec<String> {
+            semantic_search_filtered_with_embedding_db_helper(
+                db,
+                query_embedding,
+                Some(10),
+                filter.genres.clone(),
+                filter.moods.clone(),
+                filter.activities.clone(),
+                filter.min_similarity,
+            )
+            .expect("Failed to run parity DB fallback")
+            .into_iter()
+            .map(|result| result.track.id)
+            .collect()
+        }
+
+        let query_embedding = vec![1.0_f32, 0.0, 0.0];
+        let db = Database::new().expect("Failed to create parity temp database");
+        let with_metadata = db
+            .add_track(
+                "semantic-ann-db-parity-video-001",
+                "Semantic ANN DB Parity With Metadata",
+                "Semantic ANN DB Parity Artist",
+                "https://example.invalid/semantic-ann-db-parity-001.jpg",
+                None,
+            )
+            .expect("Failed to add parity track with metadata");
+        let without_metadata = db
+            .add_track(
+                "semantic-ann-db-parity-video-002",
+                "Semantic ANN DB Parity Missing Metadata",
+                "Semantic ANN DB Parity Artist",
+                "https://example.invalid/semantic-ann-db-parity-002.jpg",
+                None,
+            )
+            .expect("Failed to add parity track without metadata");
+
+        let metadata = crate::ollama::TrackMetadataAI {
+            genre: "Ambient".to_string(),
+            sub_genre: None,
+            mood: "Focus".to_string(),
+            energy_level: 5,
+            tempo: "medium".to_string(),
+            danceability: 2,
+            vocal_type: "instrumental".to_string(),
+            decade: "2020s".to_string(),
+            language: "Instrumental".to_string(),
+            activity_tags: vec!["coding".to_string()],
+            occasion_tags: vec![],
+            keywords: vec!["ambient".to_string(), "focus".to_string()],
+        };
+        db.save_track_metadata(&with_metadata.id, &metadata, "semantic-ann-db-parity-model")
+            .expect("Failed to save parity metadata");
+
+        db.save_embedding(
+            &with_metadata.id,
+            &[1.0, 0.0, 0.0],
+            "Semantic ANN DB Parity With Metadata",
+            "semantic-ann-db-parity-model",
+            3,
+        )
+        .expect("Failed to save parity embedding with metadata");
+        db.save_embedding(
+            &without_metadata.id,
+            &[0.9, 0.435889894, 0.0],
+            "Semantic ANN DB Parity Missing Metadata",
+            "semantic-ann-db-parity-model",
+            3,
+        )
+        .expect("Failed to save parity embedding without metadata");
+
+        let filtered = SemanticSearchFilter {
+            genres: Some(vec!["Ambient".to_string()]),
+            moods: Some(vec!["Focus".to_string()]),
+            activities: Some(vec!["coding".to_string()]),
+            min_similarity: Some(0.3),
+        };
+        let unfiltered = SemanticSearchFilter {
+            genres: None,
+            moods: None,
+            activities: None,
+            min_similarity: Some(0.3),
+        };
+
+        let ann = build_ann_from_db(&db);
+        let ann_filtered = ann_ids(&ann, &query_embedding, &filtered);
+        let db_filtered = db_ids(&db, &query_embedding, &filtered);
+        assert!(
+            !db_filtered.contains(&without_metadata.id),
+            "DB fallback must exclude a track without metadata when filters are active"
+        );
+        assert_eq!(ann_filtered, vec![with_metadata.id.clone()]);
+        assert_eq!(db_filtered, ann_filtered);
+
+        let ann_unfiltered = ann_ids(&ann, &query_embedding, &unfiltered);
+        let db_unfiltered = db_ids(&db, &query_embedding, &unfiltered);
+        assert_eq!(
+            ann_unfiltered,
+            vec![with_metadata.id.clone(), without_metadata.id.clone()]
+        );
+        assert_eq!(db_unfiltered, ann_unfiltered);
+
+        drop(db);
+        let reopened = Database::new().expect("Failed to reopen parity temp database");
+        let reopened_ann = build_ann_from_db(&reopened);
+        assert_eq!(
+            ann_ids(&reopened_ann, &query_embedding, &filtered),
+            ann_filtered
+        );
+        assert_eq!(db_ids(&reopened, &query_embedding, &filtered), ann_filtered);
+        assert_eq!(
+            ann_ids(&reopened_ann, &query_embedding, &unfiltered),
+            ann_unfiltered
+        );
+        assert_eq!(
+            db_ids(&reopened, &query_embedding, &unfiltered),
+            ann_unfiltered
+        );
+        drop(reopened);
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove parity temp data dir");
     }
 
     #[test]

@@ -268,10 +268,26 @@ pub fn build_metadata(
 ) -> EmbeddingMetadata {
     EmbeddingMetadata {
         track_id: track.id.clone(),
-        genres: parse_json_array(&genres.unwrap_or_default()),
-        moods: parse_json_array(&moods.unwrap_or_default()),
+        genres: parse_scalar_or_json_array(&genres.unwrap_or_default()),
+        moods: parse_scalar_or_json_array(&moods.unwrap_or_default()),
         activities: parse_json_array(&activities.unwrap_or_default()),
         energy_level: None,
+    }
+}
+
+fn parse_scalar_or_json_array(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    match serde_json::from_str::<Vec<String>>(trimmed) {
+        Ok(values) => values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+        Err(_) => vec![trimmed.to_string()],
     }
 }
 
@@ -290,6 +306,44 @@ mod tests {
 
     fn make_embedding(values: &[f32]) -> Vec<f32> {
         values.to_vec()
+    }
+
+    #[test]
+    fn test_build_metadata_accepts_scalar_genre_mood_and_json_activities() {
+        let track = Track {
+            id: "metadata-scalar-track".to_string(),
+            video_id: "metadata-scalar-video".to_string(),
+            title: "Metadata Scalar Track".to_string(),
+            artist: "Metadata Scalar Artist".to_string(),
+            thumbnail: "https://example.invalid/metadata-scalar.jpg".to_string(),
+            duration: None,
+            local_path: None,
+            is_downloaded: false,
+            is_favorite: false,
+            play_count: 0,
+            last_played: None,
+            created_at: "2026-07-14T00:00:00Z".to_string(),
+        };
+
+        let scalar_metadata = build_metadata(
+            &track,
+            Some("Ambient".to_string()),
+            Some("Focus".to_string()),
+            Some(r#"["coding","studying"]"#.to_string()),
+        );
+
+        assert_eq!(scalar_metadata.track_id, track.id);
+        assert_eq!(scalar_metadata.genres, vec!["Ambient"]);
+        assert_eq!(scalar_metadata.moods, vec!["Focus"]);
+        assert_eq!(scalar_metadata.activities, vec!["coding", "studying"]);
+
+        let array_metadata = build_metadata(
+            &track,
+            Some(r#"["Ambient","Electronic"]"#.to_string()),
+            None,
+            None,
+        );
+        assert_eq!(array_metadata.genres, vec!["Ambient", "Electronic"]);
     }
 
     #[test]
