@@ -1896,15 +1896,17 @@ fn semantic_search_filtered_with_embedding_db_helper(
             let genre_matches = match &genres {
                 Some(filters) => metadata
                     .genre
-                    .as_ref()
-                    .is_some_and(|genre| filters.contains(genre)),
+                    .as_deref()
+                    .map(crate::semantic::parse_scalar_or_json_array)
+                    .is_some_and(|stored| stored.iter().any(|value| filters.contains(value))),
                 None => true,
             };
             let mood_matches = match &moods {
                 Some(filters) => metadata
                     .mood
-                    .as_ref()
-                    .is_some_and(|mood| filters.contains(mood)),
+                    .as_deref()
+                    .map(crate::semantic::parse_scalar_or_json_array)
+                    .is_some_and(|stored| stored.iter().any(|value| filters.contains(value))),
                 None => true,
             };
             let activity_matches = match &activities {
@@ -5209,11 +5211,38 @@ mod tests {
                 None,
             )
             .expect("Failed to add parity track without metadata");
+        let whitespace_metadata = db
+            .add_track(
+                "semantic-ann-db-parity-video-003",
+                "Semantic ANN DB Parity Whitespace Metadata",
+                "Semantic ANN DB Parity Artist",
+                "https://example.invalid/semantic-ann-db-parity-003.jpg",
+                None,
+            )
+            .expect("Failed to add parity track with whitespace metadata");
+        let json_array_metadata = db
+            .add_track(
+                "semantic-ann-db-parity-video-004",
+                "Semantic ANN DB Parity JSON Array Metadata",
+                "Semantic ANN DB Parity Artist",
+                "https://example.invalid/semantic-ann-db-parity-004.jpg",
+                None,
+            )
+            .expect("Failed to add parity track with JSON-array metadata");
+        let json_array_whitespace_metadata = db
+            .add_track(
+                "semantic-ann-db-parity-video-005",
+                "Semantic ANN DB Parity JSON Array Whitespace Metadata",
+                "Semantic ANN DB Parity Artist",
+                "https://example.invalid/semantic-ann-db-parity-005.jpg",
+                None,
+            )
+            .expect("Failed to add parity track with JSON-array whitespace metadata");
 
-        let metadata = crate::ollama::TrackMetadataAI {
-            genre: "Ambient".to_string(),
+        let metadata_for = |genre: &str, mood: &str| crate::ollama::TrackMetadataAI {
+            genre: genre.to_string(),
             sub_genre: None,
-            mood: "Focus".to_string(),
+            mood: mood.to_string(),
             energy_level: 5,
             tempo: "medium".to_string(),
             danceability: 2,
@@ -5224,8 +5253,30 @@ mod tests {
             occasion_tags: vec![],
             keywords: vec!["ambient".to_string(), "focus".to_string()],
         };
-        db.save_track_metadata(&with_metadata.id, &metadata, "semantic-ann-db-parity-model")
-            .expect("Failed to save parity metadata");
+        db.save_track_metadata(
+            &with_metadata.id,
+            &metadata_for("Ambient", "Focus"),
+            "semantic-ann-db-parity-model",
+        )
+        .expect("Failed to save clean scalar parity metadata");
+        db.save_track_metadata(
+            &whitespace_metadata.id,
+            &metadata_for("  Ambient  ", "  Focus  "),
+            "semantic-ann-db-parity-model",
+        )
+        .expect("Failed to save whitespace scalar parity metadata");
+        db.save_track_metadata(
+            &json_array_metadata.id,
+            &metadata_for(r#"["Ambient","Electronic"]"#, r#"["Focus","Calm"]"#),
+            "semantic-ann-db-parity-model",
+        )
+        .expect("Failed to save JSON-array parity metadata");
+        db.save_track_metadata(
+            &json_array_whitespace_metadata.id,
+            &metadata_for(r#"["  Ambient  ","Electronic"]"#, r#"["Focus","  Calm  "]"#),
+            "semantic-ann-db-parity-model",
+        )
+        .expect("Failed to save JSON-array whitespace parity metadata");
 
         db.save_embedding(
             &with_metadata.id,
@@ -5243,6 +5294,30 @@ mod tests {
             3,
         )
         .expect("Failed to save parity embedding without metadata");
+        db.save_embedding(
+            &whitespace_metadata.id,
+            &[0.98, 0.19899749, 0.0],
+            "Semantic ANN DB Parity Whitespace Metadata",
+            "semantic-ann-db-parity-model",
+            3,
+        )
+        .expect("Failed to save parity embedding with whitespace metadata");
+        db.save_embedding(
+            &json_array_metadata.id,
+            &[0.96, 0.28, 0.0],
+            "Semantic ANN DB Parity JSON Array Metadata",
+            "semantic-ann-db-parity-model",
+            3,
+        )
+        .expect("Failed to save parity embedding with JSON-array metadata");
+        db.save_embedding(
+            &json_array_whitespace_metadata.id,
+            &[0.94, 0.34117445, 0.0],
+            "Semantic ANN DB Parity JSON Array Whitespace Metadata",
+            "semantic-ann-db-parity-model",
+            3,
+        )
+        .expect("Failed to save parity embedding with JSON-array whitespace metadata");
 
         let filtered = SemanticSearchFilter {
             genres: Some(vec!["Ambient".to_string()]),
@@ -5260,37 +5335,51 @@ mod tests {
         let ann = build_ann_from_db(&db);
         let ann_filtered = ann_ids(&ann, &query_embedding, &filtered);
         let db_filtered = db_ids(&db, &query_embedding, &filtered);
+        let expected_filtered = vec![
+            with_metadata.id.clone(),
+            whitespace_metadata.id.clone(),
+            json_array_metadata.id.clone(),
+            json_array_whitespace_metadata.id.clone(),
+        ];
         assert!(
             !db_filtered.contains(&without_metadata.id),
             "DB fallback must exclude a track without metadata when filters are active"
         );
-        assert_eq!(ann_filtered, vec![with_metadata.id.clone()]);
-        assert_eq!(db_filtered, ann_filtered);
+        assert_eq!(ann_filtered, expected_filtered);
+        assert_eq!(
+            db_filtered, ann_filtered,
+            "DB fallback must normalize whitespace scalar and JSON-array metadata like ANN"
+        );
+        assert!(db_filtered.contains(&whitespace_metadata.id));
+        assert!(db_filtered.contains(&json_array_metadata.id));
+        assert!(db_filtered.contains(&json_array_whitespace_metadata.id));
 
         let ann_unfiltered = ann_ids(&ann, &query_embedding, &unfiltered);
         let db_unfiltered = db_ids(&db, &query_embedding, &unfiltered);
         assert_eq!(
             ann_unfiltered,
-            vec![with_metadata.id.clone(), without_metadata.id.clone()]
+            vec![
+                with_metadata.id.clone(),
+                whitespace_metadata.id.clone(),
+                json_array_metadata.id.clone(),
+                json_array_whitespace_metadata.id.clone(),
+                without_metadata.id.clone(),
+            ]
         );
         assert_eq!(db_unfiltered, ann_unfiltered);
 
         drop(db);
         let reopened = Database::new().expect("Failed to reopen parity temp database");
         let reopened_ann = build_ann_from_db(&reopened);
-        assert_eq!(
-            ann_ids(&reopened_ann, &query_embedding, &filtered),
-            ann_filtered
-        );
-        assert_eq!(db_ids(&reopened, &query_embedding, &filtered), ann_filtered);
-        assert_eq!(
-            ann_ids(&reopened_ann, &query_embedding, &unfiltered),
-            ann_unfiltered
-        );
-        assert_eq!(
-            db_ids(&reopened, &query_embedding, &unfiltered),
-            ann_unfiltered
-        );
+        let reopened_ann_filtered = ann_ids(&reopened_ann, &query_embedding, &filtered);
+        let reopened_db_filtered = db_ids(&reopened, &query_embedding, &filtered);
+        assert_eq!(reopened_ann_filtered, ann_filtered);
+        assert_eq!(reopened_db_filtered, reopened_ann_filtered);
+
+        let reopened_ann_unfiltered = ann_ids(&reopened_ann, &query_embedding, &unfiltered);
+        let reopened_db_unfiltered = db_ids(&reopened, &query_embedding, &unfiltered);
+        assert_eq!(reopened_ann_unfiltered, ann_unfiltered);
+        assert_eq!(reopened_db_unfiltered, reopened_ann_unfiltered);
         drop(reopened);
 
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove parity temp data dir");

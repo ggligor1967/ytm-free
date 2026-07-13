@@ -275,7 +275,7 @@ pub fn build_metadata(
     }
 }
 
-fn parse_scalar_or_json_array(value: &str) -> Vec<String> {
+pub(crate) fn parse_scalar_or_json_array(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Vec::new();
