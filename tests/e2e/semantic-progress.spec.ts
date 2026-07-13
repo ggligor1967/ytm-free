@@ -115,8 +115,8 @@ describe("semantic indexing progress", () => {
     );
 
     assert.ok(
-      hasIntermediatePercentage || distinctCurrentTracks.size >= 2,
-      "Expected an intermediate percentage or at least two distinct current-track values",
+      hasIntermediatePercentage && distinctCurrentTracks.size >= 2,
+      "Expected both an intermediate percentage and at least two distinct current-track values during indexing",
     );
 
     const bodyText = await $("body").getText();

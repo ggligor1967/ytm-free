@@ -7,6 +7,10 @@ import {
   type TauriServiceOptions,
 } from "@wdio/tauri-service";
 
+if (process.platform !== "win32") {
+  throw new Error("The embedded YTM-Free WDIO harness currently supports Windows only");
+}
+
 const originalOnPrepare = TauriLauncher.prototype.onPrepare;
 
 if (process.platform === "win32") {
@@ -16,13 +20,28 @@ if (process.platform === "win32") {
       return originalOnPrepare.call(this, config, capabilities);
     }
 
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux" });
+    const originalDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    if (!originalDescriptor) {
+      throw new Error("Cannot apply embedded WDIO Windows workaround: process.platform property descriptor is missing");
+    }
+    if (!originalDescriptor.configurable) {
+      throw new Error("Cannot apply embedded WDIO Windows workaround: process.platform is not configurable and cannot be safely redefined");
+    }
+    if ("get" in originalDescriptor || "set" in originalDescriptor) {
+      throw new Error("Cannot apply embedded WDIO Windows workaround: process.platform is an accessor property, expected a data property");
+    }
+
+    Object.defineProperty(process, "platform", {
+      value: "linux",
+      writable: originalDescriptor.writable ?? true,
+      enumerable: originalDescriptor.enumerable ?? true,
+      configurable: true,
+    });
 
     try {
       return await originalOnPrepare.call(this, config, capabilities);
     } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform });
+      Object.defineProperty(process, "platform", originalDescriptor);
     }
   };
 }

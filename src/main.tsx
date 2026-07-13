@@ -21,4 +21,6 @@ async function bootstrap(): Promise<void> {
   );
 }
 
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+  console.error("YTM-Free bootstrap failed", error);
+});

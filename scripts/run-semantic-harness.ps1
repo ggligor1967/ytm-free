@@ -29,6 +29,7 @@ $AllowedUntrackedProtected = @(
 )
 $CommandLedger = [System.Collections.Generic.List[object]]::new()
 $NetstatSequence = 0
+$CommandSequence = 0
 $OriginalEnvironment = @{
     YTM_FREE_DATA_DIR = $env:YTM_FREE_DATA_DIR
     EVIDENCE_ROOT = $env:EVIDENCE_ROOT
@@ -109,8 +110,13 @@ function Invoke-CapturedProcess {
     )
 
     $safeName = $Name -replace '[^A-Za-z0-9._-]', '_'
-    $stdoutPath = Join-Path $CommandLogRoot ($safeName + '.stdout.log')
-    $stderrPath = Join-Path $CommandLogRoot ($safeName + '.stderr.log')
+    # Sequence-based log filenames guarantee one unique stdout/stderr file per
+    # invocation. Repeated command names (e.g. the pre-run and post-run
+    # git-diff/git-scope-status invocations) must never overwrite each other.
+    $script:CommandSequence += 1
+    $logBase = '{0:D3}-{1}' -f $script:CommandSequence, $safeName
+    $stdoutPath = Join-Path $CommandLogRoot ($logBase + '.stdout.log')
+    $stderrPath = Join-Path $CommandLogRoot ($logBase + '.stderr.log')
     $startedAt = (Get-Date).ToUniversalTime()
     $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -Wait -PassThru
