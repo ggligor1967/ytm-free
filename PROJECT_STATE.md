@@ -4,7 +4,7 @@
 > Every claim below is dated and backed by a command. When you re-verify, update the date and result — never leave a stale ✅.
 > If this file disagrees with any other doc (README, docs/FAZA_*, CHANGELOG), **this file wins**; update the other doc or flag it.
 
-**Last full verification:** 2026-07-13 — canonical technical baseline: `main` `f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`; PR #6 semantic indexing progress runtime merged and verified; PR #7 unfiltered semantic search runtime merged and final-main-bound; full application E2E still unverified; production-ready: **NO**.
+**Last full verification:** 2026-07-13 — runtime-verified technical baseline commit: `f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`; PR #6 semantic indexing progress runtime: merged and verified; PR #7 unfiltered semantic search runtime: merged and final-main-bound on the technical baseline above. Later documentation-only commits do not extend or invalidate that runtime proof. The exact current repository HEAD must be read from Git and is intentionally not hardcoded into this self-updating document. Full application E2E is still unverified; production-ready: **NO**.
 **Step-1D toolchain shell remediation (2026-07-08):** the remaining plain-shell `dbghelp.lib` blocker is resolved for the normal PowerShell workflow on this machine. A user-level environment pin plus PowerShell bootstrap (`C:\Users\gglig\Documents\PowerShell\profile.ps1`) now auto-selects MSVC + Windows SDK `10.0.26100.0` without manual `vcvarsall.bat`. Evidence: from a normal PowerShell shell, `. C:\Users\gglig\Documents\PowerShell\profile.ps1; cargo test --no-run` compiled successfully in `src-tauri`, and full `. C:\Users\gglig\Documents\PowerShell\profile.ps1; cargo test -- --test-threads=1` passed `34/34`. The root cause on disk is unchanged: SDK `10.0.28000.0` is still partial (115 libs, no `dbghelp.lib`), so non-PowerShell or env-less raw shells may still fail if they bypass the bootstrap.
 **Step-3B release-runtime smoke (2026-07-07, eleventh session):** see the Step-3B paragraph below - built release executable NOT launched (BLOCKED-RUNTIME-ISOLATION); artifacts verified present and hashed.
 **Step-1 re-verification (same day, second session):** the `dbghelp.lib` toolchain block is **bypassable** via a session-only SDK pin — see "Verified BROKEN" table below for the new finding and the changed blocker.
@@ -153,10 +153,12 @@ PR #7 records the PR-head evidence set. The final-main-bound rerun is recorded i
 
 ## Git state baseline: 2026-07-13
 
-- `origin/main = f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`
+- `runtime-verified technical baseline = f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`
+- The current `origin/main` may be ahead of this technical baseline through documentation-only commits. Run `git rev-parse origin/main` for the exact current repository HEAD. This document intentionally does not hardcode its own post-merge SHA.
 - `PR #6 = MERGED`; merge commit `5ad138c8b899be0f8eecfd2c0f87494e18fddc53`
 - `PR #7 = MERGED`; merge commit `f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`
 - canonical code branch: `main`
+- The documentation synchronization and its integration metadata are tracked in PR #8.
 - protected untracked files: the same four known files — `AGENTS.md`, `gdpr-compliance-audit-report.md`, `docs/GDPR_REMEDIATION_PLAN.md`, `docs/plan-remediere-gdpr-complete.md`
 - `Cargo.lock` is **gitignored** (see `.gitignore`). For an application this breaks reproducible Rust builds — known debt, decision pending.
 - `Spotify/*.csv` (personal listening exports) are tracked in git — flagged by the GDPR audit.
