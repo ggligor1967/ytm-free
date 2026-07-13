@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const QUERY = "quiet music for sleeping";
 const HEADER_PLACEHOLDER_SUBSTRING = "Search for songs";
 const EXPECTED_TRACK_COUNT = 5;
+const EXPECTED_TOP_MATCH = "Calm Piano Sleep Meditation";
+const execFileAsync = promisify(execFile);
 
 interface IndexSample {
   timestamp: number;
@@ -36,9 +40,48 @@ interface ResultRow {
   similarity: number | null;
 }
 
+interface LogicalTableSnapshot {
+  row_count: number;
+  sha256: string;
+}
+
+interface LogicalSnapshot {
+  mode: "logical-read-only-snapshot";
+  database: string;
+  captured_at_utc: string;
+  tables: Record<string, LogicalTableSnapshot>;
+  logical_sha256: string;
+}
+
 function finiteOrNull(value: number | null): number | null {
   if (value === null || !Number.isFinite(value)) return null;
   return value;
+}
+
+async function captureLogicalSnapshot(
+  evidenceRoot: string,
+  outputName: "db-before-query.json" | "db-after-query.json",
+): Promise<LogicalSnapshot> {
+  const dataDir = process.env.YTM_FREE_DATA_DIR;
+  assert.ok(dataDir, "YTM_FREE_DATA_DIR must be set for logical SQLite snapshots");
+  const fixtureScript = path.join("scripts", "seed-semantic-search-query-fixture.py");
+  const { stdout, stderr } = await execFileAsync(
+    "py",
+    ["-3", fixtureScript, "--data-dir", dataDir, "--logical-snapshot"],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+  assert.equal(stderr.trim(), "", `Logical SQLite snapshot wrote to stderr: ${stderr.trim()}`);
+  const snapshot = JSON.parse(stdout) as LogicalSnapshot;
+  assert.equal(snapshot.mode, "logical-read-only-snapshot", "Unexpected SQLite snapshot mode");
+  assert.ok(snapshot.logical_sha256, "Logical SQLite snapshot digest is missing");
+  assert.ok(snapshot.tables && Object.keys(snapshot.tables).length > 0, "Logical SQLite snapshot has no tables");
+  await writeFile(path.join(evidenceRoot, outputName), `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  return snapshot;
 }
 
 describe("semantic search runtime", () => {
@@ -187,13 +230,6 @@ describe("semantic search runtime", () => {
       `${JSON.stringify(dbAfterIndex, null, 2)}\n`,
       "utf8",
     );
-    // No writes happen between indexing completion and the query, so the
-    // before-query state equals the after-index state.
-    await writeFile(
-      path.join(evidenceRoot, "db-before-query.json"),
-      `${JSON.stringify({ ...dbAfterIndex, note: "captured before query; equals after-index (no writes between)" }, null, 2)}\n`,
-      "utf8",
-    );
     await writeFile(
       path.join(evidenceRoot, "semantic-indexing-samples.json"),
       `${JSON.stringify(indexSamples, null, 2)}\n`,
@@ -207,6 +243,7 @@ describe("semantic search runtime", () => {
     // direct invoke) is the UI flow under test. The Header dispatches the
     // YouTube preflight (search_youtube) and navigates to SearchView; the
     // Semantic toggle only becomes reachable after the preflight finishes.
+    const dbBeforeQuery = await captureLogicalSnapshot(evidenceRoot, "db-before-query.json");
     const enteredAt = Date.now();
     await browser.execute((placeholderSubstring: string, query: string) => {
       const input = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='text']"))
@@ -342,6 +379,40 @@ describe("semantic search runtime", () => {
       { timeout: 90_000, interval: 250, timeoutMsg: "Semantic search results (or empty state) did not appear" },
     );
 
+    const dbAfterQuery = await captureLogicalSnapshot(evidenceRoot, "db-after-query.json");
+    const tableNamesBefore = Object.keys(dbBeforeQuery.tables).sort();
+    const tableNamesAfter = Object.keys(dbAfterQuery.tables).sort();
+    const allTableNames = [...new Set([...tableNamesBefore, ...tableNamesAfter])].sort();
+    const changedTables = allTableNames.filter((tableName) => {
+      const before = dbBeforeQuery.tables[tableName];
+      const after = dbAfterQuery.tables[tableName];
+      return !before
+        || !after
+        || before.row_count !== after.row_count
+        || before.sha256 !== after.sha256;
+    });
+    const dbLogicalEqual = dbAfterQuery.logical_sha256 === dbBeforeQuery.logical_sha256
+      && changedTables.length === 0;
+    assert.equal(
+      dbAfterQuery.logical_sha256,
+      dbBeforeQuery.logical_sha256,
+      "semantic_search mutated the SQLite logical state",
+    );
+    assert.deepEqual(tableNamesAfter, tableNamesBefore, "semantic_search changed the SQLite table list");
+    for (const tableName of tableNamesBefore) {
+      assert.equal(
+        dbAfterQuery.tables[tableName].row_count,
+        dbBeforeQuery.tables[tableName].row_count,
+        `semantic_search changed the row count for SQLite table ${tableName}`,
+      );
+      assert.equal(
+        dbAfterQuery.tables[tableName].sha256,
+        dbBeforeQuery.tables[tableName].sha256,
+        `semantic_search changed the logical digest for SQLite table ${tableName}`,
+      );
+    }
+    assert.deepEqual(changedTables, [], "semantic_search changed one or more SQLite tables");
+
     const sawSemanticLoading = loadingSamples.some((sample) => sample.semantic_loading);
     await writeFile(
       path.join(evidenceRoot, "semantic-loading-samples.json"),
@@ -407,14 +478,21 @@ describe("semantic search runtime", () => {
 
     // Descending order by similarity (non-increasing; the frontend trusts the
     // backend's ORDER BY similarity DESC).
-    for (let i = 1; i < rows.length; i += 1) {
-      assert.ok(
-        (rows[i - 1].similarity as number) >= (rows[i].similarity as number),
-        `Results not descending at rank ${i + 1}: ${rows[i - 1].similarity} then ${rows[i].similarity}`,
-      );
-    }
+    const orderDescending = rows.every(
+      (row, index) =>
+        index === 0
+        || (rows[index - 1].similarity as number) >= (row.similarity as number),
+    );
+    assert.ok(orderDescending, "Semantic results are not ordered by descending similarity");
 
-    const calmPiano = rows.find((row) => row.title === "Calm Piano Sleep Meditation");
+    assert.equal(
+      rows[0]?.title,
+      EXPECTED_TOP_MATCH,
+      "Expected 'Calm Piano Sleep Meditation' to be the top semantic result",
+    );
+
+    const calmPiano = rows.find((row) => row.title === EXPECTED_TOP_MATCH);
+    const calmPianoRank = rows.findIndex((row) => row.title === EXPECTED_TOP_MATCH) + 1;
     const aggressiveMetal = rows.find((row) => row.title === "Aggressive Metal Gym Workout");
     assert.ok(calmPiano, "'Calm Piano Sleep Meditation' must appear in the Top K results");
     if (aggressiveMetal) {
@@ -440,13 +518,17 @@ describe("semantic search runtime", () => {
       similarity_values: similarityValues,
       all_scores_finite: allScoresFinite,
       all_scores_in_unit_interval: allScoresInUnitInterval,
-      order_descending: rows.every(
-        (i) => rows.indexOf(i) === 0 || (rows[rows.indexOf(i) - 1].similarity as number) >= (i.similarity as number),
-      ),
+      order_descending: orderDescending,
+      expected_top_match: EXPECTED_TOP_MATCH,
+      actual_top_match: rows[0]?.title ?? null,
+      top_match_pass: rows[0]?.title === EXPECTED_TOP_MATCH,
+      calm_piano_rank: calmPianoRank,
       calm_piano_in_top_k: Boolean(calmPiano),
       aggressive_metal_present: Boolean(aggressiveMetal),
       aggressive_metal_absent_or_lower: !aggressiveMetal
         || ((calmPiano as ResultRow).similarity! > (aggressiveMetal as ResultRow).similarity!),
+      db_logical_equal: dbLogicalEqual,
+      changed_tables: changedTables,
       results: rows,
     };
     await writeFile(
@@ -489,7 +571,7 @@ describe("semantic search runtime", () => {
     const totalAfterQuery = countMatchAfterQuery ? Number(countMatchAfterQuery[2]) : null;
     const modelSelectAfterQuery = await $("select");
     const modelUsedAfterQuery = await modelSelectAfterQuery.getValue();
-    const dbAfterQuery = {
+    const dbAfterQueryUi = {
       source: "dom-ui",
       captured_via: "settings-semantic-tab-after-query",
       tracks: indexedAfterQuery,
@@ -499,8 +581,8 @@ describe("semantic search runtime", () => {
       captured_at_utc: new Date().toISOString(),
     };
     await writeFile(
-      path.join(evidenceRoot, "db-after-query.json"),
-      `${JSON.stringify(dbAfterQuery, null, 2)}\n`,
+      path.join(evidenceRoot, "db-after-query-ui.json"),
+      `${JSON.stringify(dbAfterQueryUi, null, 2)}\n`,
       "utf8",
     );
     assert.equal(

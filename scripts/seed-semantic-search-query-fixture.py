@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -246,6 +247,129 @@ def open_existing_database(data_dir: Path) -> tuple[Path, sqlite3.Connection]:
     connection = sqlite3.connect(database_path, timeout=5.0, isolation_level=None)
     connection.execute("PRAGMA foreign_keys = ON")
     return database_path, connection
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def normalize_sqlite_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bytes):
+        return {"type": "blob", "hex": value.hex().upper()}
+    if isinstance(value, int):
+        return {"type": "integer", "value": value}
+    if isinstance(value, float):
+        if math.isnan(value):
+            normalized = "nan"
+        elif math.isinf(value):
+            normalized = "+inf" if value > 0 else "-inf"
+        else:
+            normalized = format(value, ".17g")
+        return {"type": "real", "value": normalized}
+    if isinstance(value, str):
+        return {"type": "text", "value": value}
+    raise TypeError(f"Unsupported SQLite value type: {type(value).__name__}")
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def logical_snapshot(data_dir: Path) -> dict[str, Any]:
+    database_path = data_dir / "ytm-free.db"
+    if not database_path.is_file():
+        raise RuntimeError(
+            f"Application-created database does not exist: {database_path}"
+        )
+
+    database_uri = f"file:{database_path.resolve().as_posix()}?mode=ro"
+    connection = sqlite3.connect(
+        database_uri,
+        uri=True,
+        timeout=10.0,
+        isolation_level=None,
+    )
+    tables_out: dict[str, dict[str, Any]] = {}
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
+        table_rows = connection.execute(
+            "SELECT name, COALESCE(sql, '') FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+
+        for table_name, schema_sql in table_rows:
+            quoted_table = quote_identifier(table_name)
+            column_rows = connection.execute(
+                f"PRAGMA table_info({quoted_table})"
+            ).fetchall()
+            columns = [
+                {
+                    "cid": column[0],
+                    "name": column[1],
+                    "declared_type": column[2],
+                    "not_null": bool(column[3]),
+                    "default": column[4],
+                    "primary_key_position": column[5],
+                }
+                for column in column_rows
+            ]
+            column_names = [column["name"] for column in columns]
+            canonical_rows: list[str] = []
+            for row in connection.execute(f"SELECT * FROM {quoted_table}"):
+                if len(row) != len(column_names):
+                    raise RuntimeError(
+                        f"Column/value count mismatch for table {table_name}"
+                    )
+                canonical_rows.append(
+                    canonical_json(
+                        {
+                            column_name: normalize_sqlite_value(value)
+                            for column_name, value in zip(column_names, row)
+                        }
+                    )
+                )
+            canonical_rows.sort()
+            table_payload = {
+                "table": table_name,
+                "schema_sql": schema_sql,
+                "columns": columns,
+                "rows": canonical_rows,
+            }
+            table_sha256 = hashlib.sha256(
+                canonical_json(table_payload).encode("utf-8")
+            ).hexdigest().upper()
+            tables_out[table_name] = {
+                "row_count": len(canonical_rows),
+                "sha256": table_sha256,
+            }
+
+        logical_payload = {
+            table_name: tables_out[table_name]
+            for table_name in sorted(tables_out)
+        }
+        logical_sha256 = hashlib.sha256(
+            canonical_json(logical_payload).encode("utf-8")
+        ).hexdigest().upper()
+        return {
+            "mode": "logical-read-only-snapshot",
+            "database": str(database_path),
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "tables": logical_payload,
+            "logical_sha256": logical_sha256,
+        }
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        connection.close()
 
 
 def db_state(connection: sqlite3.Connection, database_path: Path) -> dict[str, Any]:
@@ -485,6 +609,7 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--check-only", action="store_true")
     mode.add_argument("--verify-final", action="store_true")
     mode.add_argument("--snapshot", action="store_true")
+    mode.add_argument("--logical-snapshot", action="store_true")
     return parser.parse_args()
 
 
@@ -493,6 +618,8 @@ def main() -> int:
     try:
         if args.check_only:
             result = check_unlock(args.data_dir)
+        elif args.logical_snapshot:
+            result = logical_snapshot(args.data_dir)
         elif args.verify_final:
             result = verify_final(args.data_dir)
         elif args.snapshot:

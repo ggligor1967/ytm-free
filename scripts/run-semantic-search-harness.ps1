@@ -39,10 +39,10 @@ $AllowedUntrackedProtected = @(
     'docs/plan-remediere-gdpr-complete.md',
     'gdpr-compliance-audit-report.md'
 )
-# The three new files this step is permitted to create are untracked until the
-# post-PASS commit, so the harness must tolerate them as untracked (unlike the
-# protected set, they are NOT part of the protected before/after snapshot).
-$AllowedUntrackedHarnessFiles = @(
+# A pre-commit proof may run with only these three harness files modified.
+# A final commit-bound run (ExpectedHeadSha supplied) still requires a fully
+# clean tracked tree.
+$AllowedHarnessFiles = @(
     'tests/e2e/semantic-search-runtime.spec.ts',
     'scripts/run-semantic-search-harness.ps1',
     'scripts/seed-semantic-search-query-fixture.py'
@@ -289,12 +289,13 @@ function Get-GitState {
 
 function Assert-GitScope {
     $diff = Invoke-CapturedProcess -Name 'git-diff-tracked' -FilePath $GitExe -Arguments @('diff', '--quiet') -AllowNonZeroExit
-    if ($diff.ExitCode -ne 0) {
-        throw "Tracked working tree has unstaged modifications; refusing to run harness"
-    }
     $cached = Invoke-CapturedProcess -Name 'git-diff-cached' -FilePath $GitExe -Arguments @('diff', '--cached', '--quiet') -AllowNonZeroExit
     if ($cached.ExitCode -ne 0) {
         throw "Tracked index has staged modifications; refusing to run harness"
+    }
+    $trackedClean = $diff.ExitCode -eq 0 -and $cached.ExitCode -eq 0
+    if ($ExpectedHeadShaNormalized -and -not $trackedClean) {
+        throw "Final commit-bound harness requires a clean tracked tree"
     }
     $status = (Invoke-CapturedProcess -Name 'git-scope-status' -FilePath $GitExe -Arguments @('status', '--porcelain=v1', '-uall')).Stdout
     foreach ($line in ($status -split "`r?`n")) {
@@ -308,14 +309,19 @@ function Assert-GitScope {
         # pre-existing __pycache__/*.pyc from earlier syntax checks is ignored here.
         if ($path -match '(?:^|/)__pycache__/.*\.pyc$') { continue }
         if ($code -eq '??') {
-            if (($AllowedUntrackedProtected -notcontains $path) -and ($AllowedUntrackedHarnessFiles -notcontains $path)) {
+            if (($AllowedUntrackedProtected -notcontains $path) -and ($AllowedHarnessFiles -notcontains $path)) {
                 throw "Out-of-scope untracked repository path detected: $path"
             }
+        }
+        elseif (-not $ExpectedHeadShaNormalized -and $code[0] -eq ' ' -and
+                $code[1] -ne ' ' -and $AllowedHarnessFiles -contains $path) {
+            continue
         }
         else {
             throw "Out-of-scope tracked repository change detected: $line"
         }
     }
+    return $trackedClean
 }
 
 function Write-WdioLogs {
@@ -377,6 +383,14 @@ $fixtureManifestSha256 = $null
 $query = $null
 $resultOrder = @()
 $similarityValues = @()
+$expectedTopMatch = $null
+$actualTopMatch = $null
+$topMatchPass = $false
+$calmPianoRank = $null
+$dbLogicalEqual = $false
+$changedTables = @()
+$dbBeforeQueryLogicalSha256 = $null
+$dbAfterQueryLogicalSha256 = $null
 $dbBeforeIndex = $null
 $dbFinalState = $null
 $ollamaVersion = $null
@@ -405,8 +419,7 @@ try {
         throw "ExpectedHeadSha mismatch: expected=$ExpectedHeadShaNormalized actual=$currentHeadSha"
     }
 
-    Assert-GitScope
-    $gitTrackedClean = $true
+    $gitTrackedClean = Assert-GitScope
 
     if (Test-Path -LiteralPath $PackageLockPath -PathType Leaf) {
         $packageLockSha256 = Get-Sha256Hex -Path $PackageLockPath
@@ -502,11 +515,40 @@ try {
 
     # Read the spec's results evidence (written during the WDIO run).
     $resultsPath = Join-Path $EvidenceRoot 'semantic-query-results.json'
-    if (Test-Path -LiteralPath $resultsPath -PathType Leaf) {
-        $resultsJson = Get-Content -LiteralPath $resultsPath -Raw | ConvertFrom-Json
-        $query = $resultsJson.query
-        $resultOrder = @($resultsJson.result_order)
-        $similarityValues = @($resultsJson.similarity_values)
+    if (-not (Test-Path -LiteralPath $resultsPath -PathType Leaf)) {
+        throw "Semantic query results evidence is missing: $resultsPath"
+    }
+    $resultsJson = Get-Content -LiteralPath $resultsPath -Raw | ConvertFrom-Json
+    $query = $resultsJson.query
+    $resultOrder = @($resultsJson.result_order)
+    $similarityValues = @($resultsJson.similarity_values)
+    $expectedTopMatch = $resultsJson.expected_top_match
+    $actualTopMatch = $resultsJson.actual_top_match
+    $topMatchPass = [bool]$resultsJson.top_match_pass
+    $calmPianoRank = $resultsJson.calm_piano_rank
+    $dbLogicalEqual = [bool]$resultsJson.db_logical_equal
+    $changedTables = @($resultsJson.changed_tables)
+
+    $dbBeforeQueryPath = Join-Path $EvidenceRoot 'db-before-query.json'
+    $dbAfterQueryPath = Join-Path $EvidenceRoot 'db-after-query.json'
+    if (-not (Test-Path -LiteralPath $dbBeforeQueryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $dbAfterQueryPath -PathType Leaf)) {
+        throw 'Logical SQLite query snapshots are missing'
+    }
+    $dbBeforeQuery = Get-Content -LiteralPath $dbBeforeQueryPath -Raw | ConvertFrom-Json
+    $dbAfterQuery = Get-Content -LiteralPath $dbAfterQueryPath -Raw | ConvertFrom-Json
+    $dbBeforeQueryLogicalSha256 = $dbBeforeQuery.logical_sha256
+    $dbAfterQueryLogicalSha256 = $dbAfterQuery.logical_sha256
+    if ($dbBeforeQuery.mode -ne 'logical-read-only-snapshot' -or
+        $dbAfterQuery.mode -ne 'logical-read-only-snapshot') {
+        throw 'Unexpected logical SQLite snapshot mode'
+    }
+    if (-not $topMatchPass -or $actualTopMatch -ne 'Calm Piano Sleep Meditation' -or $calmPianoRank -ne 1) {
+        throw 'Expected top semantic match evidence did not pass'
+    }
+    if (-not $dbLogicalEqual -or $changedTables.Count -ne 0 -or
+        $dbBeforeQueryLogicalSha256 -ne $dbAfterQueryLogicalSha256) {
+        throw 'FAIL — SEMANTIC-QUERY-MUTATED-DB'
     }
 
     $appDataAfter = Get-RealAppDataSnapshot
@@ -516,7 +558,7 @@ try {
     $protectedAfter = Get-ProtectedSnapshot
     Write-JsonFile -Path (Join-Path $EvidenceRoot 'protected-after.json') -Value $protectedAfter
     Assert-EqualJson -Before $protectedBefore -After $protectedAfter -Failure 'Protected files changed during harness execution'
-    Assert-GitScope
+    $gitTrackedClean = Assert-GitScope
 
     $result = 'PASS — SEMANTIC-SEARCH-RUNTIME-PROVEN'
     $exitCode = 0
@@ -596,6 +638,14 @@ finally {
         query = $query
         result_order = $resultOrder
         similarity_values = $similarityValues
+        expected_top_match = $expectedTopMatch
+        actual_top_match = $actualTopMatch
+        top_match_pass = $topMatchPass
+        calm_piano_rank = $calmPianoRank
+        db_logical_equal = $dbLogicalEqual
+        changed_tables = $changedTables
+        db_before_query_logical_sha256 = $dbBeforeQueryLogicalSha256
+        db_after_query_logical_sha256 = $dbAfterQueryLogicalSha256
         ollama_version = $ollamaVersion
         ollama_model = $ollamaModel
         db_before_index = $dbBeforeIndex
