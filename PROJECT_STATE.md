@@ -117,10 +117,30 @@ Fix procedure: see `docs/RECOVERY_PLAN.md`. **Step 1 part 1 (dbghelp.lib) is now
 
 - Verified flow: visible Header input -> YouTube preflight -> visible Semantic button -> SearchView -> `api.semanticSearch` -> Tauri `semantic_search` -> Ollama `all-minilm` query embedding -> cosine scoring against persisted track embeddings -> rendered UI results.
 - Runtime evidence: query `quiet music for sleeping`; top result `Calm Piano Sleep Meditation`; rank `1`; `tracks=5`; `track_embeddings=5`; model `all-minilm`; `auto_download=false`.
-- Read-only DB proof: logical SHA before and after `B1E93D36B29B736536A71505EB667EE1F12826EAAF48C6C4E10B801BFAAD6DF6`; nine application tables identical; `changed_tables=[]`.
+- Read-only DB proof for the canonical integrated run: logical SHA before and after `B1E93D36B29B736536A71505EB667EE1F12826EAAF48C6C4E10B801BFAAD6DF6`; nine application tables identical; `changed_tables=[]`.
 - Gates on final main: frontend `41/41`; Rust `50/50`; TypeScript PASS; WDIO typecheck PASS; production build PASS; `cargo fmt` PASS; whitespace PASS.
-- Evidence: final manifest SHA256 `34D3021B04FA920679FF5D33A7B4A7BFFF95E86920EAEF141439D4AD1CC68FE7`. The external evidence root is recorded in the final execution report and PR #7, not in this repository.
 - Limitations: the WDIO service emitted no separate files in `wdio-logs`; `backend.log` and `frontend.log` contain fallback notices; similarities were read from rounded UI percentages; no GitHub Actions checks were configured or observed; semantic filtered search and semantic playlist runtime remain unverified; production-ready: **NO**.
+
+### Evidence lineage
+
+1. **PR-head final-commit-bound run**
+   - Scope: PR #7 head before merge.
+   - Commit: `3bdcc8d87cf0d2b6eed2b27472fba8c9c9dbbf27`.
+   - Logical SQLite SHA before/after: `FDAF5C463F84427E6682602C4ADE2FE3152D6828E5C288A1B35C6CB07B41B23A`.
+   - Final manifest SHA256: `2F65DA58B27BB01565B25926BC049ED262B63D93F2CAB02D84CF2EEFB43B39BE`.
+   - Classification: pre-merge PR-head evidence.
+   - Recorded in: PR #7 body.
+2. **Post-merge final-main-bound rerun**
+   - Scope: final integrated main after squash merge.
+   - Commit: `f02278a32fff7ff6a9ca3ac7973f43c3f8bd668e`.
+   - Logical SQLite SHA before/after: `B1E93D36B29B736536A71505EB667EE1F12826EAAF48C6C4E10B801BFAAD6DF6`.
+   - Final manifest SHA256: `34D3021B04FA920679FF5D33A7B4A7BFFF95E86920EAEF141439D4AD1CC68FE7`.
+   - Classification: canonical integrated evidence for Step-6R.2A.
+   - Recorded in: final controlled-merge execution report and `PROJECT_STATE.md`.
+
+The differing hashes are expected because they come from two separate harness runs on different commits. They are not evidence-integrity mismatches.
+
+PR #7 records the PR-head evidence set. The final-main-bound rerun is recorded in the controlled-merge execution report; its canonical hashes are recorded here. Absolute local evidence-root paths are intentionally not stored in the repository.
 
 ## Never verified (open since project start)
 
