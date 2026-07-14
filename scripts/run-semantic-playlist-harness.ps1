@@ -28,6 +28,7 @@ $RuntimeSpec = 'tests/e2e/semantic-playlist-runtime.spec.ts'
 $PackageLockPath = Join-Path $RepoRoot 'package-lock.json'
 $BaselineSha = '93594172e68ef7f57dd4fa218e2c39225cdc6d3b'
 $ExpectedHeadShaNormalized = if ([string]::IsNullOrWhiteSpace($ExpectedHeadSha)) { $null } else { $ExpectedHeadSha.Trim() }
+$ArchivedEvidenceRoot = $null
 $AllowedUntrackedProtected = @(
     'AGENTS.md',
     'docs/GDPR_REMEDIATION_PLAN.md',
@@ -51,6 +52,24 @@ $OriginalEnvironment = @{
     WDIO_EMBEDDED_PORT = $env:WDIO_EMBEDDED_PORT
     TAURI_WEBDRIVER_PORT = $env:TAURI_WEBDRIVER_PORT
     SEMANTIC_PLAYLIST_PHASE = $env:SEMANTIC_PLAYLIST_PHASE
+}
+
+if (Test-Path -LiteralPath $EvidenceRoot -PathType Leaf) {
+    throw "EvidenceRoot points to a file, not a directory: $EvidenceRoot"
+}
+
+if (Test-Path -LiteralPath $EvidenceRoot -PathType Container) {
+    $existingEvidenceEntries = @(Get-ChildItem -LiteralPath $EvidenceRoot -Force -ErrorAction Stop)
+    if ($existingEvidenceEntries.Count -gt 0) {
+        $archiveCandidate = '{0}.previous-{1}' -f $EvidenceRoot.TrimEnd('\'), $Timestamp
+        $archiveSuffix = 0
+        while (Test-Path -LiteralPath $archiveCandidate) {
+            $archiveSuffix += 1
+            $archiveCandidate = '{0}.previous-{1}-{2:D2}' -f $EvidenceRoot.TrimEnd('\'), $Timestamp, $archiveSuffix
+        }
+        Move-Item -LiteralPath $EvidenceRoot -Destination $archiveCandidate
+        $ArchivedEvidenceRoot = $archiveCandidate
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $EvidenceRoot, $CommandLogRoot, $DataDir, $CreateRoot, $RestartRoot | Out-Null
@@ -499,9 +518,23 @@ try {
         $wdioCreateLogs = Get-ChildItem (Join-Path $CreateRoot 'wdio-logs') -Recurse -File
         if ($wdioCreateLogs) { Copy-Item $wdioCreateLogs[0].FullName (Join-Path $EvidenceRoot 'wdio-create.log') -Force }
     }
+    if (-not (Test-Path (Join-Path $EvidenceRoot 'wdio-create.log'))) {
+        [IO.File]::WriteAllText(
+            (Join-Path $EvidenceRoot 'wdio-create.log'),
+            "No raw WDIO log files were emitted by @wdio/tauri-service for the create phase.`r`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
     if (Test-Path (Join-Path $RestartRoot 'wdio-logs')) {
         $wdioRestartLogs = Get-ChildItem (Join-Path $RestartRoot 'wdio-logs') -Recurse -File
         if ($wdioRestartLogs) { Copy-Item $wdioRestartLogs[0].FullName (Join-Path $EvidenceRoot 'wdio-restart.log') -Force }
+    }
+    if (-not (Test-Path (Join-Path $EvidenceRoot 'wdio-restart.log'))) {
+        [IO.File]::WriteAllText(
+            (Join-Path $EvidenceRoot 'wdio-restart.log'),
+            "No raw WDIO log files were emitted by @wdio/tauri-service for the restart phase.`r`n",
+            [Text.UTF8Encoding]::new($false)
+        )
     }
 
     $gitTrackedClean = Assert-GitScope
@@ -603,6 +636,7 @@ finally {
     $manifest = [ordered]@{
         result = $result
         failure = $failureMessage
+        archived_previous_evidence_root = $ArchivedEvidenceRoot
         git_context_mode = $gitContextMode
         head_sha = if ($gitState) { $gitState.Head } else { $null }
         expected_head_sha = $ExpectedHeadShaNormalized
