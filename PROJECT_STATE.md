@@ -144,7 +144,7 @@ PR #7 records the PR-head evidence set. The final-main-bound rerun is recorded i
 
 **Step-6R.2B semantic filtered search runtime (2026-07-14):** PR #9 integrated the filtered ANN/DB parity implementation on final `main` `2439d2c36dcde78589ab9c1e50d555de1b6c3435`. PR #10 (head `f1bcf769d0af4a510a067e26b1510e9ddd535867`) added the semantic filtered runtime harness and was squash-merged to final `main` `57818a0d12c438a257b6a2d47021cfc806302175` with parent `2439d2c36dcde78589ab9c1e50d555de1b6c3435`. The canonical final-main rerun result is **PASS — SEMANTIC-FILTERED-RUNTIME-PROVEN**. Manifest SHA256 `57BC91E9DDED0FAE80609D557038068EBFC4336D3815985E54C45A1AB4CD0869`; evidence integrity `133` files; the four logical SQLite snapshots were identical at `AF4210EE882E50BEFF2B1B0B6021470EAF9568A40B8A65597BE9D523963FBF22`. Runtime proof: Phase A used `ann` after visible indexing (`ANN 0 -> 5`); Phase B used `db_fallback` in a fresh process against the same temporary SQLite (`ANN 0`). The two phases ran in distinct processes, returned identical result IDs and ordering for both the Ambient and Ambient + Calm + sleep filters, recorded `changed_tables=[]`, preserved real AppData and protected files, and completed cleanup with no residual harness processes or listeners. Final-main gates: Rust `52/52`; frontend `41/41`; TypeScript PASS; WDIO typecheck PASS; production build PASS; `cargo fmt` PASS; `cargo check` default/WDIO PASS. Checks: **NONE CONFIGURED / NONE OBSERVED**. Absolute local evidence-root paths remain intentionally excluded from the repository.
 
-## Never verified (open since project start)
+## Verification status and remaining gaps
 
 - Unfiltered semantic search runtime through real UI/Tauri/Ollama is verified by Step-6R.2A; filtered semantic search runtime through real UI/Tauri/Ollama is verified by Step-6R.2B.
 - Still unverified: semantic playlist runtime; import UI/Tauri IPC; delete UI/Tauri IPC; download runtime; broader restart/persistence UI; full critical-flow E2E.
@@ -162,7 +162,7 @@ PR #7 records the PR-head evidence set. The final-main-bound rerun is recorded i
 - `PR #9 = MERGED`; filtered ANN/DB parity integrated by main `2439d2c36dcde78589ab9c1e50d555de1b6c3435`
 - `PR #10 = MERGED`; PR head `f1bcf769d0af4a510a067e26b1510e9ddd535867`, final main `57818a0d12c438a257b6a2d47021cfc806302175`, final parent `2439d2c36dcde78589ab9c1e50d555de1b6c3435`
 - canonical code branch: `main`
-- The documentation synchronization and its integration metadata are tracked in PR #8.
+- The earlier documentation synchronization is tracked in PR #8; the Step-6R.2B state synchronization is tracked in PR #11.
 - protected untracked files: the same four known files — `AGENTS.md`, `gdpr-compliance-audit-report.md`, `docs/GDPR_REMEDIATION_PLAN.md`, `docs/plan-remediere-gdpr-complete.md`
 - `Cargo.lock` is **gitignored** (see `.gitignore`). For an application this breaks reproducible Rust builds — known debt, decision pending.
 - `Spotify/*.csv` (personal listening exports) are tracked in git — flagged by the GDPR audit.
