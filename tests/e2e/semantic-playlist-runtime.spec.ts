@@ -232,21 +232,30 @@ async function waitForPlaylistNavigation(): Promise<void> {
 
 async function scrapeRenderedTracks(): Promise<TrackRow[]> {
   return (await browser.execute((trackIds: Record<string, string>) => {
-    // TrackCard renders title in <p class="font-medium truncate"> and artist in
-    // <p class="text-sm text-ytm-text-secondary truncate">.
-    const titleElements = Array.from(document.querySelectorAll<HTMLParagraphElement>("p.font-medium.truncate"));
-    const artistElements = Array.from(document.querySelectorAll<HTMLParagraphElement>("p.text-sm.text-ytm-text-secondary.truncate"));
+    const rows = Array.from(
+      document.querySelectorAll<HTMLElement>("div.space-y-1 > div.group")
+    );
 
-    return titleElements.map((titleEl, index) => {
-      const title = titleEl.textContent?.trim() || "";
-      const artist = artistElements[index]?.textContent?.trim() || "";
+    return rows.map((row) => {
+      const title = row.querySelector<HTMLParagraphElement>("p.font-medium.truncate")?.textContent?.trim() ?? "";
+      const artist = row.querySelector<HTMLParagraphElement>("p.text-sm.text-ytm-text-secondary.truncate")?.textContent?.trim() ?? "";
+
+      if (!title) {
+        throw new Error("Rendered playlist row is missing a track title");
+      }
+
+      const mappedId = trackIds[title];
+      if (!mappedId) {
+        throw new Error(`Missing TRACK_IDS fixture mapping for rendered title: ${title}`);
+      }
+
       return {
-        id: trackIds[title] ?? "",
+        id: mappedId,
         video_id: "",
         title,
         artist,
       };
-    }).filter((row) => row.title.length > 0);
+    });
   }, TRACK_IDS)) as TrackRow[];
 }
 
@@ -277,6 +286,8 @@ describe("semantic playlist runtime", () => {
       runtime_process_id: probe.runtime_process_id,
       ann_index_size: probe.ann_index_size,
       indexed_tracks: probe.indexed_tracks,
+      embedding_backend: "local-ollama",
+      embedding_model: probe.model_used,
       captured_at: new Date().toISOString(),
     });
     assert.ok(probe.runtime_process_id > 0, "Runtime PID must be positive");

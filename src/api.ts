@@ -849,7 +849,7 @@ export async function createSemanticPlaylist(
 ): Promise<SemanticPlaylistResult> {
   return invoke("create_semantic_playlist", {
     query,
-    playlist_name: playlistName,
+    playlistName,
   });
 }
 

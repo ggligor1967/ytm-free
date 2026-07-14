@@ -130,6 +130,8 @@ export function PlaylistsView() {
   };
 
   const cancelSemanticForm = () => {
+    if (semanticLoading) return;
+
     setShowSemantic(false);
     setSemanticQuery("");
     setSemanticName("");
@@ -350,7 +352,13 @@ export function PlaylistsView() {
             <button
               id="semantic-playlist-cancel"
               onClick={cancelSemanticForm}
-              className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
+              disabled={semanticLoading}
+              className={clsx(
+                "px-4 py-2 border border-ytm-border rounded-lg transition-colors",
+                semanticLoading
+                  ? "opacity-50 cursor-not-allowed"
+                  : "hover:bg-ytm-surface-hover"
+              )}
             >
               Cancel
             </button>
@@ -358,7 +366,10 @@ export function PlaylistsView() {
               id="semantic-playlist-create"
               onClick={handleCreateSemanticPlaylist}
               disabled={!semanticQuery.trim() || semanticLoading}
-              className="px-4 py-2 bg-ytm-accent text-white rounded-lg hover:bg-ytm-accent-hover disabled:opacity-50 flex items-center gap-2"
+              className={clsx(
+                "px-4 py-2 bg-ytm-accent text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2",
+                semanticLoading || !semanticQuery.trim() ? undefined : "hover:bg-ytm-accent-hover"
+              )}
             >
               {semanticLoading && <Loader2 className="w-4 h-4 animate-spin" />}
               Create

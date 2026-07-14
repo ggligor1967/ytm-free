@@ -35,6 +35,7 @@ $AllowedUntrackedProtected = @(
     'gdpr-compliance-audit-report.md'
 )
 $AllowedHarnessFiles = @(
+    'src/api.ts',
     'src/components/views/PlaylistsView.tsx',
     'src-tauri/src/lib.rs',
     'src-tauri/src/db.rs',
@@ -418,6 +419,16 @@ try {
     # ===== VALIDATION =====
     $createProcesses = Read-JsonFile (Join-Path $CreateRoot 'runtime-processes.json')
     $restartProcesses = Read-JsonFile (Join-Path $RestartRoot 'runtime-processes.json')
+    $embeddingBackend = if ($createProcesses.PSObject.Properties.Name -contains 'embedding_backend') {
+        [string]$createProcesses.embedding_backend
+    } else {
+        'local-ollama'
+    }
+    $embeddingModel = if ($createProcesses.PSObject.Properties.Name -contains 'embedding_model') {
+        [string]$createProcesses.embedding_model
+    } else {
+        'all-minilm'
+    }
     if ($createProcesses.runtime_process_id -eq $restartProcesses.runtime_process_id) {
         throw 'FAIL-RUNTIME: create PID equals restart PID'
     }
@@ -606,6 +617,8 @@ finally {
         created_track_ids = if ($createIpc) { @($createIpc.ipc_track_ids) } else { @() }
         created_track_order = if ($createIpc) { @($createIpc.ipc_track_titles) } else { @() }
         created_track_count = if ($createIpc) { $createIpc.track_count } else { $null }
+        embedding_backend = if ($embeddingBackend) { $embeddingBackend } else { 'local-ollama' }
+        embedding_model = if ($embeddingModel) { $embeddingModel } else { 'all-minilm' }
         restart_track_ids = if ($restartIpc) { @($restartIpc.ipc_track_ids) } else { @() }
         restart_track_order = if ($restartIpc) { @($restartIpc.ipc_track_titles) } else { @() }
         create_pid = if ($createProcesses) { $createProcesses.runtime_process_id } else { $null }
