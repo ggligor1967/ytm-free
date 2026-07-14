@@ -12,9 +12,14 @@ use models::*;
 use ollama::OllamaClient;
 use semantic::{ANNIndex, SharedANNIndex};
 use server::StreamServer;
+#[cfg(feature = "wdio")]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock, Semaphore};
+
+#[cfg(feature = "wdio")]
+static SEMANTIC_FILTERED_RUNTIME_PATH: AtomicU8 = AtomicU8::new(0);
 
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
@@ -2208,9 +2213,51 @@ async fn semantic_search(
 
 /// Get semantic index status
 #[tauri::command]
+#[cfg(not(feature = "wdio"))]
 async fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticIndexStatus, String> {
     let db = state.db.lock().await;
     get_semantic_status_db_helper(&db)
+}
+
+#[cfg(feature = "wdio")]
+#[derive(serde::Serialize)]
+struct WdioSemanticIndexStatus {
+    #[serde(flatten)]
+    status: SemanticIndexStatus,
+    runtime_process_id: u32,
+    ann_index_size: usize,
+    semantic_filtered_runtime_path: Option<&'static str>,
+}
+
+/// Get semantic index status with process-local runtime evidence in WDIO builds.
+#[tauri::command]
+#[cfg(feature = "wdio")]
+async fn get_semantic_status(
+    state: State<'_, AppState>,
+) -> Result<WdioSemanticIndexStatus, String> {
+    let status = {
+        let db = state.db.lock().await;
+        get_semantic_status_db_helper(&db)?
+    };
+    let ann_index_size = state.ann_index.read().await.len();
+    let semantic_filtered_runtime_path =
+        match SEMANTIC_FILTERED_RUNTIME_PATH.load(Ordering::Relaxed) {
+            0 => None,
+            1 => Some("ann"),
+            2 => Some("db_fallback"),
+            value => {
+                return Err(format!(
+                    "Unexpected semantic filtered runtime path probe value: {value}"
+                ))
+            }
+        };
+
+    Ok(WdioSemanticIndexStatus {
+        status,
+        runtime_process_id: std::process::id(),
+        ann_index_size,
+        semantic_filtered_runtime_path,
+    })
 }
 
 /// Clear all semantic embeddings
@@ -2252,8 +2299,12 @@ async fn semantic_search_filtered(
     let limit = limit.unwrap_or(20) as usize;
 
     let scored: Vec<(String, f32)> = if !ann.is_empty() {
+        #[cfg(feature = "wdio")]
+        SEMANTIC_FILTERED_RUNTIME_PATH.store(1, Ordering::Relaxed);
         ann.search_filtered(&query_embedding, limit, &filter)
     } else {
+        #[cfg(feature = "wdio")]
+        SEMANTIC_FILTERED_RUNTIME_PATH.store(2, Ordering::Relaxed);
         drop(ann); // Release lock
         let db = state.db.lock().await;
         return semantic_search_filtered_with_embedding_db_helper(
