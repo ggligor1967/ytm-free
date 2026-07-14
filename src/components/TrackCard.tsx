@@ -1,6 +1,6 @@
 import { useAppStore } from "../store";
 import type { Track, SearchResult, TrackMetadataDB } from "../types";
-import { Play, Pause, MoreVertical, ListPlus, Heart, Download, Tag, Loader2, Share2 } from "lucide-react";
+import { Play, Pause, MoreVertical, ListPlus, Heart, Download, Tag, Loader2, Share2, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import { useState, useEffect } from "react";
 import * as api from "../api";
@@ -11,10 +11,11 @@ interface TrackCardProps {
   index?: number;
   showIndex?: boolean;
   onPlay?: () => void;
+  onRemoveFromPlaylist?: () => void | Promise<void>;
   initialMetadata?: TrackMetadataDB | null;
 }
 
-export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: TrackCardProps) {
+export function TrackCard({ track, index, showIndex, onPlay, onRemoveFromPlaylist, initialMetadata }: TrackCardProps) {
   const {
     currentTrack,
     isPlaying,
@@ -124,7 +125,7 @@ export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: 
         alt={track.title}
         className="w-12 h-12 rounded object-cover"
       />
-  
+
       {/* Track Info */}
       <div className="flex-1 min-w-0">
         <p
@@ -136,7 +137,7 @@ export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: 
           {track.title}
         </p>
         <p className="text-sm text-ytm-text-secondary truncate">{track.artist}</p>
-        
+
         {/* AI Tags Badges (FAZA 2) */}
         {metadata && (
           <div className="flex items-center gap-1 mt-1 flex-wrap">
@@ -164,7 +165,7 @@ export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: 
                   <span className="inline-block w-2 h-2 rounded-full bg-current flex-shrink-0" aria-hidden="true"></span>
                   <span>{metadata.energy_level}/10</span>
                 </span>
-                
+
                 {/* Tooltip with full metadata */}
                 {showTooltip && (
                   <>
@@ -259,6 +260,24 @@ export function TrackCard({ track, index, showIndex, onPlay, initialMetadata }: 
                 <Heart className="w-4 h-4" />
                 Add to Playlist
               </button>
+              {onRemoveFromPlaylist && (
+                <button
+                  data-testid="track-remove-from-playlist"
+                  onClick={async () => {
+                    setShowMenu(false);
+                    try {
+                      await onRemoveFromPlaylist();
+                    } catch (error) {
+                      const message = error instanceof Error ? error.message : String(error);
+                      showToast(`Failed to remove track from playlist: ${message}`, "error");
+                    }
+                  }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-ytm-surface-hover flex items-center gap-3 text-red-400"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Remove from Playlist
+                </button>
+              )}
               <button
                 onClick={async () => {
                   setShowMenu(false);

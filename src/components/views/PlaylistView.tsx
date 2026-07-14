@@ -9,6 +9,7 @@ export function PlaylistView() {
   const {
     selectedPlaylistId,
     playlists,
+    setPlaylists,
     setView,
     setQueue,
     setQueueIndex,
@@ -63,6 +64,23 @@ export function PlaylistView() {
     setQueueIndex(index);
     setCurrentTrack(tracks[index]);
     setIsPlaying(true);
+  };
+
+  const handleRemoveTrack = async (trackId: string) => {
+    if (!selectedPlaylistId) return;
+
+    try {
+      await api.removeFromPlaylist(selectedPlaylistId, trackId);
+      const [updatedTracks, updatedPlaylists] = await Promise.all([
+        api.getPlaylistTracks(selectedPlaylistId),
+        api.getPlaylists(),
+      ]);
+      setTracks(updatedTracks);
+      setPlaylists(updatedPlaylists);
+    } catch (error) {
+      console.error("Failed to remove track from playlist:", error);
+      throw error;
+    }
   };
 
   if (!playlist) {
@@ -145,13 +163,15 @@ export function PlaylistView() {
       ) : (
         <div className="space-y-1">
           {tracks.map((track, i) => (
-            <TrackCard
-              key={track.id}
-              track={track}
-              index={i}
-              showIndex
-              onPlay={() => handlePlayTrack(i)}
-            />
+            <div key={track.id} data-testid={`playlist-track-${track.id}`}>
+              <TrackCard
+                track={track}
+                index={i}
+                showIndex
+                onPlay={() => handlePlayTrack(i)}
+                onRemoveFromPlaylist={() => handleRemoveTrack(track.id)}
+              />
+            </div>
           ))}
         </div>
       )}

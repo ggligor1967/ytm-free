@@ -59,7 +59,7 @@ function QualityScore({ score }: { score: number }) {
 export function ImportView() {
   const { playlists, addPlaylist, setView, setSelectedPlaylistId } = useAppStore();
   const ollamaAvailable = useAppStore((s) => s.ollamaAvailable);
-  
+
   const [phase, setPhase] = useState<ImportPhase>("select");
   const [importMode, setImportMode] = useState<ImportMode>(ollamaAvailable ? "smart" : "standard");
   const [csvFiles, setCsvFiles] = useState<CsvFileInfo[]>([]);
@@ -482,6 +482,7 @@ export function ImportView() {
                 {csvFiles.map((file) => (
                   <button
                     key={file.path}
+                    data-testid={`import-file-${file.name}`}
                     onClick={() => selectFile(file)}
                     className="w-full flex items-center gap-4 p-4 bg-ytm-surface hover:bg-ytm-surface-hover rounded-lg transition-colors text-left"
                   >
@@ -578,6 +579,7 @@ export function ImportView() {
               Back
             </button>
             <button
+              data-testid="import-start-button"
               onClick={startImport}
               className={clsx(
                 "px-6 py-2 text-white rounded-full font-medium transition-colors flex items-center gap-2",
@@ -825,6 +827,7 @@ export function ImportView() {
               Import Another
             </button>
             <button
+              data-testid="import-create-playlist-button"
               onClick={createPlaylistWithTracks}
               disabled={foundCount + alternativeCount === 0}
               className={clsx(

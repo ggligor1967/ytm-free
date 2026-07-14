@@ -394,6 +394,7 @@ export function PlaylistsView() {
           {playlists.map((playlist) => (
             <div
               key={playlist.id}
+              data-testid={`playlist-${playlist.name}`}
               className="group relative bg-ytm-surface rounded-xl p-4 hover:bg-ytm-surface-hover transition-colors cursor-pointer"
               onClick={() => openPlaylist(playlist.id)}
             >
@@ -411,6 +412,7 @@ export function PlaylistsView() {
               {/* Menu */}
               <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
+                  data-testid={`playlist-menu-${playlist.id}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     setMenuOpen(menuOpen === playlist.id ? null : playlist.id);
@@ -431,6 +433,7 @@ export function PlaylistsView() {
                     />
                     <div className="absolute right-0 top-full mt-1 w-40 bg-ytm-surface border border-ytm-border rounded-lg shadow-xl z-50 py-1">
                       <button
+                        data-testid={`playlist-delete-${playlist.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           handleDelete(playlist.id);

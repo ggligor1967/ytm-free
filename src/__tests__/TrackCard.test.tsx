@@ -35,6 +35,7 @@ vi.mock("lucide-react", () => ({
   Tag: () => <span data-testid="icon-tag">Tag</span>,
   Loader2: () => <span data-testid="icon-loader">Loader2</span>,
   Share2: () => <span data-testid="icon-share">Share2</span>,
+  Trash2: () => <span data-testid="icon-trash">Trash2</span>,
 }));
 
 describe("TrackCard - Download button", () => {
@@ -200,5 +201,71 @@ describe("TrackCard - Download button", () => {
     // is called, the menu items remain rendered but are hidden by conditional logic.
     // We verify downloadTrack was still called.
     expect(mockDownloadTrack).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show Remove from Playlist without a callback", () => {
+    render(<TrackCard track={trackWithVideoId} />);
+
+    fireEvent.click(screen.getByTestId("icon-more").closest("button")!);
+
+    expect(screen.queryByTestId("track-remove-from-playlist")).toBeNull();
+  });
+
+  it("shows Remove from Playlist with a callback", () => {
+    render(<TrackCard track={trackWithVideoId} onRemoveFromPlaylist={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("icon-more").closest("button")!);
+
+    expect(screen.getByTestId("track-remove-from-playlist")).toBeTruthy();
+  });
+
+  it("calls the remove callback once and closes the menu", async () => {
+    const onRemoveFromPlaylist = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TrackCard
+        track={trackWithVideoId}
+        onRemoveFromPlaylist={onRemoveFromPlaylist}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("icon-more").closest("button")!);
+    fireEvent.click(screen.getByTestId("track-remove-from-playlist"));
+
+    await waitFor(() => {
+      expect(onRemoveFromPlaylist).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByTestId("track-remove-from-playlist")).toBeNull();
+  });
+
+  it("keeps the other primary actions available when remove is present", () => {
+    render(<TrackCard track={trackWithVideoId} onRemoveFromPlaylist={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("icon-more").closest("button")!);
+
+    expect(screen.getByText("Add to Queue")).toBeTruthy();
+    expect(screen.getByText("Add to Playlist")).toBeTruthy();
+    expect(screen.getByTestId("icon-download")).toBeTruthy();
+  });
+
+  it("shows one error toast when the remove callback rejects", async () => {
+    const onRemoveFromPlaylist = vi.fn().mockRejectedValue(new Error("remove failed"));
+    render(
+      <TrackCard
+        track={trackWithVideoId}
+        onRemoveFromPlaylist={onRemoveFromPlaylist}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("icon-more").closest("button")!);
+    fireEvent.click(screen.getByTestId("track-remove-from-playlist"));
+
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(
+        "Failed to remove track from playlist: remove failed",
+        "error",
+      );
+    });
+    expect(onRemoveFromPlaylist).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledTimes(1);
   });
 });
