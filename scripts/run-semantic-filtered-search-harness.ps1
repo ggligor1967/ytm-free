@@ -232,6 +232,28 @@ function Get-GitState {
     return [pscustomobject]@{ Branch = $branch; Head = $head; OriginMain = $originMain }
 }
 
+function Assert-GitContext {
+    param([Parameter(Mandatory)] [object]$GitState)
+
+    if ($ExpectedHeadShaNormalized) {
+        if ($GitState.Head -ne $ExpectedHeadShaNormalized) {
+            throw "ExpectedHeadSha mismatch: expected=$ExpectedHeadShaNormalized actual=$($GitState.Head)"
+        }
+        if (@($BaselineSha, $ExpectedHeadShaNormalized) -notcontains $GitState.OriginMain) {
+            throw "BLOCKED-BASELINE-MOVED: origin/main=$($GitState.OriginMain)"
+        }
+        return 'exact-commit'
+    }
+
+    if ($GitState.Branch -ne 'test/semantic-filtered-search-runtime') {
+        throw "Unexpected branch: $($GitState.Branch)"
+    }
+    if ($GitState.OriginMain -ne $BaselineSha) {
+        throw "BLOCKED-BASELINE-MOVED: origin/main=$($GitState.OriginMain)"
+    }
+    return 'precommit-branch'
+}
+
 function Assert-GitScope {
     $status = (Invoke-CapturedProcess -Name 'git-status-scope' -FilePath $GitExe -Arguments @('status', '--porcelain=v1', '-uall')).Stdout
     $trackedClean = $true
@@ -293,6 +315,7 @@ $exitCode = 1
 $result = 'FAIL'
 $failureMessage = $null
 $gitState = $null
+$gitContextMode = if ($ExpectedHeadShaNormalized) { 'exact-commit' } else { 'precommit-branch' }
 $gitTrackedClean = $false
 $protectedBefore = $null
 $protectedAfter = $null
@@ -321,17 +344,15 @@ try {
     }
 
     $gitState = Get-GitState
-    if ($gitState.Branch -ne 'test/semantic-filtered-search-runtime') { throw "Unexpected branch: $($gitState.Branch)" }
-    if ($gitState.OriginMain -ne $BaselineSha) { throw "BLOCKED-BASELINE-MOVED: origin/main=$($gitState.OriginMain)" }
-    if ($ExpectedHeadShaNormalized -and $gitState.Head -ne $ExpectedHeadShaNormalized) {
-        throw "ExpectedHeadSha mismatch: expected=$ExpectedHeadShaNormalized actual=$($gitState.Head)"
-    }
+    $gitContextMode = Assert-GitContext -GitState $gitState
     $gitTrackedClean = Assert-GitScope
     Write-JsonFile -Path (Join-Path $EvidenceRoot 'git-state-before.json') -Value ([ordered]@{
+        git_context_mode = $gitContextMode
         branch = $gitState.Branch
         head_sha = $gitState.Head
         expected_head_sha = $ExpectedHeadShaNormalized
         origin_main_sha = $gitState.OriginMain
+        baseline_sha = $BaselineSha
         git_tracked_clean = $gitTrackedClean
     })
 
@@ -425,10 +446,24 @@ try {
     foreach ($snapshot in @($dbAStart, $dbAEnd, $dbBStart, $dbBEnd)) {
         if ($snapshot.mode -ne 'logical-read-only-snapshot') { throw 'Unexpected logical SQLite snapshot mode' }
     }
-    $dbLogicalSha256 = $dbAStart.logical_sha256
-    if (@($dbAStart.logical_sha256, $dbAEnd.logical_sha256, $dbBStart.logical_sha256, $dbBEnd.logical_sha256 | Select-Object -Unique).Count -ne 1) {
+    $logicalHashes = @(
+        [string]$dbAStart.logical_sha256
+        [string]$dbAEnd.logical_sha256
+        [string]$dbBStart.logical_sha256
+        [string]$dbBEnd.logical_sha256
+    )
+    if ($logicalHashes.Count -ne 4) {
+        throw 'FAIL - DB-MUTATED: expected four logical hashes'
+    }
+    $mismatchedLogicalHashes = @(
+        $logicalHashes | Where-Object {
+            $_ -ne $logicalHashes[0]
+        }
+    )
+    if ($mismatchedLogicalHashes.Count -ne 0) {
         throw 'FAIL - DB-MUTATED'
     }
+    $dbLogicalSha256 = $logicalHashes[0]
     $tablesCanonical = $dbAStart.tables | ConvertTo-Json -Depth 100 -Compress
     foreach ($snapshot in @($dbAEnd, $dbBStart, $dbBEnd)) {
         if (($snapshot.tables | ConvertTo-Json -Depth 100 -Compress) -ne $tablesCanonical) { throw 'FAIL - DB-MUTATED: per-table digest mismatch' }
@@ -539,10 +574,12 @@ finally {
     $manifest = [ordered]@{
         result = $result
         failure = $failureMessage
+        git_context_mode = $gitContextMode
         branch = if ($gitState) { $gitState.Branch } else { $null }
         head_sha = if ($gitState) { $gitState.Head } else { $null }
         expected_head_sha = $ExpectedHeadShaNormalized
         origin_main_sha = if ($gitState) { $gitState.OriginMain } else { $null }
+        baseline_sha = $BaselineSha
         git_tracked_clean = $gitTrackedClean
         query = 'ambient music for calm focus and sleep'
         filters = [ordered]@{
