@@ -3,7 +3,8 @@ param(
     [string]$EvidenceRoot,
     [ValidateRange(1, 65535)]
     [int]$EmbeddedPort = 4447,
-    [string]$ExpectedHeadSha
+    [string]$ExpectedHeadSha,
+    [switch]$EvidenceRootPreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,8 @@ $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $EvidenceRoot = Join-Path $env:TEMP ("ytm-free-semantic-playlist-evidence-{0}" -f $Timestamp)
 }
-$EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+$TempBase = ([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\')
+$EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot).TrimEnd('\')
 $TempRuntimeRoot = Join-Path $env:TEMP ("ytm-free-semantic-playlist-runtime-{0}" -f $Timestamp)
 $DataDir = Join-Path $TempRuntimeRoot 'data'
 $CommandLogRoot = Join-Path $EvidenceRoot 'commands'
@@ -29,6 +31,12 @@ $PackageLockPath = Join-Path $RepoRoot 'package-lock.json'
 $BaselineSha = '93594172e68ef7f57dd4fa218e2c39225cdc6d3b'
 $ExpectedHeadShaNormalized = if ([string]::IsNullOrWhiteSpace($ExpectedHeadSha)) { $null } else { $ExpectedHeadSha.Trim() }
 $ArchivedEvidenceRoot = $null
+$EvidenceRootValidation = $null
+$EvidenceRootIdentity = $null
+$EvidenceMarkerName = '.ytm-free-semantic-playlist-evidence.json'
+$EvidenceMarkerKind = 'ytm-free-semantic-playlist-evidence'
+$EvidenceMarkerSchemaVersion = 1
+$EvidenceRepository = 'ggligor1967/ytm-free'
 $AllowedUntrackedProtected = @(
     'AGENTS.md',
     'docs/GDPR_REMEDIATION_PLAN.md',
@@ -54,31 +62,119 @@ $OriginalEnvironment = @{
     SEMANTIC_PLAYLIST_PHASE = $env:SEMANTIC_PLAYLIST_PHASE
 }
 
-if (Test-Path -LiteralPath $EvidenceRoot -PathType Leaf) {
-    throw "EvidenceRoot points to a file, not a directory: $EvidenceRoot"
-}
-
-if (Test-Path -LiteralPath $EvidenceRoot -PathType Container) {
-    $existingEvidenceEntries = @(Get-ChildItem -LiteralPath $EvidenceRoot -Force -ErrorAction Stop)
-    if ($existingEvidenceEntries.Count -gt 0) {
-        $archiveCandidate = '{0}.previous-{1}' -f $EvidenceRoot.TrimEnd('\'), $Timestamp
-        $archiveSuffix = 0
-        while (Test-Path -LiteralPath $archiveCandidate) {
-            $archiveSuffix += 1
-            $archiveCandidate = '{0}.previous-{1}-{2:D2}' -f $EvidenceRoot.TrimEnd('\'), $Timestamp, $archiveSuffix
-        }
-        Move-Item -LiteralPath $EvidenceRoot -Destination $archiveCandidate
-        $ArchivedEvidenceRoot = $archiveCandidate
-    }
-}
-
-New-Item -ItemType Directory -Force -Path $EvidenceRoot, $CommandLogRoot, $DataDir, $CreateRoot, $RestartRoot | Out-Null
-
 function Write-JsonFile {
     param([Parameter(Mandatory)] [string]$Path, [Parameter(Mandatory)] [object]$Value)
     $json = $Value | ConvertTo-Json -Depth 100
     [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
+
+function Get-EvidenceRootIdentity {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $markerPath = Join-Path $Path $EvidenceMarkerName
+    if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+        try {
+            $marker = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($marker.kind -eq $EvidenceMarkerKind -and
+                $marker.schema_version -eq $EvidenceMarkerSchemaVersion -and
+                $marker.repository -eq $EvidenceRepository) {
+                return 'marker'
+            }
+        }
+        catch { }
+    }
+
+    $legacyManifestPath = Join-Path $Path 'manifest.json'
+    if (Test-Path -LiteralPath $legacyManifestPath -PathType Leaf) {
+        try {
+            $legacyManifest = Get-Content -LiteralPath $legacyManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($legacyManifest.baseline_sha -eq $BaselineSha -and
+                $legacyManifest.query -eq 'ambient music for calm focus and sleep' -and
+                $legacyManifest.playlist_name -eq 'Semantic Calm Focus' -and
+                -not [string]::IsNullOrWhiteSpace([string]$legacyManifest.git_context_mode) -and
+                -not [string]::IsNullOrWhiteSpace([string]$legacyManifest.head_sha) -and
+                $null -ne $legacyManifest.gate_results) {
+                return 'legacy-manifest'
+            }
+        }
+        catch { }
+    }
+
+    return $null
+}
+
+function Initialize-EvidenceRoot {
+    $tempRoot = $TempBase.TrimEnd('\')
+    if (-not $EvidenceRoot.StartsWith($TempBase, [StringComparison]::OrdinalIgnoreCase) -or
+        $EvidenceRoot -eq $tempRoot) {
+        throw 'BLOCKED-UNSAFE-EVIDENCE-ROOT'
+    }
+
+    $leafName = Split-Path -Path $EvidenceRoot -Leaf
+    if ($leafName -notmatch '^ytm-free-semantic-playlist-evidence-[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw 'BLOCKED-UNSAFE-EVIDENCE-ROOT'
+    }
+
+    if (Test-Path -LiteralPath $EvidenceRoot -PathType Leaf) {
+        throw 'BLOCKED-UNSAFE-EVIDENCE-ROOT'
+    }
+
+    if (Test-Path -LiteralPath $EvidenceRoot -PathType Container) {
+        $existingItem = Get-Item -LiteralPath $EvidenceRoot -Force -ErrorAction Stop
+        if (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'BLOCKED-UNSAFE-EVIDENCE-ROOT-REPARSE-POINT'
+        }
+
+        $existingEvidenceEntries = @(Get-ChildItem -LiteralPath $EvidenceRoot -Force -ErrorAction Stop)
+        if ($existingEvidenceEntries.Count -gt 0) {
+            $script:EvidenceRootIdentity = Get-EvidenceRootIdentity -Path $EvidenceRoot
+            if (-not $script:EvidenceRootIdentity) {
+                throw 'BLOCKED-UNRECOGNIZED-EVIDENCE-ROOT'
+            }
+
+            $evidenceParent = Split-Path -Path $EvidenceRoot -Parent
+            $archiveCandidate = Join-Path $evidenceParent ('{0}.previous-{1}' -f $leafName, $Timestamp)
+            $archiveSuffix = 0
+            while (Test-Path -LiteralPath $archiveCandidate) {
+                $archiveSuffix += 1
+                $archiveCandidate = Join-Path $evidenceParent ('{0}.previous-{1}-{2:D2}' -f $leafName, $Timestamp, $archiveSuffix)
+            }
+            if ((Split-Path -Path $archiveCandidate -Parent) -ne $evidenceParent -or
+                (Split-Path -Path $archiveCandidate -Leaf) -notmatch '^ytm-free-semantic-playlist-evidence-[A-Za-z0-9][A-Za-z0-9._-]*$') {
+                throw 'BLOCKED-UNSAFE-EVIDENCE-ROOT'
+            }
+            Move-Item -LiteralPath $EvidenceRoot -Destination $archiveCandidate -ErrorAction Stop
+            $script:ArchivedEvidenceRoot = $archiveCandidate
+        }
+        elseif (-not $script:EvidenceRootIdentity) {
+            $script:EvidenceRootIdentity = 'new'
+        }
+    }
+    else {
+        $script:EvidenceRootIdentity = 'new'
+    }
+
+    New-Item -ItemType Directory -Force -Path $EvidenceRoot -ErrorAction Stop | Out-Null
+    Write-JsonFile -Path (Join-Path $EvidenceRoot $EvidenceMarkerName) -Value ([ordered]@{
+        kind = $EvidenceMarkerKind
+        schema_version = $EvidenceMarkerSchemaVersion
+        repository = $EvidenceRepository
+    })
+    $script:EvidenceRootValidation = 'passed'
+}
+
+Initialize-EvidenceRoot
+if ($EvidenceRootPreflightOnly) {
+    [ordered]@{
+        result = 'PASS - EVIDENCE-ROOT-PREFLIGHT'
+        evidence_root_validation = $EvidenceRootValidation
+        evidence_root_identity = $EvidenceRootIdentity
+        archived_previous_evidence_root = if ($ArchivedEvidenceRoot) { Split-Path -Path $ArchivedEvidenceRoot -Leaf } else { $null }
+    } | ConvertTo-Json -Depth 5
+    exit 0
+}
+
+New-Item -ItemType Directory -Force -Path $CommandLogRoot, $DataDir, $CreateRoot, $RestartRoot | Out-Null
 
 function Get-RelativePathCompatible {
     param([Parameter(Mandatory)] [string]$BasePath, [Parameter(Mandatory)] [string]$TargetPath)
@@ -636,7 +732,9 @@ finally {
     $manifest = [ordered]@{
         result = $result
         failure = $failureMessage
-        archived_previous_evidence_root = $ArchivedEvidenceRoot
+        evidence_root_validation = $EvidenceRootValidation
+        evidence_root_identity = $EvidenceRootIdentity
+        archived_previous_evidence_root = if ($ArchivedEvidenceRoot) { Split-Path -Path $ArchivedEvidenceRoot -Leaf } else { $null }
         git_context_mode = $gitContextMode
         head_sha = if ($gitState) { $gitState.Head } else { $null }
         expected_head_sha = $ExpectedHeadShaNormalized
