@@ -6,10 +6,10 @@ import clsx from "clsx";
 import { showToast } from "../Toast";
 
 export function PlaylistsView() {
-  const { 
-    playlists, 
-    setPlaylists, 
-    setView, 
+  const {
+    playlists,
+    setPlaylists,
+    setView,
     setSelectedPlaylistId,
     settings,
     ollamaAvailable,
@@ -31,7 +31,7 @@ export function PlaylistsView() {
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    
+
     setLoading(true);
     try {
       await api.createPlaylist(newName, newDesc || undefined);
@@ -50,7 +50,7 @@ export function PlaylistsView() {
 
   const handleDelete = async (id: string) => {
     if (!confirm("Delete this playlist?")) return;
-    
+
     try {
       await api.deletePlaylist(id);
       const updated = await api.getPlaylists();
@@ -226,7 +226,7 @@ export function PlaylistsView() {
             <Sparkles className="w-5 h-5 text-ytm-accent" />
             <h3 className="font-semibold">Generate Smart Playlist with AI</h3>
           </div>
-          
+
           {!aiPlaylistSuggestion ? (
             <>
               <textarea
