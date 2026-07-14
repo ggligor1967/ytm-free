@@ -24,6 +24,10 @@ export function PlaylistsView() {
   const [showAIGen, setShowAIGen] = useState(false);
   const [aiDescription, setAIDescription] = useState("");
   const [generatingAI, setGeneratingAI] = useState(false);
+  const [showSemantic, setShowSemantic] = useState(false);
+  const [semanticQuery, setSemanticQuery] = useState("");
+  const [semanticName, setSemanticName] = useState("");
+  const [semanticLoading, setSemanticLoading] = useState(false);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -97,6 +101,40 @@ export function PlaylistsView() {
     }
   };
 
+  const handleCreateSemanticPlaylist = async () => {
+    const query = semanticQuery.trim();
+    if (!query) return;
+
+    setSemanticLoading(true);
+    try {
+      const result = await api.createSemanticPlaylist(
+        query,
+        semanticName.trim() || undefined
+      );
+      const updated = await api.getPlaylists();
+      setPlaylists(updated);
+      setSelectedPlaylistId(result.playlist_id);
+      setView("playlist");
+      showToast(`Created ${result.playlist_name} with ${result.track_count} tracks`);
+      setShowSemantic(false);
+      setSemanticQuery("");
+      setSemanticName("");
+    } catch (error) {
+      console.error("Failed to create semantic playlist:", error);
+      const message =
+        error instanceof Error ? error.message : "Failed to create semantic playlist";
+      showToast(message);
+    } finally {
+      setSemanticLoading(false);
+    }
+  };
+
+  const cancelSemanticForm = () => {
+    setShowSemantic(false);
+    setSemanticQuery("");
+    setSemanticName("");
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -116,6 +154,16 @@ export function PlaylistsView() {
             >
               <Sparkles className="w-5 h-5" />
               Generate Smart Playlist
+            </button>
+          )}
+          {settings?.ollama_enabled && settings?.semantic_search_enabled && ollamaAvailable && (
+            <button
+              id="open-semantic-playlist-form"
+              onClick={() => setShowSemantic(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-ytm-accent/10 text-ytm-accent border border-ytm-accent rounded-full font-medium hover:bg-ytm-accent/20 transition-colors"
+            >
+              <Sparkles className="w-5 h-5" />
+              Create Semantic Playlist
             </button>
           )}
           <button
@@ -264,6 +312,58 @@ export function PlaylistsView() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* Semantic Playlist Form */}
+      {showSemantic && (
+        <div className="bg-ytm-surface p-4 rounded-xl space-y-4">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-ytm-accent" />
+            <h3 className="font-semibold">Create Semantic Playlist</h3>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium text-ytm-text-secondary">Semantic Query</label>
+              <input
+                id="semantic-playlist-query"
+                type="text"
+                value={semanticQuery}
+                onChange={(e) => setSemanticQuery(e.target.value)}
+                placeholder="Describe what you want (e.g., ambient music for calm focus and sleep)"
+                className="w-full mt-1 px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-ytm-text-secondary">Playlist Name (optional)</label>
+              <input
+                id="semantic-playlist-name"
+                type="text"
+                value={semanticName}
+                onChange={(e) => setSemanticName(e.target.value)}
+                placeholder="Leave empty for auto-generated name"
+                className="w-full mt-1 px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent"
+              />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              id="semantic-playlist-cancel"
+              onClick={cancelSemanticForm}
+              className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
+            >
+              Cancel
+            </button>
+            <button
+              id="semantic-playlist-create"
+              onClick={handleCreateSemanticPlaylist}
+              disabled={!semanticQuery.trim() || semanticLoading}
+              className="px-4 py-2 bg-ytm-accent text-white rounded-lg hover:bg-ytm-accent-hover disabled:opacity-50 flex items-center gap-2"
+            >
+              {semanticLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+              Create
+            </button>
+          </div>
         </div>
       )}
 

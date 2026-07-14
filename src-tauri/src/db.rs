@@ -545,6 +545,50 @@ impl Database {
         Ok(tracks)
     }
 
+    /// Atomically create a playlist and link all supplied track IDs in the given
+    /// order inside a single SQLite transaction.
+    ///
+    /// This method is used by the semantic playlist flow so that a linking error
+    /// (duplicate track ID, nonexistent track ID, or any insertion failure) rolls
+    /// back the playlist row and every `playlist_tracks` row, leaving no partial
+    /// state behind. Positions are deterministic, starting at 1.
+    ///
+    /// Unlike `add_track_to_playlist`, this method does NOT use `INSERT OR IGNORE`;
+    /// any constraint violation or missing foreign key aborts the transaction.
+    /// The returned `Playlist` carries the real `track_count` committed to the
+    /// database, not a caller-supplied guess.
+    pub fn create_playlist_with_tracks(
+        &mut self,
+        name: &str,
+        description: Option<&str>,
+        track_ids: &[String],
+    ) -> Result<Playlist, DbError> {
+        let tx = self.conn.transaction()?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO playlists (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id, name, description],
+        )?;
+
+        for (position, track_id) in track_ids.iter().enumerate() {
+            let position_value = (position as i64) + 1;
+            tx.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                params![id, track_id, position_value],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![id],
+        )?;
+
+        tx.commit()?;
+
+        self.get_playlist(&id)
+    }
+
     fn row_to_playlist(row: &rusqlite::Row) -> SqliteResult<Playlist> {
         Ok(Playlist {
             id: row.get("id")?,
