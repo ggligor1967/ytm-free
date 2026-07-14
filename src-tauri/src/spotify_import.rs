@@ -349,6 +349,12 @@ pub fn scan_folder_for_csv(folder_path: &str) -> Result<Vec<CsvFileInfo>, Import
 
 /// Get the default Spotify folder path
 pub fn get_default_spotify_folder() -> String {
+    if let Ok(override_path) = std::env::var("YTM_FREE_SPOTIFY_DIR") {
+        if !override_path.trim().is_empty() {
+            return override_path;
+        }
+    }
+
     // First try the .ytm-free/Spotify folder in user's home directory
     if let Some(home) = dirs::home_dir() {
         let ytm_spotify = home.join(".ytm-free").join("Spotify");
@@ -711,6 +717,66 @@ pub async fn search_youtube_for_track_smart_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    fn spotify_dir_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_spotify_folder_env_override_and_fallback() {
+        let _lock = spotify_dir_env_test_lock()
+            .lock()
+            .expect("Spotify directory env test lock poisoned");
+        let original = std::env::var_os("YTM_FREE_SPOTIFY_DIR");
+
+        {
+            let _env_guard = EnvVarGuard::new("YTM_FREE_SPOTIFY_DIR");
+
+            std::env::remove_var("YTM_FREE_SPOTIFY_DIR");
+            let default_path = get_default_spotify_folder();
+
+            let override_path = std::env::temp_dir()
+                .join("ytm-free-spotify-override-not-created")
+                .to_string_lossy()
+                .to_string();
+            std::env::set_var("YTM_FREE_SPOTIFY_DIR", &override_path);
+            assert_eq!(get_default_spotify_folder(), override_path);
+
+            std::env::set_var("YTM_FREE_SPOTIFY_DIR", " \t ");
+            assert_eq!(get_default_spotify_folder(), default_path);
+
+            std::env::remove_var("YTM_FREE_SPOTIFY_DIR");
+            assert_eq!(get_default_spotify_folder(), default_path);
+        }
+
+        assert_eq!(std::env::var_os("YTM_FREE_SPOTIFY_DIR"), original);
+    }
 
     #[test]
     fn test_parse_exportify_csv_standard() {
