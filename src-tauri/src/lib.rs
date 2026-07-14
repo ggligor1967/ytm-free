@@ -2342,17 +2342,19 @@ async fn semantic_search_filtered(
 /// `SemanticSearchResult` values, creates a playlist in the given `Database`,
 /// links the tracks in order, and returns a `SemanticPlaylistResult`.
 fn create_semantic_playlist_from_scored_results_db_helper(
-    db: &Database,
+    db: &mut Database,
     query: &str,
     playlist_name: Option<String>,
     scored_results: Vec<SemanticSearchResult>,
 ) -> Result<SemanticPlaylistResult, String> {
-    let track_count = scored_results.len() as i64;
-    let average_similarity = if !scored_results.is_empty() {
-        scored_results.iter().map(|r| r.similarity).sum::<f64>() / scored_results.len() as f64
-    } else {
-        0.0
-    };
+    // Invariant: refuse empty scored results. No playlist or playlist_tracks
+    // rows should be created when there are zero semantic matches.
+    if scored_results.is_empty() {
+        return Err("No semantic matches found for playlist".to_string());
+    }
+
+    let average_similarity =
+        scored_results.iter().map(|r| r.similarity).sum::<f64>() / scored_results.len() as f64;
 
     let name = playlist_name.unwrap_or_else(|| {
         format!(
@@ -2364,18 +2366,24 @@ fn create_semantic_playlist_from_scored_results_db_helper(
 
     let description = format!("Auto-generated semantic playlist from: {}", query);
 
+    // Preserve the exact scored_results order and extract track IDs.
+    let track_ids: Vec<String> = scored_results
+        .iter()
+        .map(|result| result.track.id.clone())
+        .collect();
+
+    // Atomically create the playlist and link all tracks in a single
+    // transaction. Any duplicate, nonexistent, or otherwise invalid track ID
+    // causes a rollback — no partial playlist is left behind.
     let playlist = db
-        .create_playlist(&name, Some(&description))
+        .create_playlist_with_tracks(&name, Some(&description), &track_ids)
         .map_err(|e| e.to_string())?;
 
-    for result in &scored_results {
-        let _ = db.add_track_to_playlist(&playlist.id, &result.track.id);
-    }
-
+    // track_count comes from the persisted playlist row, not a guess.
     Ok(SemanticPlaylistResult {
         playlist_id: playlist.id,
         playlist_name: playlist.name,
-        track_count,
+        track_count: playlist.track_count,
         average_similarity,
         created_at: chrono::Local::now().to_rfc3339(),
     })
@@ -2408,6 +2416,11 @@ fn create_semantic_playlist_prepare_embedding_input_db_helper(
     query: &str,
     playlist_name: Option<String>,
 ) -> Result<SemanticPlaylistPrepareInput, String> {
+    // Invariant: refuse empty/whitespace query. Do not call Ollama for an empty query.
+    if query.trim().is_empty() {
+        return Err("Semantic playlist query cannot be empty".to_string());
+    }
+
     let settings = db.get_settings().map_err(|e| e.to_string())?;
     if !settings.semantic_search_enabled {
         return Err("Semantic search is disabled".to_string());
@@ -2486,12 +2499,12 @@ async fn create_semantic_playlist(
         .map_err(|e| e.to_string())?;
 
     // Stage 3: scoring + playlist save under reacquired lock.
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     let scored_results =
         create_semantic_playlist_scored_from_embedding_db_helper(&db, &query_embedding)?;
 
     create_semantic_playlist_from_scored_results_db_helper(
-        &db,
+        &mut db,
         &prepared.query,
         prepared.playlist_name,
         scored_results,
@@ -5448,7 +5461,7 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
         std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
 
-        let db = Database::new().expect("Failed to create temp database");
+        let mut db = Database::new().expect("Failed to create temp database");
 
         // Insert synthetic tracks (no embedding, no Ollama, no network).
         let track_alpha = db
@@ -5501,7 +5514,7 @@ mod tests {
 
         let query = "semantic playlist stub query";
         let result = create_semantic_playlist_from_scored_results_db_helper(
-            &db,
+            &mut db,
             query,
             Some("Semantic Playlist Stub".to_string()),
             scored_results,
@@ -5646,7 +5659,7 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
         std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
 
-        let db = Database::new().expect("Failed to create temp database");
+        let mut db = Database::new().expect("Failed to create temp database");
 
         let mut settings = db.get_settings().expect("Failed to read temp settings");
         settings.semantic_search_enabled = true;
@@ -5750,7 +5763,7 @@ mod tests {
         let query = "semantic-playlist-lock-scope-query";
         let playlist_name = Some("semantic-playlist-lock-scope-playlist".to_string());
         let saved = create_semantic_playlist_from_scored_results_db_helper(
-            &db,
+            &mut db,
             query,
             playlist_name.clone(),
             scored,
@@ -6628,6 +6641,293 @@ mod tests {
             temp_dir.display()
         );
 
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    /// Test A — zero results: helper returns Err, no playlist/playlist_tracks rows.
+    #[test]
+    fn test_semantic_playlist_zero_results_creates_no_playlist() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-zero-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let mut db = Database::new().expect("Failed to create temp database");
+
+        // Count playlists and playlist_tracks before.
+        let playlists_before = db.get_playlists().expect("Failed to read playlists");
+        let tracks_before = db.get_all_tracks().expect("Failed to read tracks");
+        assert_eq!(playlists_before.len(), 0);
+        assert_eq!(tracks_before.len(), 0);
+
+        let scored_results: Vec<SemanticSearchResult> = vec![];
+        let result = create_semantic_playlist_from_scored_results_db_helper(
+            &mut db,
+            "empty query test",
+            Some("Zero Results Playlist".to_string()),
+            scored_results,
+        );
+
+        assert!(result.is_err(), "Expected Err for zero scored results");
+        let err_msg = result.unwrap_err();
+        assert_eq!(
+            err_msg, "No semantic matches found for playlist",
+            "Unexpected error message for zero results"
+        );
+
+        // No playlist or playlist_tracks rows should exist.
+        let playlists_after = db.get_playlists().expect("Failed to read playlists after");
+        assert_eq!(
+            playlists_after.len(),
+            0,
+            "Zero results created a playlist row"
+        );
+
+        let tracks_after = db.get_all_tracks().expect("Failed to read tracks after");
+        assert_eq!(tracks_after.len(), 0, "Zero results created track rows");
+
+        drop(db);
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    /// Test B — success and order: track_count=3, exact order, persists across reopen.
+    #[test]
+    fn test_semantic_playlist_success_preserves_order_and_persists() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let mut db = Database::new().expect("Failed to create temp database");
+
+        let track_alpha = db
+            .add_track(
+                "order-video-001",
+                "Order Track Alpha",
+                "Order Artist One",
+                "https://i.ytimg.com/vi/order-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add track Alpha");
+        let track_beta = db
+            .add_track(
+                "order-video-002",
+                "Order Track Beta",
+                "Order Artist Two",
+                "https://i.ytimg.com/vi/order-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add track Beta");
+        let track_gamma = db
+            .add_track(
+                "order-video-003",
+                "Order Track Gamma",
+                "Order Artist Three",
+                "https://i.ytimg.com/vi/order-video-003/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add track Gamma");
+
+        let scored_results = vec![
+            SemanticSearchResult {
+                track: track_alpha.clone(),
+                similarity: 0.91,
+                match_reason: "Semantic match 91%".to_string(),
+            },
+            SemanticSearchResult {
+                track: track_beta.clone(),
+                similarity: 0.78,
+                match_reason: "Semantic match 78%".to_string(),
+            },
+            SemanticSearchResult {
+                track: track_gamma.clone(),
+                similarity: 0.44,
+                match_reason: "Semantic match 44%".to_string(),
+            },
+        ];
+
+        let result = create_semantic_playlist_from_scored_results_db_helper(
+            &mut db,
+            "ordered query",
+            Some("Ordered Semantic Playlist".to_string()),
+            scored_results,
+        )
+        .expect("Failed to create ordered semantic playlist");
+
+        assert_eq!(result.playlist_name, "Ordered Semantic Playlist");
+        assert_eq!(result.track_count, 3, "track_count should be 3");
+
+        let playlist = db
+            .get_playlist(&result.playlist_id)
+            .expect("Failed to read created playlist");
+        assert_eq!(playlist.name, "Ordered Semantic Playlist");
+        assert_eq!(playlist.track_count, 3);
+
+        let playlist_tracks = db
+            .get_playlist_tracks(&result.playlist_id)
+            .expect("Failed to read playlist tracks");
+        assert_eq!(playlist_tracks.len(), 3);
+        assert_eq!(playlist_tracks[0].video_id, "order-video-001");
+        assert_eq!(playlist_tracks[1].video_id, "order-video-002");
+        assert_eq!(playlist_tracks[2].video_id, "order-video-003");
+
+        let playlist_id = result.playlist_id.clone();
+        drop(db);
+
+        // Reopen same temp DB and verify persistence.
+        let db2 = Database::new().expect("Failed to reopen temp database");
+        let reopened_playlist = db2
+            .get_playlist(&playlist_id)
+            .expect("Failed to read persisted playlist after reopen");
+        assert_eq!(reopened_playlist.name, "Ordered Semantic Playlist");
+        assert_eq!(reopened_playlist.track_count, 3);
+
+        let reopened_tracks = db2
+            .get_playlist_tracks(&playlist_id)
+            .expect("Failed to read persisted playlist tracks after reopen");
+        assert_eq!(reopened_tracks.len(), 3);
+        assert_eq!(reopened_tracks[0].video_id, "order-video-001");
+        assert_eq!(reopened_tracks[1].video_id, "order-video-002");
+        assert_eq!(reopened_tracks[2].video_id, "order-video-003");
+        drop(db2);
+
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    /// Test C — rollback: invalid/duplicate track ID aborts the transaction.
+    #[test]
+    fn test_semantic_playlist_rollback_on_invalid_track_id() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let mut db = Database::new().expect("Failed to create temp database");
+
+        // Insert two real tracks.
+        let track_alpha = db
+            .add_track(
+                "rollback-video-001",
+                "Rollback Track Alpha",
+                "Rollback Artist One",
+                "https://i.ytimg.com/vi/rollback-video-001/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add track Alpha");
+        let track_beta = db
+            .add_track(
+                "rollback-video-002",
+                "Rollback Track Beta",
+                "Rollback Artist Two",
+                "https://i.ytimg.com/vi/rollback-video-002/mqdefault.jpg",
+                None,
+            )
+            .expect("Failed to add track Beta");
+
+        // Build scored results with a duplicate track ID (Alpha appears twice).
+        // The PRIMARY KEY (playlist_id, track_id) constraint should cause the
+        // second INSERT to fail, triggering a full rollback.
+        let scored_results = vec![
+            SemanticSearchResult {
+                track: track_alpha.clone(),
+                similarity: 0.91,
+                match_reason: "Semantic match 91%".to_string(),
+            },
+            SemanticSearchResult {
+                track: track_beta.clone(),
+                similarity: 0.78,
+                match_reason: "Semantic match 78%".to_string(),
+            },
+            // Duplicate of Alpha — same track.id, violates PK constraint.
+            SemanticSearchResult {
+                track: track_alpha.clone(),
+                similarity: 0.50,
+                match_reason: "Semantic match 50%".to_string(),
+            },
+        ];
+
+        let result = create_semantic_playlist_from_scored_results_db_helper(
+            &mut db,
+            "rollback query",
+            Some("Rollback Semantic Playlist".to_string()),
+            scored_results,
+        );
+
+        assert!(result.is_err(), "Expected Err for duplicate track ID");
+
+        // No playlist row should remain.
+        let playlists = db
+            .get_playlists()
+            .expect("Failed to read playlists after rollback");
+        assert_eq!(playlists.len(), 0, "Rollback left a playlist row behind");
+
+        // No playlist_tracks rows should remain (verify via get_playlist_tracks
+        // on any playlist — there are none to check, but tracks table is intact).
+        let tracks_after = db
+            .get_all_tracks()
+            .expect("Failed to read tracks after rollback");
+        assert_eq!(
+            tracks_after.len(),
+            2,
+            "Existing tracks changed during rollback"
+        );
+        let video_ids: Vec<String> = tracks_after.iter().map(|t| t.video_id.clone()).collect();
+        assert!(video_ids.contains(&"rollback-video-001".to_string()));
+        assert!(video_ids.contains(&"rollback-video-002".to_string()));
+
+        drop(db);
+        std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
+    }
+
+    /// Test D — empty query validation: prepare helper rejects empty/whitespace query.
+    #[test]
+    fn test_semantic_playlist_empty_query_rejected_before_ollama() {
+        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ytm-free-semantic-playlist-empty-query-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp data dir");
+        std::env::set_var("YTM_FREE_DATA_DIR", &temp_dir);
+
+        let db = Database::new().expect("Failed to create temp database");
+
+        // Empty string query.
+        let result_empty =
+            create_semantic_playlist_prepare_embedding_input_db_helper(&db, "", None);
+        assert!(result_empty.is_err(), "Expected Err for empty query");
+        assert_eq!(
+            result_empty.unwrap_err(),
+            "Semantic playlist query cannot be empty"
+        );
+
+        // Whitespace-only query.
+        let result_ws =
+            create_semantic_playlist_prepare_embedding_input_db_helper(&db, "   ", None);
+        assert!(result_ws.is_err(), "Expected Err for whitespace query");
+        assert_eq!(
+            result_ws.unwrap_err(),
+            "Semantic playlist query cannot be empty"
+        );
+
+        drop(db);
         std::fs::remove_dir_all(&temp_dir).expect("Failed to remove temp data dir");
     }
 }

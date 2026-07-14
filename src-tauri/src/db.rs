@@ -545,6 +545,64 @@ impl Database {
         Ok(tracks)
     }
 
+    /// Atomically create a playlist and link all supplied track IDs in the given
+    /// order inside a single SQLite transaction.
+    ///
+    /// This method is used by the semantic playlist flow so that a linking error
+    /// (duplicate track ID, nonexistent track ID, or any insertion failure) rolls
+    /// back the playlist row and every `playlist_tracks` row, leaving no partial
+    /// state behind. Positions are deterministic, starting at 1.
+    ///
+    /// Unlike `add_track_to_playlist`, this method does NOT use `INSERT OR IGNORE`;
+    /// any constraint violation or explicit missing-track validation aborts the
+    /// transaction.
+    /// The returned `Playlist` carries the real `track_count` committed to the
+    /// database, not a caller-supplied guess.
+    pub fn create_playlist_with_tracks(
+        &mut self,
+        name: &str,
+        description: Option<&str>,
+        track_ids: &[String],
+    ) -> Result<Playlist, DbError> {
+        let tx = self.conn.transaction()?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO playlists (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id, name, description],
+        )?;
+
+        for (position, track_id) in track_ids.iter().enumerate() {
+            let track_exists = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?1)",
+                params![track_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+
+            if !track_exists {
+                return Err(DbError::NotFound(format!(
+                    "Track not found by UUID: {}",
+                    track_id
+                )));
+            }
+
+            let position_value = (position as i64) + 1;
+            tx.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                params![id, track_id, position_value],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![id],
+        )?;
+
+        tx.commit()?;
+
+        self.get_playlist(&id)
+    }
+
     fn row_to_playlist(row: &rusqlite::Row) -> SqliteResult<Playlist> {
         Ok(Playlist {
             id: row.get("id")?,
@@ -1539,6 +1597,131 @@ mod tests {
             .expect("Failed to delete playlist");
         let deleted = db.get_playlist(&pl.id);
         assert!(matches!(deleted, Err(DbError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_create_playlist_with_tracks_rolls_back_on_duplicate_track_id() {
+        let mut db = Database::in_memory().expect("Failed to create in-memory database");
+
+        let track_alpha = db
+            .add_track(
+                "dup-video-001",
+                "Duplicate Song One",
+                "Artist One",
+                "thumb-a.jpg",
+                None,
+            )
+            .expect("Failed to add duplicate test track alpha");
+        let track_beta = db
+            .add_track(
+                "dup-video-002",
+                "Duplicate Song Two",
+                "Artist Two",
+                "thumb-b.jpg",
+                None,
+            )
+            .expect("Failed to add duplicate test track beta");
+
+        let playlists_before = count_rows(&db.conn, "playlists");
+        let playlist_tracks_before = count_rows(&db.conn, "playlist_tracks");
+        let tracks_before = count_rows(&db.conn, "tracks");
+
+        let result = db.create_playlist_with_tracks(
+            "Duplicate Rollback Playlist",
+            Some("Duplicate rollback validation"),
+            &[
+                track_alpha.id.clone(),
+                track_beta.id.clone(),
+                track_alpha.id.clone(),
+            ],
+        );
+
+        assert!(result.is_err(), "Expected duplicate track ID to fail");
+        assert_eq!(
+            count_rows(&db.conn, "playlists"),
+            playlists_before,
+            "Duplicate track rollback left a playlist row behind"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlist_tracks"),
+            playlist_tracks_before,
+            "Duplicate track rollback left playlist links behind"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "tracks"),
+            tracks_before,
+            "Duplicate track rollback modified existing tracks"
+        );
+
+        let preserved_alpha = db
+            .get_track_by_uuid(&track_alpha.id)
+            .expect("Track alpha should remain after rollback");
+        let preserved_beta = db
+            .get_track_by_uuid(&track_beta.id)
+            .expect("Track beta should remain after rollback");
+        assert_eq!(preserved_alpha.video_id, "dup-video-001");
+        assert_eq!(preserved_alpha.title, "Duplicate Song One");
+        assert_eq!(preserved_beta.video_id, "dup-video-002");
+        assert_eq!(preserved_beta.title, "Duplicate Song Two");
+    }
+
+    #[test]
+    fn test_create_playlist_with_tracks_rolls_back_on_nonexistent_track_id() {
+        let mut db = Database::in_memory().expect("Failed to create in-memory database");
+
+        let valid_track = db
+            .add_track(
+                "missing-video-001",
+                "Valid Song",
+                "Stable Artist",
+                "thumb-valid.jpg",
+                None,
+            )
+            .expect("Failed to add valid track");
+        let missing_track_id = "00000000-0000-4000-8000-00000000dead".to_string();
+
+        let playlists_before = count_rows(&db.conn, "playlists");
+        let playlist_tracks_before = count_rows(&db.conn, "playlist_tracks");
+        let tracks_before = count_rows(&db.conn, "tracks");
+
+        let result = db.create_playlist_with_tracks(
+            "Missing Track Rollback Playlist",
+            Some("Missing track rollback validation"),
+            &[valid_track.id.clone(), missing_track_id.clone()],
+        );
+
+        match result {
+            Err(DbError::NotFound(message)) => {
+                assert_eq!(
+                    message,
+                    format!("Track not found by UUID: {}", missing_track_id)
+                );
+            }
+            other => panic!("Expected DbError::NotFound for missing track, got {other:?}"),
+        }
+
+        assert_eq!(
+            count_rows(&db.conn, "playlists"),
+            playlists_before,
+            "Missing track rollback left a playlist row behind"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "playlist_tracks"),
+            playlist_tracks_before,
+            "Missing track rollback left playlist links behind"
+        );
+        assert_eq!(
+            count_rows(&db.conn, "tracks"),
+            tracks_before,
+            "Missing track rollback modified existing tracks"
+        );
+
+        let preserved_track = db
+            .get_track_by_uuid(&valid_track.id)
+            .expect("Valid track should remain after rollback");
+        assert_eq!(preserved_track.video_id, "missing-video-001");
+        assert_eq!(preserved_track.title, "Valid Song");
+        assert_eq!(preserved_track.artist, "Stable Artist");
     }
 
     #[test]
