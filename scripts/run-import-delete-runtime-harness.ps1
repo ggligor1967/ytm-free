@@ -3,7 +3,8 @@ param(
     [switch]$ContractValidateOnly,
     [switch]$PreflightOnly,
     [switch]$LaunchPlanValidateOnly,
-    [switch]$MonitorAndFinalizationValidateOnly
+    [switch]$MonitorAndFinalizationValidateOnly,
+    [switch]$ExternalCommandValidateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -102,6 +103,11 @@ $StopConditions = @(
     'SANITIZED-LOG-PUBLICATION-FAILED',
     'RAW-LOG-CLEANUP-FAILED',
     'RUNTIME-FILE-LOCK-PERSISTED',
+    'EXTERNAL-COMMAND-WAIT-TIMEOUT',
+    'EXTERNAL-COMMAND-NOT-EXITED',
+    'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE',
+    'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH',
+    'EXTERNAL-COMMAND-FAILED',
     'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
     'FAILURE-FINALIZATION-INCOMPLETE'
 )
@@ -631,6 +637,19 @@ function Invoke-ContractValidation {
         'SYNTHETIC-EMPTY-STDOUT-STDERR',
         'SYNTHETIC-SANITIZED-PUBLICATION-FAILURE'
     )
+    Assert-ContainsAll -Text $harness -Label 'external command capture contract' -Values @(
+        'function Invoke-ExternalCaptured',
+        'function Assert-ExternalCommandSucceeded',
+        'ExternalCommandValidateOnly',
+        'EXTERNAL-COMMAND-WAIT-TIMEOUT',
+        'EXTERNAL-COMMAND-NOT-EXITED',
+        'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE',
+        'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH',
+        'EXTERNAL-COMMAND-FAILED',
+        'compile_exit_status',
+        'stdout_metadata',
+        'stderr_metadata'
+    )
 
     $validationToken = 'contractvalidation-00000000'
     $alpha = '{"id":"s6R3B1A001","title":"Step6R3B1 Alpha ' + $validationToken + '","channel":"Step6R3B1 Synthetic Artist","duration":123,"thumbnail":"data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="}'
@@ -1145,7 +1164,11 @@ function Invoke-ExternalCaptured {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
-        [Parameter(Mandatory = $true)][string]$LogName
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9._-]+$')]
+        [string]$LogName,
+        [ValidateRange(1000, 3600000)]
+        [int]$WaitTimeoutMilliseconds = 900000
     )
     $rawLogRoot = Join-Path $RuntimeRoot 'raw-logs\external'
     $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
@@ -1161,22 +1184,231 @@ function Invoke-ExternalCaptured {
         raw_logs_removed = $false
     }
     $Script:LogCaptures.Add($captureRecord) | Out-Null
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
-        -WindowStyle Hidden -PassThru
-    $captureRecord.process_launched = $true
+
+    $invocationToken = [guid]::NewGuid().ToString('N')
+    $planPath = Join-Path $rawLogRoot "$LogName.$invocationToken.launch-plan.json"
+    $launcherPath = Join-Path $rawLogRoot "$LogName.$invocationToken.launcher.ps1"
+    $launchPlan = [ordered]@{
+        file_path = [IO.Path]::GetFullPath($FilePath)
+        arguments = @($Arguments | ForEach-Object { [string]$_ })
+        working_directory = [IO.Path]::GetFullPath($WorkingDirectory)
+        stdout_path = [IO.Path]::GetFullPath($captureRecord.raw_stdout_path)
+        stderr_path = [IO.Path]::GetFullPath($captureRecord.raw_stderr_path)
+    }
+    Write-Utf8NoBom -LiteralPath $planPath -Value (($launchPlan | ConvertTo-Json -Depth 5) + [Environment]::NewLine)
+    $launcherSource = @'
+param([Parameter(Mandatory = $true)][string]$PlanPath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
+$targetArguments = @($plan.arguments | ForEach-Object { [string]$_ })
+function ConvertTo-WindowsCommandLineArgument {
+    param([AllowEmptyString()][string]$Value)
+    if ($Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $builder = [Text.StringBuilder]::new()
+    $null = $builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            $null = $builder.Append(('\' * (($backslashCount * 2) + 1)))
+            $null = $builder.Append('"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            $null = $builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+        $null = $builder.Append($character)
+    }
+    if ($backslashCount -gt 0) {
+        $null = $builder.Append(('\' * ($backslashCount * 2)))
+    }
+    $null = $builder.Append('"')
+    return $builder.ToString()
+}
+$processStartInfo = [Diagnostics.ProcessStartInfo]::new()
+$processStartInfo.FileName = [string]$plan.file_path
+$processStartInfo.Arguments = (($targetArguments | ForEach-Object {
+    ConvertTo-WindowsCommandLineArgument -Value $_
+}) -join ' ')
+$processStartInfo.WorkingDirectory = [string]$plan.working_directory
+$processStartInfo.UseShellExecute = $false
+$processStartInfo.CreateNoWindow = $true
+$processStartInfo.RedirectStandardOutput = $true
+$processStartInfo.RedirectStandardError = $true
+$childProcess = [Diagnostics.Process]::new()
+$childProcess.StartInfo = $processStartInfo
+$targetExitCode = 253
+try {
+    $null = $childProcess.Start()
+    $stdoutTask = $childProcess.StandardOutput.ReadToEndAsync()
+    $stderrTask = $childProcess.StandardError.ReadToEndAsync()
+    $childProcess.WaitForExit()
+    $stdoutTask.Wait()
+    $stderrTask.Wait()
+    [IO.File]::WriteAllText([string]$plan.stdout_path, $stdoutTask.Result, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText([string]$plan.stderr_path, $stderrTask.Result, [Text.UTF8Encoding]::new($false))
+    $targetExitCode = $childProcess.ExitCode
+}
+catch {
+    if (-not (Test-Path -LiteralPath ([string]$plan.stdout_path) -PathType Leaf)) {
+        [IO.File]::WriteAllBytes([string]$plan.stdout_path, [byte[]]@())
+    }
+    [IO.File]::WriteAllText(
+        [string]$plan.stderr_path,
+        $_.Exception.Message,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+finally {
+    $childProcess.Dispose()
+}
+if ($targetExitCode -isnot [int]) { exit 254 }
+exit $targetExitCode
+'@
+    Write-Utf8NoBom -LiteralPath $launcherPath -Value $launcherSource
+
+    $quotedLauncherPath = '"' + $launcherPath.Replace('"', '\"') + '"'
+    $quotedPlanPath = '"' + $planPath.Replace('"', '\"') + '"'
+    $externalResult = [ordered]@{
+        process_id = $null
+        has_exited = $false
+        captured_ok = $false
+        exit_code_status = 'UNAVAILABLE'
+        exit_code = $null
+        start_utc = (Get-Date).ToUniversalTime().ToString('o')
+        end_utc = $null
+        stdout_metadata = $null
+        stderr_metadata = $null
+        failure_code = 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'
+    }
+    $launcherProcess = $null
+    $startedProcesses = @()
+    $powershellCandidates = @(Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue)
     try {
-        $process.WaitForExit()
-        $externalExitCode = $process.ExitCode
+        if ($powershellCandidates.Count -ne 1 -or $powershellCandidates[0].Source -isnot [string]) {
+            $externalResult.exit_code_status = 'UNAVAILABLE'
+            $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'
+        }
+        else {
+            $startedProcesses = @(Start-Process -FilePath ([string]$powershellCandidates[0].Source) -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedLauncherPath, '-PlanPath', $quotedPlanPath
+            ) -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru)
+            if ($startedProcesses.Count -ne 1 -or
+                $startedProcesses[0].GetType().FullName -cne 'System.Diagnostics.Process') {
+                $externalResult.exit_code_status = 'TYPE_MISMATCH'
+                $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH'
+            }
+            else {
+                $launcherProcess = $startedProcesses[0]
+                $externalResult.process_id = [int]$launcherProcess.Id
+                $captureRecord.process_launched = $true
+                $waitCompleted = $launcherProcess.WaitForExit($WaitTimeoutMilliseconds)
+                if (-not $waitCompleted) {
+                    $externalResult.exit_code_status = 'WAIT_TIMEOUT'
+                    $externalResult.failure_code = 'EXTERNAL-COMMAND-WAIT-TIMEOUT'
+                    try { $launcherProcess.Kill() } catch { }
+                    try { $launcherProcess.WaitForExit() } catch { }
+                }
+                else {
+                    $launcherProcess.WaitForExit()
+                    $launcherProcess.Refresh()
+                    $externalResult.has_exited = [bool]$launcherProcess.HasExited
+                    if (-not $externalResult.has_exited) {
+                        $externalResult.exit_code_status = 'NOT_EXITED'
+                        $externalResult.failure_code = 'EXTERNAL-COMMAND-NOT-EXITED'
+                    }
+                    else {
+                        try {
+                            $capturedExitCode = $launcherProcess.ExitCode
+                            if ($null -eq $capturedExitCode) {
+                                $externalResult.exit_code_status = 'UNAVAILABLE'
+                                $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'
+                            }
+                            elseif ($capturedExitCode -isnot [int]) {
+                                $externalResult.exit_code_status = 'TYPE_MISMATCH'
+                                $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH'
+                            }
+                            else {
+                                $externalResult.exit_code_status = 'CAPTURED'
+                                $externalResult.exit_code = $capturedExitCode
+                                $externalResult.captured_ok = $true
+                                $externalResult.failure_code = if ($capturedExitCode -eq 0) {
+                                    $null
+                                }
+                                else {
+                                    'EXTERNAL-COMMAND-FAILED'
+                                }
+                            }
+                        }
+                        catch {
+                            $externalResult.exit_code_status = 'UNAVAILABLE'
+                            $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        $externalResult.exit_code_status = 'UNAVAILABLE'
+        $externalResult.failure_code = 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'
     }
     finally {
-        $process.Dispose()
+        $externalResult.end_utc = (Get-Date).ToUniversalTime().ToString('o')
+        try {
+            Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+        }
+        catch {
+            if ([string]::IsNullOrWhiteSpace([string]$externalResult.failure_code)) {
+                if ($_.Exception.Message -match '^RAW-LOG-CLEANUP-FAILED') {
+                    $externalResult.failure_code = 'RAW-LOG-CLEANUP-FAILED'
+                }
+                else {
+                    $externalResult.failure_code = 'SANITIZED-LOG-PUBLICATION-FAILED'
+                }
+            }
+        }
+        $stdoutPublications = @($captureRecord.stream_publications | Where-Object { $_.stream -eq 'stdout' })
+        $stderrPublications = @($captureRecord.stream_publications | Where-Object { $_.stream -eq 'stderr' })
+        if ($stdoutPublications.Count -eq 1) { $externalResult.stdout_metadata = $stdoutPublications[0] }
+        if ($stderrPublications.Count -eq 1) { $externalResult.stderr_metadata = $stderrPublications[0] }
+        if ($null -ne $launcherProcess) { $launcherProcess.Dispose() }
     }
-    Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
-    if ($externalExitCode -ne 0) {
-        throw "External command failed ($externalExitCode): $FilePath $($Arguments -join ' ')"
+
+    if ($null -eq $externalResult.end_utc) {
+        $externalResult.end_utc = (Get-Date).ToUniversalTime().ToString('o')
     }
-    return $externalExitCode
+    return [pscustomobject]$externalResult
+}
+
+function Assert-ExternalCommandSucceeded {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$CommandLabel
+    )
+    if (-not [bool]$Result.captured_ok) {
+        $failureCode = switch ([string]$Result.exit_code_status) {
+            'WAIT_TIMEOUT' { 'EXTERNAL-COMMAND-WAIT-TIMEOUT'; break }
+            'NOT_EXITED' { 'EXTERNAL-COMMAND-NOT-EXITED'; break }
+            'UNAVAILABLE' { 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE'; break }
+            'TYPE_MISMATCH' { 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH'; break }
+            default { 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE' }
+        }
+        throw "$failureCode`: $CommandLabel"
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.failure_code)) {
+        throw "$($Result.failure_code): $CommandLabel"
+    }
+    if ($Result.exit_code -ne 0) {
+        throw "EXTERNAL-COMMAND-FAILED: $CommandLabel"
+    }
 }
 
 function Test-FileExclusiveAccess {
@@ -2633,13 +2865,15 @@ function Invoke-HarnessFinalization {
     })
     $inventorySha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
 
-    $cleanupStatus = if ($finalizationFailures.Count -eq 0 -and
-        $environmentRestoreStatus -notin @('FAILED') -and
+    $cleanupStatus = if ($environmentRestoreStatus -notin @('FAILED') -and
         $ownedProcessCleanupStatus -eq 'PASS' -and
+        $processWaitStatus -eq 'PASS' -and
+        $processObjectDisposeStatus -eq 'PASS' -and
+        $logHandleReleaseStatus -eq 'PASS' -and
+        $rawLogCleanupStatus -eq 'PASS' -and
+        $runtimeUnlockResult.status -eq 'PASS' -and
         $portReleaseStatus -eq 'PASS' -and
         $runtimeRootCleanupStatus -eq 'PASS' -and
-        $privacyAfterSnapshotStatus -notin @('FAILED') -and
-        $protectedFileComparisonStatus -notin @('FAILED') -and
         $evidenceRootPreserved) { 'PASS' } else { 'FAILED' }
     $runStatus = if ($null -ne $PrimaryFailure) {
         'FAILED'
@@ -2694,7 +2928,6 @@ function Invoke-HarnessFinalization {
     if ($postManifestClearPathCount -ne 0) {
         Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'evidence-redaction' `
             -FailureCode 'CLEAR-PERSONAL-PATH-IN-EVIDENCE' -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
-        $cleanupStatus = 'FAILED'
         $evidenceCompleteness = 'INCOMPLETE'
         $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
         Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
@@ -3565,6 +3798,140 @@ function Invoke-UnreadableEvidenceFinalizationValidation {
     }
 }
 
+function Invoke-ExternalCommandValidation {
+    $Script:LogCaptures.Clear()
+    $runToken = 'external-command-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-external-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-external-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+
+        $powershellCandidates = @(Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue)
+        if ($powershellCandidates.Count -ne 1 -or $powershellCandidates[0].Source -isnot [string]) {
+            throw 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE: validation powershell executable unavailable or ambiguous'
+        }
+        $powershellPath = [string]$powershellCandidates[0].Source
+
+        $zeroResults = @(Invoke-ExternalCaptured -FilePath $powershellPath -Arguments @(
+            '-NoProfile', '-Command', 'exit 0'
+        ) -WorkingDirectory $runtimeRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'exit-zero')
+        if ($zeroResults.Count -ne 1) { throw 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH: zero result cardinality' }
+        $zeroResult = $zeroResults[0]
+        Assert-ExternalCommandSucceeded -Result $zeroResult -CommandLabel 'synthetic exit zero'
+        if (-not $zeroResult.has_exited -or $zeroResult.exit_code -isnot [int] -or
+            $zeroResult.exit_code_status -ne 'CAPTURED' -or $zeroResult.exit_code -ne 0) {
+            throw 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE: zero exit code contract failed'
+        }
+
+        $sevenResults = @(Invoke-ExternalCaptured -FilePath $powershellPath -Arguments @(
+            '-NoProfile', '-Command', "Write-Output test; [Console]::Error.WriteLine('test-error'); exit 7"
+        ) -WorkingDirectory $runtimeRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'exit-seven')
+        if ($sevenResults.Count -ne 1) { throw 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH: seven result cardinality' }
+        $sevenResult = $sevenResults[0]
+        if (-not $sevenResult.has_exited -or $sevenResult.exit_code -isnot [int] -or
+            $sevenResult.exit_code_status -ne 'CAPTURED' -or $sevenResult.exit_code -ne 7 -or
+            $sevenResult.failure_code -ne 'EXTERNAL-COMMAND-FAILED' -or
+            $sevenResult.stdout_metadata.publication_status -ne 'PASS_CONTENT' -or
+            $sevenResult.stderr_metadata.publication_status -ne 'PASS_CONTENT') {
+            throw ("EXTERNAL-COMMAND-FAILED: seven exit contract failed " +
+                "has_exited=$($sevenResult.has_exited) type=$($sevenResult.exit_code.GetType().FullName) " +
+                "status=$($sevenResult.exit_code_status) code=$($sevenResult.exit_code) " +
+                "failure=$($sevenResult.failure_code) stdout=$($sevenResult.stdout_metadata.publication_status) " +
+                "stderr=$($sevenResult.stderr_metadata.publication_status)")
+        }
+        $requiredResultProperties = @(
+            'process_id', 'has_exited', 'captured_ok', 'exit_code_status', 'exit_code',
+            'start_utc', 'end_utc', 'stdout_metadata', 'stderr_metadata', 'failure_code'
+        )
+        $metadataPreserved = @($requiredResultProperties | Where-Object {
+            $null -eq $sevenResult.PSObject.Properties[$_]
+        }).Count -eq 0
+        if (-not $metadataPreserved) { throw 'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE: result metadata incomplete' }
+
+        $rustcCandidates = @(Get-Command rustc.exe -CommandType Application -ErrorAction SilentlyContinue)
+        if ($rustcCandidates.Count -ne 1 -or $rustcCandidates[0].Source -isnot [string]) {
+            throw 'REQUIRED-TOOL-MISSING: rustc.exe unavailable or ambiguous'
+        }
+        $rustcPath = [string]$rustcCandidates[0].Source
+        $rustcVersionResults = @(Invoke-ExternalCaptured -FilePath $rustcPath -Arguments @('--version') `
+            -WorkingDirectory $runtimeRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot `
+            -LogName 'rustc-version')
+        if ($rustcVersionResults.Count -ne 1) {
+            throw 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH: rustc version result cardinality'
+        }
+        $rustcVersionResult = $rustcVersionResults[0]
+        Assert-ExternalCommandSucceeded -Result $rustcVersionResult -CommandLabel 'rustc version validation'
+        if ($rustcVersionResult.stdout_metadata.publication_status -ne 'PASS_CONTENT') {
+            throw 'SANITIZED-LOG-PUBLICATION-FAILED: rustc version stdout was not captured'
+        }
+
+        $rustSource = Join-Path $runtimeRoot 'minimal.rs'
+        $rustExecutable = Join-Path $runtimeRoot 'minimal.exe'
+        Write-Utf8NoBom -LiteralPath $rustSource -Value 'fn main() {}'
+        $rustcCompileResults = @(Invoke-ExternalCaptured -FilePath $rustcPath -Arguments @(
+            '--edition', '2021', $rustSource, '-o', $rustExecutable
+        ) -WorkingDirectory $runtimeRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot `
+            -LogName 'rustc-compile')
+        if ($rustcCompileResults.Count -ne 1) {
+            throw 'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH: rustc compile result cardinality'
+        }
+        $rustcCompileResult = $rustcCompileResults[0]
+        Assert-ExternalCommandSucceeded -Result $rustcCompileResult -CommandLabel 'rustc minimal compile validation'
+        $rustExecutablePresent = Test-Path -LiteralPath $rustExecutable -PathType Leaf
+        $rustExecutableSha256 = if ($rustExecutablePresent) {
+            (Get-FileHash -LiteralPath $rustExecutable -Algorithm SHA256).Hash
+        }
+        else {
+            $null
+        }
+        if (-not $rustExecutablePresent -or [string]::IsNullOrWhiteSpace([string]$rustExecutableSha256)) {
+            throw 'EXTERNAL-COMMAND-FAILED: rustc executable or hash unavailable'
+        }
+
+        return [ordered]@{
+            RESULT_CARDINALITY = $zeroResults.Count
+            HAS_EXITED = [bool]$zeroResult.has_exited
+            EXIT_CODE_TYPE = $zeroResult.exit_code.GetType().FullName
+            EXIT_CODE_STATUS = [string]$zeroResult.exit_code_status
+            EXIT_CODE = $zeroResult.exit_code
+            FAILURE_CODE = [string]$sevenResult.failure_code
+            EXIT_SEVEN_CODE_TYPE = $sevenResult.exit_code.GetType().FullName
+            EXIT_SEVEN_CODE_STATUS = [string]$sevenResult.exit_code_status
+            EXIT_SEVEN_CODE = $sevenResult.exit_code
+            STDOUT = [string]$sevenResult.stdout_metadata.publication_status
+            STDERR = [string]$sevenResult.stderr_metadata.publication_status
+            METADATA_PRESERVED = 'PASS'
+            RUSTC_VERSION_EXIT_CODE_STATUS = [string]$rustcVersionResult.exit_code_status
+            RUSTC_VERSION_EXIT_CODE = $rustcVersionResult.exit_code
+            RUSTC_VERSION_STDOUT = [string]$rustcVersionResult.stdout_metadata.publication_status
+            RUSTC_EXIT_CODE_TYPE = $rustcCompileResult.exit_code.GetType().FullName
+            RUSTC_EXIT_CODE_STATUS = [string]$rustcCompileResult.exit_code_status
+            RUSTC_EXIT_CODE = $rustcCompileResult.exit_code
+            RUSTC_EXECUTABLE_PRESENT = [bool]$rustExecutablePresent
+            RUSTC_EXECUTABLE_SHA256 = 'AVAILABLE'
+        }
+    }
+    finally {
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        $Script:LogCaptures.Clear()
+    }
+}
+
 function Invoke-FullRuntimeHarness {
     $Script:OwnedProcessIdentities = @()
     $Script:OwnedProcessObjects.Clear()
@@ -3702,24 +4069,56 @@ function Invoke-FullRuntimeHarness {
             source_relative_path = 'scripts/yt-dlp-import-delete-shim.rs'
             source_sha256 = (Get-FileHash -LiteralPath $ShimSource -Algorithm SHA256).Hash
         })
+        $shimSourceSha256 = (Get-FileHash -LiteralPath $ShimSource -Algorithm SHA256).Hash
         $shimExe = Join-Path $shimDir 'yt-dlp.exe'
         $rustc = Get-Command rustc.exe -CommandType Application | Select-Object -First 1
-        $shimCompileExit = Invoke-ExternalCaptured -FilePath ([string]$rustc.Source) -Arguments @(
+        $shimCompileResult = Invoke-ExternalCaptured -FilePath ([string]$rustc.Source) -Arguments @(
             '--edition', '2021', $ShimSource, '-o', $shimExe
         ) -WorkingDirectory $RepoRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'shim-build'
+        $shimExecutablePresent = Test-Path -LiteralPath $shimExe -PathType Leaf
+        $shimExecutableSize = if ($shimExecutablePresent) { [int64](Get-Item -LiteralPath $shimExe).Length } else { $null }
+        $shimExecutableSha256 = if ($shimExecutablePresent) {
+            (Get-FileHash -LiteralPath $shimExe -Algorithm SHA256).Hash
+        }
+        else {
+            $null
+        }
+        $shimFailureCode = if (-not [string]::IsNullOrWhiteSpace([string]$shimCompileResult.failure_code)) {
+            [string]$shimCompileResult.failure_code
+        }
+        elseif (-not $shimExecutablePresent) {
+            'YT_DLP-DETERMINISM-NOT-AVAILABLE'
+        }
+        else {
+            $null
+        }
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-executable-metadata.json') -Value ([ordered]@{
-            executable_sha256 = (Get-FileHash -LiteralPath $shimExe -Algorithm SHA256).Hash
-            executable_size = [int64](Get-Item -LiteralPath $shimExe).Length
-            compile_exit = $shimCompileExit
+            source_sha256 = $shimSourceSha256
+            compile_started_utc = [string]$shimCompileResult.start_utc
+            compile_finished_utc = [string]$shimCompileResult.end_utc
+            compile_exit_status = [string]$shimCompileResult.exit_code_status
+            compile_exit = $shimCompileResult.exit_code
+            executable_present = [bool]$shimExecutablePresent
+            executable_size = $shimExecutableSize
+            executable_sha256 = $shimExecutableSha256
+            stdout_metadata = $shimCompileResult.stdout_metadata
+            stderr_metadata = $shimCompileResult.stderr_metadata
+            failure_code = $shimFailureCode
         })
+        Assert-ExternalCommandSucceeded -Result $shimCompileResult -CommandLabel 'rustc shim compilation'
+        if (-not $shimExecutablePresent -or $shimExecutableSize -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$shimExecutableSha256)) {
+            throw 'YT_DLP-DETERMINISM-NOT-AVAILABLE: shim executable missing or empty after successful compile'
+        }
 
         $firstIncompletePhase = 'application-build'
         $mandatoryEvidenceRelativePaths.Add('build-provenance.json') | Out-Null
         $buildStatus = 'IN PROGRESS'
         $buildStart = (Get-Date).ToUniversalTime()
         $npm = Get-Command npm.cmd -CommandType Application | Select-Object -First 1
-        $buildExit = Invoke-ExternalCaptured -FilePath ([string]$npm.Source) -Arguments @('run', 'harness:build') `
+        $buildResult = Invoke-ExternalCaptured -FilePath ([string]$npm.Source) -Arguments @('run', 'harness:build') `
             -WorkingDirectory $RepoRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'build'
+        Assert-ExternalCommandSucceeded -Result $buildResult -CommandLabel 'application harness build'
         $buildEnd = (Get-Date).ToUniversalTime()
         $binaryPath = Join-Path $RepoRoot 'src-tauri\target\debug\ytm-free.exe'
         if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
@@ -3732,7 +4131,7 @@ function Invoke-FullRuntimeHarness {
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'build-provenance.json') -Value ([ordered]@{
             build_start_utc = $buildStart.ToString('o')
             build_end_utc = $buildEnd.ToString('o')
-            build_exit = $buildExit
+            build_exit = $buildResult.exit_code
             APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
             HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
             ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
@@ -3936,10 +4335,11 @@ $selectedModes = @(@(
     $ContractValidateOnly,
     $PreflightOnly,
     $LaunchPlanValidateOnly,
-    $MonitorAndFinalizationValidateOnly
+    $MonitorAndFinalizationValidateOnly,
+    $ExternalCommandValidateOnly
 ) | Where-Object { $_ })
 if ($selectedModes.Count -gt 1) {
-    throw 'ContractValidateOnly, PreflightOnly, LaunchPlanValidateOnly, and MonitorAndFinalizationValidateOnly are mutually exclusive'
+    throw 'ContractValidateOnly, PreflightOnly, LaunchPlanValidateOnly, MonitorAndFinalizationValidateOnly, and ExternalCommandValidateOnly are mutually exclusive'
 }
 
 if ($ContractValidateOnly) {
@@ -4030,6 +4430,42 @@ if ($MonitorAndFinalizationValidateOnly) {
     Write-Output "SYNTHETIC_PUBLICATION_MANIFEST_PRESENT:$($publicationFailureResult.SYNTHETIC_PUBLICATION_MANIFEST_PRESENT)"
     Write-Output "SYNTHETIC_PUBLICATION_PRIMARY_FAILURE_PRESERVED:$($publicationFailureResult.SYNTHETIC_PUBLICATION_PRIMARY_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_UNREADABLE_EVIDENCE_FINALIZATION:$unreadableEvidenceResult"
+    Write-NonClaims
+    exit 0
+}
+
+if ($ExternalCommandValidateOnly) {
+    $result = Invoke-ExternalCommandValidation
+    Write-Output 'SMOKE_EXIT_ZERO'
+    Write-Output "RESULT_CARDINALITY:$($result.RESULT_CARDINALITY)"
+    Write-Output "HAS_EXITED:$($result.HAS_EXITED)"
+    Write-Output "EXIT_CODE_TYPE:$($result.EXIT_CODE_TYPE)"
+    Write-Output "EXIT_CODE_STATUS:$($result.EXIT_CODE_STATUS)"
+    Write-Output "EXIT_CODE:$($result.EXIT_CODE)"
+    Write-Output 'SMOKE_EXIT_SEVEN'
+    Write-Output "FAILURE_CODE:$($result.FAILURE_CODE)"
+    Write-Output "EXIT_CODE_TYPE:$($result.EXIT_SEVEN_CODE_TYPE)"
+    Write-Output "EXIT_CODE_STATUS:$($result.EXIT_SEVEN_CODE_STATUS)"
+    Write-Output "EXIT_CODE:$($result.EXIT_SEVEN_CODE)"
+    Write-Output "EXIT_SEVEN_CODE_TYPE:$($result.EXIT_SEVEN_CODE_TYPE)"
+    Write-Output "EXIT_SEVEN_CODE_STATUS:$($result.EXIT_SEVEN_CODE_STATUS)"
+    Write-Output "EXIT_SEVEN_CODE:$($result.EXIT_SEVEN_CODE)"
+    Write-Output "STDOUT:$($result.STDOUT)"
+    Write-Output "STDERR:$($result.STDERR)"
+    Write-Output "METADATA_PRESERVED:$($result.METADATA_PRESERVED)"
+    Write-Output 'RUSTC_VERSION'
+    Write-Output "EXIT_CODE_STATUS:$($result.RUSTC_VERSION_EXIT_CODE_STATUS)"
+    Write-Output "EXIT_CODE:$($result.RUSTC_VERSION_EXIT_CODE)"
+    Write-Output "STDOUT:$($result.RUSTC_VERSION_STDOUT)"
+    Write-Output "RUSTC_VERSION_EXIT_CODE_STATUS:$($result.RUSTC_VERSION_EXIT_CODE_STATUS)"
+    Write-Output "RUSTC_VERSION_EXIT_CODE:$($result.RUSTC_VERSION_EXIT_CODE)"
+    Write-Output "RUSTC_VERSION_STDOUT:$($result.RUSTC_VERSION_STDOUT)"
+    Write-Output 'RUSTC_COMPILE'
+    Write-Output "RUSTC_EXIT_CODE_TYPE:$($result.RUSTC_EXIT_CODE_TYPE)"
+    Write-Output "RUSTC_EXIT_CODE_STATUS:$($result.RUSTC_EXIT_CODE_STATUS)"
+    Write-Output "RUSTC_EXIT_CODE:$($result.RUSTC_EXIT_CODE)"
+    Write-Output "RUSTC_EXECUTABLE_PRESENT:$($result.RUSTC_EXECUTABLE_PRESENT)"
+    Write-Output "RUSTC_EXECUTABLE_SHA256:$($result.RUSTC_EXECUTABLE_SHA256)"
     Write-NonClaims
     exit 0
 }
