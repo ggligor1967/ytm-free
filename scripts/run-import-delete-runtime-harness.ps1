@@ -2,7 +2,8 @@
 param(
     [switch]$ContractValidateOnly,
     [switch]$PreflightOnly,
-    [switch]$LaunchPlanValidateOnly
+    [switch]$LaunchPlanValidateOnly,
+    [switch]$MonitorAndFinalizationValidateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -13,6 +14,10 @@ $ExpectedBranch = 'feat/import-delete-runtime-harness'
 $EmbeddedPort = 4447
 $StreamPort = 3456
 $Script:OwnedProcessIdentities = @()
+$Script:OwnedProcessObjects = [Collections.Generic.List[object]]::new()
+$Script:LogCaptures = [Collections.Generic.List[object]]::new()
+$Script:ActiveEvidenceRoot = $null
+$Script:ActiveRuntimeRoot = $null
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $HarnessPath = Join-Path $RepoRoot 'scripts\run-import-delete-runtime-harness.ps1'
@@ -90,6 +95,11 @@ $StopConditions = @(
     'WDIO-LAUNCH-FILEPATH-TYPE-MISMATCH',
     'WDIO-LAUNCH-FILEPATH-EMPTY',
     'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH',
+    'WDIO-MONITOR-FAILURE',
+    'POWERSHELL-AUTOMATIC-VARIABLE-COLLISION',
+    'CLEAR-PERSONAL-PATH-IN-EVIDENCE',
+    'EVIDENCE-FILE-UNREADABLE',
+    'RUNTIME-FILE-LOCK-PERSISTED',
     'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
     'FAILURE-FINALIZATION-INCOMPLETE'
 )
@@ -438,6 +448,60 @@ function Assert-ContainsAll {
     }
 }
 
+function Get-AutomaticVariableWriteCollisions {
+    $forbiddenNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($forbiddenName in @(
+        'PID', 'HOME', 'Host', 'Error', 'Args', 'Input', 'Matches', 'PSItem', 'This',
+        'PSScriptRoot', 'PSCommandPath', 'MyInvocation', 'LASTEXITCODE', 'NestedPromptLevel',
+        'StackTrace', 'ExecutionContext', 'ShellId'
+    )) {
+        $null = $forbiddenNames.Add($forbiddenName)
+    }
+
+    $parserTokens = $null
+    $parserErrors = $null
+    $scriptAst = [Management.Automation.Language.Parser]::ParseFile(
+        $HarnessPath,
+        [ref]$parserTokens,
+        [ref]$parserErrors
+    )
+    if ($parserErrors.Count -ne 0) {
+        throw 'POWERSHELL-PARSE-FAILED-DURING-AUTOMATIC-VARIABLE-AUDIT'
+    }
+
+    $writeVariables = @($scriptAst.FindAll({
+        param($astNode)
+        if ($astNode -isnot [Management.Automation.Language.VariableExpressionAst]) { return $false }
+        $parentAst = $astNode.Parent
+        if ($parentAst -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $parentAst.Left -eq $astNode) { return $true }
+        if ($parentAst -is [Management.Automation.Language.ParameterAst] -and
+            $parentAst.Name -eq $astNode) { return $true }
+        if ($parentAst -is [Management.Automation.Language.ForEachStatementAst] -and
+            $parentAst.Variable -eq $astNode) { return $true }
+        if ($parentAst -is [Management.Automation.Language.UnaryExpressionAst] -and
+            $parentAst.Child -eq $astNode -and
+            $parentAst.TokenKind -in @(
+                [Management.Automation.Language.TokenKind]::PlusPlus,
+                [Management.Automation.Language.TokenKind]::MinusMinus
+            )) { return $true }
+        return $false
+    }, $true))
+
+    $collisions = @()
+    foreach ($writeVariable in $writeVariables) {
+        $variableName = $writeVariable.VariablePath.UserPath
+        if ($forbiddenNames.Contains($variableName)) {
+            $collisions += [ordered]@{
+                variable_name = $variableName
+                line = $writeVariable.Extent.StartLineNumber
+                column = $writeVariable.Extent.StartColumnNumber
+            }
+        }
+    }
+    return @($collisions | Sort-Object line, column)
+}
+
 function Invoke-ContractValidation {
     $requiredFiles = @(
         $HarnessPath,
@@ -540,7 +604,12 @@ function Invoke-ContractValidation {
         'final-evidence-inventory.json',
         'final-manifest.json',
         'final_evidence_inventory_sha256',
-        'SYNTHETIC-WDIO-PRELAUNCH-FAILURE'
+        'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
+        'MonitorAndFinalizationValidateOnly',
+        'WDIO-MONITOR-FAILURE',
+        'CLEAR-PERSONAL-PATH-IN-EVIDENCE',
+        'EVIDENCE-FILE-UNREADABLE',
+        'RUNTIME-FILE-LOCK-PERSISTED'
     )
 
     $validationToken = 'contractvalidation-00000000'
@@ -564,6 +633,11 @@ function Invoke-ContractValidation {
         throw 'HARNESS-DELTA-SCOPE-MISMATCH'
     }
     $gitIdentity = Get-HarnessGitIdentity
+    $automaticVariableCollisions = @(Get-AutomaticVariableWriteCollisions)
+    if ($automaticVariableCollisions.Count -ne 0) {
+        throw ('POWERSHELL-AUTOMATIC-VARIABLE-COLLISION: ' +
+            (($automaticVariableCollisions | ConvertTo-Json -Compress) -join ''))
+    }
     $safeTreeValidation = Invoke-SafeTreeContractValidation
     $syntheticFailureValidation = Invoke-SyntheticFailureFinalizationValidation
     return [ordered]@{
@@ -586,6 +660,7 @@ function Invoke-ContractValidation {
         MERGE_BASE_MATCH = 'PASS'
         NO_HARNESS_MERGE_COMMITS = 'PASS'
         HARNESS_DELTA_SCOPE = 'PASS'
+        AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT = $automaticVariableCollisions.Count
         OLLAMA_STATE_SCHEMA_CONTRACT = 'PASS'
         SAFE_TREE_NORMAL_CASE = $safeTreeValidation.SAFE_TREE_NORMAL_CASE
         SNAPSHOT_REPARSE_REJECTION = $safeTreeValidation.SNAPSHOT_REPARSE_REJECTION
@@ -834,20 +909,153 @@ function Capture-PrivacySnapshots {
     return $result
 }
 
-function ConvertTo-RedactedText {
-    param([AllowNull()][object]$Value)
-    if ($null -eq $Value) { return $null }
-    $text = [string]$Value
-    $replacements = @(
-        [pscustomobject]@{ value = $RepoRoot; replacement = '%REPO%' },
-        [pscustomobject]@{ value = $env:USERPROFILE; replacement = '%USERPROFILE%' },
-        [pscustomobject]@{ value = $env:TEMP; replacement = '%TEMP%' }
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.value) } |
-        Sort-Object { $_.value.Length } -Descending
-    foreach ($replacement in $replacements) {
-        $text = $text.Replace([string]$replacement.value, [string]$replacement.replacement)
+function Get-EvidenceRedactionRules {
+    param(
+        [AllowNull()][string]$EvidenceRoot = $Script:ActiveEvidenceRoot,
+        [AllowNull()][string]$RuntimeRoot = $Script:ActiveRuntimeRoot
+    )
+
+    $candidates = @(
+        [pscustomobject]@{ category = 'EVIDENCE_ROOT'; value = $EvidenceRoot; replacement = '%EVIDENCE_ROOT%' },
+        [pscustomobject]@{ category = 'RUNTIME_ROOT'; value = $RuntimeRoot; replacement = '%RUNTIME_ROOT%' },
+        [pscustomobject]@{ category = 'REPOSITORY_ROOT'; value = $RepoRoot; replacement = '%REPO%' },
+        [pscustomobject]@{ category = 'LOCALAPPDATA'; value = $env:LOCALAPPDATA; replacement = '%LOCALAPPDATA%' },
+        [pscustomobject]@{ category = 'APPDATA'; value = $env:APPDATA; replacement = '%APPDATA%' },
+        [pscustomobject]@{ category = 'TEMP'; value = $env:TEMP; replacement = '%TEMP%' },
+        [pscustomobject]@{ category = 'USERPROFILE'; value = $env:USERPROFILE; replacement = '%USERPROFILE%' }
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.value) } |
+        Sort-Object { ([string]$_.value).Length } -Descending
+
+    $seenValues = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $rules = @()
+    foreach ($candidate in $candidates) {
+        $sourceValue = [string]$candidate.value
+        if (-not $seenValues.Add($sourceValue)) { continue }
+        $variants = @(
+            $sourceValue,
+            $sourceValue.Replace('\', '/'),
+            $sourceValue.Replace('\', '\\')
+        ) | Sort-Object Length -Descending -Unique
+        foreach ($variant in $variants) {
+            if ([string]::IsNullOrWhiteSpace($variant)) { continue }
+            $rules += [pscustomobject]@{
+                category = [string]$candidate.category
+                value = [string]$variant
+                replacement = [string]$candidate.replacement
+            }
+        }
     }
-    return $text
+    return @($rules | Sort-Object { $_.value.Length } -Descending)
+}
+
+function ConvertTo-RedactedText {
+    param(
+        [AllowNull()][object]$Value,
+        [AllowNull()][string]$EvidenceRoot = $Script:ActiveEvidenceRoot,
+        [AllowNull()][string]$RuntimeRoot = $Script:ActiveRuntimeRoot
+    )
+    if ($null -eq $Value) { return $null }
+    $redactedText = [string]$Value
+    foreach ($redactionRule in @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)) {
+        $redactedText = [regex]::Replace(
+            $redactedText,
+            [regex]::Escape($redactionRule.value),
+            $redactionRule.replacement,
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+    return $redactedText
+}
+
+function Test-RedactedStructuredText {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+    $extension = [IO.Path]::GetExtension($LiteralPath)
+    if ($extension -ieq '.json') {
+        $null = $Text | ConvertFrom-Json
+    }
+    elseif ($extension -ieq '.jsonl') {
+        foreach ($jsonLine in @($Text -split "`r?`n" | Where-Object { $_.Trim() })) {
+            $null = $jsonLine | ConvertFrom-Json
+        }
+    }
+}
+
+function Invoke-EvidenceSanitization {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+
+    $supportedExtensions = @('.json', '.jsonl', '.log', '.txt', '.csv')
+    $unreadableFiles = @()
+    foreach ($evidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force | Sort-Object FullName)) {
+        if ([IO.Path]::GetExtension($evidenceFile.Name) -notin $supportedExtensions) { continue }
+        try {
+            $originalText = [IO.File]::ReadAllText($evidenceFile.FullName)
+            $sanitizedText = ConvertTo-RedactedText -Value $originalText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+            Test-RedactedStructuredText -LiteralPath $evidenceFile.FullName -Text $sanitizedText
+            if ($sanitizedText -cne $originalText) {
+                Write-Utf8NoBom -LiteralPath $evidenceFile.FullName -Value $sanitizedText
+            }
+        }
+        catch {
+            $unreadableFiles += [ordered]@{
+                relative_file = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $evidenceFile.FullName).Replace('\', '/')
+                error_code = 'EVIDENCE-FILE-UNREADABLE'
+            }
+        }
+    }
+
+    $clearPathMatches = @()
+    $redactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)
+    foreach ($evidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force | Sort-Object FullName)) {
+        if ([IO.Path]::GetExtension($evidenceFile.Name) -notin $supportedExtensions) { continue }
+        try {
+            $currentText = [IO.File]::ReadAllText($evidenceFile.FullName)
+            foreach ($redactionRule in $redactionRules) {
+                $occurrenceCount = [regex]::Matches(
+                    $currentText,
+                    [regex]::Escape($redactionRule.value),
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+                ).Count
+                if ($occurrenceCount -gt 0) {
+                    $clearPathMatches += [ordered]@{
+                        relative_file = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $evidenceFile.FullName).Replace('\', '/')
+                        token_category = $redactionRule.category
+                        occurrence_count = $occurrenceCount
+                    }
+                }
+            }
+        }
+        catch {
+            if (-not ($unreadableFiles | Where-Object { $_.relative_file -eq
+                (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $evidenceFile.FullName).Replace('\', '/') })) {
+                $unreadableFiles += [ordered]@{
+                    relative_file = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $evidenceFile.FullName).Replace('\', '/')
+                    error_code = 'EVIDENCE-FILE-UNREADABLE'
+                }
+            }
+        }
+    }
+
+    $clearPathMatchCount = 0
+    foreach ($clearPathMatch in $clearPathMatches) {
+        $clearPathMatchCount += [int]$clearPathMatch.occurrence_count
+    }
+    Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'clear-path-scan.json') -Value ([ordered]@{
+        schema_version = 1
+        clear_personal_path_match_count = $clearPathMatchCount
+        matches = $clearPathMatches
+        unreadable_files = $unreadableFiles
+    })
+    return [ordered]@{
+        clear_personal_path_match_count = [int]$clearPathMatchCount
+        matches = $clearPathMatches
+        unreadable_files = $unreadableFiles
+    }
 }
 
 function New-PrimaryFailureRecord {
@@ -857,9 +1065,8 @@ function New-PrimaryFailureRecord {
     )
     $message = [string]$ErrorRecord.Exception.Message
     $failureCode = 'UNCLASSIFIED-HARNESS-FAILURE'
-    if ($message -match '^([A-Z0-9][A-Z0-9_-]+)') {
-        $failureCode = $Matches[1]
-    }
+    $failureCodeMatch = [regex]::Match($message, '^([A-Z0-9][A-Z0-9_-]+)')
+    if ($failureCodeMatch.Success) { $failureCode = $failureCodeMatch.Groups[1].Value }
     return [ordered]@{
         failure_code = $failureCode
         failure_phase = $Phase
@@ -906,15 +1113,90 @@ function Invoke-ExternalCaptured {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][string]$StdoutPath,
-        [Parameter(Mandatory = $true)][string]$StderrPath
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$LogName
     )
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -WindowStyle Hidden -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        throw "External command failed ($($process.ExitCode)): $FilePath $($Arguments -join ' ')"
+    $rawLogRoot = Join-Path $RuntimeRoot 'raw-logs\external'
+    $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
+    $captureRecord = [pscustomobject][ordered]@{
+        role = $LogName
+        raw_stdout_path = Join-Path $rawLogRoot "$LogName.stdout.raw.log"
+        raw_stderr_path = Join-Path $rawLogRoot "$LogName.stderr.raw.log"
+        evidence_stdout_path = Join-Path $EvidenceRoot "$LogName.stdout.log"
+        evidence_stderr_path = Join-Path $EvidenceRoot "$LogName.stderr.log"
+        sanitized_logs_created = $false
+        raw_logs_removed = $false
     }
-    return $process.ExitCode
+    $Script:LogCaptures.Add($captureRecord) | Out-Null
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
+        -WindowStyle Hidden -PassThru
+    try {
+        $process.WaitForExit()
+        $externalExitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+    Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+    if ($externalExitCode -ne 0) {
+        throw "External command failed ($externalExitCode): $FilePath $($Arguments -join ' ')"
+    }
+    return $externalExitCode
+}
+
+function Test-FileExclusiveAccess {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) { return $true }
+    $exclusiveStream = $null
+    try {
+        $exclusiveStream = [IO.File]::Open(
+            $LiteralPath,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None
+        )
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $exclusiveStream) { $exclusiveStream.Dispose() }
+    }
+}
+
+function Publish-SanitizedLogCapture {
+    param(
+        [Parameter(Mandatory = $true)]$CaptureRecord,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+    if ($CaptureRecord.sanitized_logs_created -and $CaptureRecord.raw_logs_removed) { return }
+    foreach ($rawLogPath in @($CaptureRecord.raw_stdout_path, $CaptureRecord.raw_stderr_path)) {
+        if (-not (Test-FileExclusiveAccess -LiteralPath $rawLogPath)) {
+            throw 'RUNTIME-FILE-LOCK-PERSISTED: raw log handle is not released'
+        }
+    }
+    foreach ($logPair in @(
+        [pscustomobject]@{ raw = $CaptureRecord.raw_stdout_path; sanitized = $CaptureRecord.evidence_stdout_path },
+        [pscustomobject]@{ raw = $CaptureRecord.raw_stderr_path; sanitized = $CaptureRecord.evidence_stderr_path }
+    )) {
+        $rawText = if (Test-Path -LiteralPath $logPair.raw -PathType Leaf) {
+            [IO.File]::ReadAllText($logPair.raw)
+        }
+        else { '' }
+        $sanitizedText = ConvertTo-RedactedText -Value $rawText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+        Write-Utf8NoBom -LiteralPath $logPair.sanitized -Value $sanitizedText
+    }
+    $CaptureRecord.sanitized_logs_created = $true
+    foreach ($rawLogPath in @($CaptureRecord.raw_stdout_path, $CaptureRecord.raw_stderr_path)) {
+        if (Test-Path -LiteralPath $rawLogPath -PathType Leaf) {
+            Remove-Item -LiteralPath $rawLogPath -Force
+        }
+    }
+    $CaptureRecord.raw_logs_removed = $true
 }
 
 function Get-ProcessTable {
@@ -963,6 +1245,273 @@ function Get-ProcessIdentity {
     }
 }
 
+function Register-OwnedProcessIdentity {
+    param([Parameter(Mandatory = $true)]$Identity)
+    $alreadyRegistered = @($Script:OwnedProcessIdentities | Where-Object {
+        $_.process_id -eq $Identity.process_id -and $_.creation_date -eq $Identity.creation_date
+    }).Count -gt 0
+    if (-not $alreadyRegistered) { $Script:OwnedProcessIdentities += $Identity }
+}
+
+function Get-OwnedProcessTreeSnapshot {
+    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+    $processTable = Get-ProcessTable
+    $snapshot = @()
+    foreach ($candidateProcessId in @($processTable.Keys)) {
+        if (-not (Test-ProcessDescendsFrom -ProcessId $candidateProcessId -RootProcessId $RootProcessId `
+            -ProcessTable $processTable)) { continue }
+        $identity = Get-ProcessIdentity -CimProcess $processTable[$candidateProcessId]
+        $depth = 0
+        $ancestorProcessId = [int]$candidateProcessId
+        $seenAncestors = @{}
+        while ($ancestorProcessId -ne $RootProcessId -and $ancestorProcessId -gt 0 -and
+            -not $seenAncestors.ContainsKey($ancestorProcessId) -and $processTable.ContainsKey($ancestorProcessId)) {
+            $seenAncestors[$ancestorProcessId] = $true
+            $ancestorProcessId = [int]$processTable[$ancestorProcessId].ParentProcessId
+            $depth++
+        }
+        $identity['depth'] = $depth
+        $snapshot += $identity
+        Register-OwnedProcessIdentity -Identity $identity
+    }
+    return @($snapshot | Sort-Object depth, process_id)
+}
+
+function Register-OwnedProcessObject {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][string]$Role,
+        [Parameter(Mandatory = $true)]$CaptureRecord
+    )
+    $record = [pscustomobject][ordered]@{
+        process_object = $Process
+        process_id = [int]$Process.Id
+        role = $Role
+        capture_record = $CaptureRecord
+        wait_completed = $false
+        disposed = $false
+    }
+    $Script:OwnedProcessObjects.Add($record) | Out-Null
+    return $record
+}
+
+function Stop-OwnedProcessIdentity {
+    param([Parameter(Mandatory = $true)]$Identity)
+    $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($Identity.process_id)" -ErrorAction SilentlyContinue
+    if ($null -eq $currentProcess) {
+        return [ordered]@{ process_id = [int]$Identity.process_id; stop_status = 'ALREADY_EXITED' }
+    }
+    $currentIdentity = Get-ProcessIdentity -CimProcess $currentProcess
+    if (-not [string]::Equals(
+            [string]$currentIdentity.executable_path,
+            [string]$Identity.executable_path,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $currentIdentity.creation_date -ne $Identity.creation_date) {
+        throw "Owned PID identity changed: $($Identity.process_id)"
+    }
+    Stop-Process -Id $Identity.process_id -Force -ErrorAction Stop
+    return [ordered]@{ process_id = [int]$Identity.process_id; stop_status = 'STOP_REQUESTED' }
+}
+
+function Invoke-OwnedProcessShutdown {
+    param(
+        [Parameter(Mandatory = $true)]$ProcessIdentities,
+        [Parameter(Mandatory = $true)]$ProcessObjectRecords,
+        [Parameter(Mandatory = $true)]$LogCaptures,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [int]$TimeoutSeconds = 10,
+        [bool]$StopRunning = $true
+    )
+
+    $finalSnapshot = @()
+    foreach ($processObjectRecord in @($ProcessObjectRecords)) {
+        $finalSnapshot += @(Get-OwnedProcessTreeSnapshot -RootProcessId ([int]$processObjectRecord.process_id))
+    }
+    $knownIdentities = @($ProcessIdentities) + @($Script:OwnedProcessIdentities) + @($finalSnapshot)
+    $uniqueIdentityMap = [ordered]@{}
+    foreach ($knownIdentity in $knownIdentities) {
+        $identityKey = '{0}|{1}' -f ([int]$knownIdentity.process_id), ([string]$knownIdentity.creation_date)
+        if (-not $uniqueIdentityMap.Contains($identityKey)) {
+            $uniqueIdentityMap[$identityKey] = $knownIdentity
+        }
+    }
+    $uniqueIdentities = @($uniqueIdentityMap.Values | Sort-Object process_id, creation_date)
+    Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "owned-process-final-snapshot-$Stage.json") -Value ([ordered]@{
+        captured_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        observed_final_tree = $finalSnapshot
+        known_owned_identities = $uniqueIdentities
+    })
+
+    $identityProcessHandles = @()
+    foreach ($ownedIdentity in $uniqueIdentities) {
+        $identityHandleRecord = [pscustomobject][ordered]@{
+            process_id = [int]$ownedIdentity.process_id
+            process_object = $null
+            identity_verified = $false
+            wait_completed = $false
+            disposed = $false
+        }
+        try {
+            $identityCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($ownedIdentity.process_id)" -ErrorAction SilentlyContinue
+            if ($null -eq $identityCim) {
+                $identityHandleRecord.identity_verified = $true
+                $identityHandleRecord.wait_completed = $true
+                $identityHandleRecord.disposed = $true
+            }
+            else {
+                $currentIdentity = Get-ProcessIdentity -CimProcess $identityCim
+                $identityMatches = [string]::Equals(
+                    [string]$currentIdentity.executable_path,
+                    [string]$ownedIdentity.executable_path,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and $currentIdentity.creation_date -eq $ownedIdentity.creation_date
+                if ($identityMatches) {
+                    $identityHandleRecord.identity_verified = $true
+                    $identityHandleRecord.process_object = [Diagnostics.Process]::GetProcessById([int]$ownedIdentity.process_id)
+                }
+            }
+        }
+        catch { }
+        $identityProcessHandles += $identityHandleRecord
+    }
+
+    $stopResults = @()
+    if ($StopRunning) {
+        foreach ($ownedIdentity in @($uniqueIdentities | Sort-Object `
+            @{ Expression = {
+                    $depthProperty = $_.PSObject.Properties['depth']
+                    if ($null -ne $depthProperty) { [int]$depthProperty.Value } else { 0 }
+                }; Descending = $true }, `
+            @{ Expression = { [int]$_.process_id }; Descending = $true })) {
+            try {
+                $stopResults += Stop-OwnedProcessIdentity -Identity $ownedIdentity
+            }
+            catch {
+                $stopResults += [ordered]@{
+                    process_id = [int]$ownedIdentity.process_id
+                    stop_status = 'FAILED'
+                    error_redacted = ConvertTo-RedactedText -Value $_.Exception.Message
+                }
+            }
+        }
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $waitResults = @()
+    foreach ($ownedIdentity in $uniqueIdentities) {
+        while ([DateTime]::UtcNow -lt $deadline -and
+            $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($ownedIdentity.process_id)" -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 100
+        }
+        $stillPresent = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($ownedIdentity.process_id)" -ErrorAction SilentlyContinue)
+        $waitResults += [ordered]@{
+            process_id = [int]$ownedIdentity.process_id
+            wait_status = if ($stillPresent) { 'TIMEOUT' } else { 'EXITED' }
+        }
+    }
+
+    $processObjectResults = @()
+    foreach ($processObjectRecord in @($ProcessObjectRecords)) {
+        if (-not $processObjectRecord.disposed) {
+            try {
+                $processObject = $processObjectRecord.process_object
+                $processObject.Refresh()
+                if (-not $processObject.HasExited) {
+                    $remainingMilliseconds = [Math]::Max(0, [int]([DateTime]::UtcNow.Subtract($deadline).TotalMilliseconds * -1))
+                    $processObjectRecord.wait_completed = $processObject.WaitForExit($remainingMilliseconds)
+                }
+                else {
+                    $processObject.WaitForExit()
+                    $processObjectRecord.wait_completed = $true
+                }
+                $processObject.Dispose()
+                $processObjectRecord.disposed = $true
+            }
+            catch {
+                $processObjectRecord.wait_completed = $false
+            }
+        }
+        $processObjectResults += [ordered]@{
+            process_id = [int]$processObjectRecord.process_id
+            role = [string]$processObjectRecord.role
+            wait_completed = [bool]$processObjectRecord.wait_completed
+            disposed = [bool]$processObjectRecord.disposed
+        }
+    }
+
+    $identityWaitResults = @()
+    foreach ($identityHandleRecord in $identityProcessHandles) {
+        if ($null -ne $identityHandleRecord.process_object) {
+            try {
+                $identityProcessObject = $identityHandleRecord.process_object
+                $identityProcessObject.Refresh()
+                if ($identityProcessObject.HasExited) {
+                    $identityProcessObject.WaitForExit()
+                    $identityHandleRecord.wait_completed = $true
+                }
+                else {
+                    $remainingMilliseconds = [Math]::Max(
+                        0,
+                        [int]($deadline.Subtract([DateTime]::UtcNow).TotalMilliseconds)
+                    )
+                    $identityHandleRecord.wait_completed = $identityProcessObject.WaitForExit($remainingMilliseconds)
+                }
+            }
+            catch {
+                $identityHandleRecord.wait_completed = $false
+            }
+            finally {
+                try {
+                    $identityHandleRecord.process_object.Dispose()
+                    $identityHandleRecord.disposed = $true
+                }
+                catch {
+                    $identityHandleRecord.disposed = $false
+                }
+            }
+        }
+        $identityWaitResults += [ordered]@{
+            process_id = [int]$identityHandleRecord.process_id
+            identity_verified = [bool]$identityHandleRecord.identity_verified
+            wait_completed = [bool]$identityHandleRecord.wait_completed
+            disposed = [bool]$identityHandleRecord.disposed
+        }
+    }
+
+    $logHandleResults = @()
+    foreach ($captureRecord in @($LogCaptures)) {
+        $stdoutReleased = Test-FileExclusiveAccess -LiteralPath $captureRecord.raw_stdout_path
+        $stderrReleased = Test-FileExclusiveAccess -LiteralPath $captureRecord.raw_stderr_path
+        $logHandleResults += [ordered]@{
+            role = [string]$captureRecord.role
+            stdout_released = [bool]$stdoutReleased
+            stderr_released = [bool]$stderrReleased
+            sanitized_logs_created = [bool]$captureRecord.sanitized_logs_created
+            raw_logs_removed = [bool]$captureRecord.raw_logs_removed
+        }
+    }
+
+    return [ordered]@{
+        final_snapshot = $finalSnapshot
+        stop_results = $stopResults
+        wait_results = $waitResults
+        identity_wait_results = $identityWaitResults
+        process_object_results = $processObjectResults
+        log_handle_results = $logHandleResults
+        all_processes_exited = @($waitResults | Where-Object { $_.wait_status -ne 'EXITED' }).Count -eq 0
+        all_process_waits_completed = @($processObjectResults | Where-Object { -not $_.wait_completed }).Count -eq 0 -and
+            @($identityWaitResults | Where-Object { -not $_.identity_verified -or -not $_.wait_completed }).Count -eq 0
+        all_process_objects_disposed = @($processObjectResults | Where-Object { -not $_.disposed }).Count -eq 0 -and
+            @($identityWaitResults | Where-Object { -not $_.disposed }).Count -eq 0
+        all_log_handles_released = @($logHandleResults | Where-Object { -not $_.stdout_released -or -not $_.stderr_released }).Count -eq 0
+        all_raw_logs_removed = @($logHandleResults | Where-Object { -not $_.raw_logs_removed }).Count -eq 0
+        all_sanitized_logs_created = @($logHandleResults | Where-Object { -not $_.sanitized_logs_created }).Count -eq 0
+    }
+}
+
 function Assert-WebViewBrowserRoot {
     param(
         [Parameter(Mandatory = $true)]$OwnedProcesses,
@@ -995,38 +1544,59 @@ function Monitor-WdioPhase {
         [Parameter(Mandatory = $true)][string]$Phase,
         [Parameter(Mandatory = $true)][string]$WebViewDataDir
     )
-    $ownedByPid = @{}
+    $ownedByProcessId = @{}
     $connections = @()
-    while (-not $Process.HasExited) {
-        $Process.Refresh()
-        $table = Get-ProcessTable
-        foreach ($pid in @($table.Keys)) {
-            if (Test-ProcessDescendsFrom -ProcessId $pid -RootProcessId $Process.Id -ProcessTable $table) {
-                $identity = Get-ProcessIdentity -CimProcess $table[$pid]
-                $ownedByPid[$pid] = $identity
-                $Script:OwnedProcessIdentities += $identity
-            }
-        }
-        $ownedPids = @($ownedByPid.Keys | ForEach-Object { [int]$_ })
-        if ($ownedPids.Count -gt 0) {
-            foreach ($connection in @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
-                $_.OwningProcess -in $ownedPids -and $_.State -ne 'Listen'
-            })) {
-                $connections += [ordered]@{
-                    observed_at_utc = (Get-Date).ToUniversalTime().ToString('o')
-                    owning_process = [int]$connection.OwningProcess
-                    local_address = [string]$connection.LocalAddress
-                    local_port = [int]$connection.LocalPort
-                    remote_address = [string]$connection.RemoteAddress
-                    remote_port = [int]$connection.RemotePort
-                    state = [string]$connection.State
+    try {
+        while (-not $Process.HasExited) {
+            $Process.Refresh()
+            $processTable = Get-ProcessTable
+            foreach ($ownedProcessId in @($processTable.Keys)) {
+                if (Test-ProcessDescendsFrom -ProcessId $ownedProcessId -RootProcessId $Process.Id `
+                    -ProcessTable $processTable) {
+                    $identity = Get-ProcessIdentity -CimProcess $processTable[$ownedProcessId]
+                    $ownedByProcessId[$ownedProcessId] = $identity
+                    Register-OwnedProcessIdentity -Identity $identity
                 }
             }
+            $ownedProcessIds = @($ownedByProcessId.Keys | ForEach-Object { [int]$_ })
+            if ($ownedProcessIds.Count -gt 0) {
+                foreach ($connection in @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+                    $_.OwningProcess -in $ownedProcessIds -and $_.State -ne 'Listen'
+                })) {
+                    $connections += [ordered]@{
+                        observed_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+                        owning_process = [int]$connection.OwningProcess
+                        local_address = [string]$connection.LocalAddress
+                        local_port = [int]$connection.LocalPort
+                        remote_address = [string]$connection.RemoteAddress
+                        remote_port = [int]$connection.RemotePort
+                        state = [string]$connection.State
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 200
         }
-        Start-Sleep -Milliseconds 200
+    }
+    catch {
+        $monitorMessage = ConvertTo-RedactedText -Value $_.Exception.Message
+        $monitorAbort = $null
+        try {
+            $monitorAbort = Invoke-OwnedProcessShutdown -ProcessIdentities @($Script:OwnedProcessIdentities) `
+                -ProcessObjectRecords @($Script:OwnedProcessObjects) -LogCaptures @($Script:LogCaptures) `
+                -EvidenceRoot $EvidenceRoot `
+                -RuntimeRoot $Script:ActiveRuntimeRoot -Stage "monitor-abort-$Phase" -StopRunning $true
+            Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "monitor-abort-$Phase.json") -Value $monitorAbort
+        }
+        catch {
+            Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "monitor-abort-$Phase.json") -Value ([ordered]@{
+                status = 'FAILED'
+                error_redacted = ConvertTo-RedactedText -Value $_.Exception.Message
+            })
+        }
+        throw "WDIO-MONITOR-FAILURE: $monitorMessage"
     }
     $Process.WaitForExit()
-    $owned = @($ownedByPid.Values | Sort-Object process_id -Unique)
+    $owned = @($ownedByProcessId.Values | Sort-Object process_id)
     Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "owned-processes-$Phase.json") -Value $owned
     Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "owned-tcp-$Phase.json") -Value $connections
 
@@ -1135,7 +1705,8 @@ function Start-WdioPhase {
     param(
         [Parameter(Mandatory = $true)]$LaunchPlan,
         [Parameter(Mandatory = $true)][string]$PhaseEvidenceRoot,
-        [Parameter(Mandatory = $true)][string]$WebViewDataDir
+        [Parameter(Mandatory = $true)][string]$WebViewDataDir,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
     )
 
     $FilePath = $LaunchPlan.FilePath
@@ -1169,26 +1740,54 @@ function Start-WdioPhase {
 
     $env:IMPORT_DELETE_PHASE = $Phase
     $env:EVIDENCE_ROOT = $PhaseEvidenceRoot
-    $stdout = Join-Path $PhaseEvidenceRoot 'wdio.stdout.log'
-    $stderr = Join-Path $PhaseEvidenceRoot 'wdio.stderr.log'
-    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
-    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
-    $Script:OwnedProcessIdentities += Get-ProcessIdentity -CimProcess $cim
-    return Monitor-WdioPhase -Process $process -EvidenceRoot $PhaseEvidenceRoot -Phase $Phase -WebViewDataDir $WebViewDataDir
-}
-
-function Stop-OwnedProcessIdentity {
-    param([Parameter(Mandatory = $true)]$Identity)
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($Identity.process_id)" -ErrorAction SilentlyContinue
-    if ($null -eq $current) { return }
-    $currentIdentity = Get-ProcessIdentity -CimProcess $current
-    if ($currentIdentity.executable_path -ne $Identity.executable_path -or
-        $currentIdentity.creation_date -ne $Identity.creation_date) {
-        throw "Owned PID identity changed: $($Identity.process_id)"
+    $rawLogRoot = Join-Path $RuntimeRoot "raw-logs\$Phase"
+    $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
+    $captureRecord = [pscustomobject][ordered]@{
+        role = "wdio-$Phase"
+        raw_stdout_path = Join-Path $rawLogRoot 'wdio.stdout.raw.log'
+        raw_stderr_path = Join-Path $rawLogRoot 'wdio.stderr.raw.log'
+        evidence_stdout_path = Join-Path $PhaseEvidenceRoot 'wdio.stdout.log'
+        evidence_stderr_path = Join-Path $PhaseEvidenceRoot 'wdio.stderr.log'
+        sanitized_logs_created = $false
+        raw_logs_removed = $false
     }
-    Stop-Process -Id $Identity.process_id -Force -ErrorAction Stop
-    Wait-Process -Id $Identity.process_id -Timeout 10 -ErrorAction SilentlyContinue
+    $Script:LogCaptures.Add($captureRecord) | Out-Null
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
+        -WindowStyle Hidden -PassThru
+    $null = Register-OwnedProcessObject -Process $process -Role "wdio-$Phase" -CaptureRecord $captureRecord
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+    if ($null -eq $cim) { throw 'WDIO-MONITOR-FAILURE: launcher identity unavailable immediately after start' }
+    Register-OwnedProcessIdentity -Identity (Get-ProcessIdentity -CimProcess $cim)
+
+    $phaseResult = $null
+    $phaseFailureRecord = $null
+    $lifecycleFailureRecord = $null
+    try {
+        $phaseResult = Monitor-WdioPhase -Process $process -EvidenceRoot $PhaseEvidenceRoot `
+            -Phase $Phase -WebViewDataDir $WebViewDataDir
+    }
+    catch {
+        $phaseFailureRecord = $_
+    }
+    finally {
+        try {
+            $phaseLifecycle = Invoke-OwnedProcessShutdown -ProcessIdentities @($Script:OwnedProcessIdentities) `
+                -ProcessObjectRecords @($Script:OwnedProcessObjects) -LogCaptures @($Script:LogCaptures) `
+                -EvidenceRoot $PhaseEvidenceRoot `
+                -RuntimeRoot $RuntimeRoot -Stage "phase-end-$Phase" -StopRunning $true
+            Write-JsonFile -LiteralPath (Join-Path $PhaseEvidenceRoot "owned-process-lifecycle-$Phase.json") -Value $phaseLifecycle
+        }
+        catch {
+            $lifecycleFailureRecord = $_
+        }
+    }
+    if ($null -ne $phaseFailureRecord) { throw $phaseFailureRecord }
+    if ($null -ne $lifecycleFailureRecord) {
+        throw ('WDIO-MONITOR-FAILURE: lifecycle finalization failed: ' +
+            (ConvertTo-RedactedText -Value $lifecycleFailureRecord.Exception.Message))
+    }
+    return $phaseResult
 }
 
 function Set-ProcessEnvironment {
@@ -1208,11 +1807,11 @@ function Restore-ProcessEnvironment {
         try {
             [Environment]::SetEnvironmentVariable($name, $Previous[$name], 'Process')
             $current = [Environment]::GetEnvironmentVariable($name, 'Process')
-            $matches = if ($null -eq $Previous[$name]) { $null -eq $current } else { $current -ceq $Previous[$name] }
+            $restoredValueMatches = if ($null -eq $Previous[$name]) { $null -eq $current } else { $current -ceq $Previous[$name] }
             $results += [ordered]@{
                 name = [string]$name
-                restored = [bool]$matches
-                status = if ($matches) { 'PASS' } else { 'FAILED' }
+                restored = [bool]$restoredValueMatches
+                status = if ($restoredValueMatches) { 'PASS' } else { 'FAILED' }
             }
         }
         catch {
@@ -1242,9 +1841,67 @@ function Invoke-LogicalSnapshotFromHelper {
     Write-Utf8NoBom -LiteralPath $OutputPath -Value ($json + [Environment]::NewLine)
 }
 
+function Test-SqliteReadOnlyOpenClose {
+    param([Parameter(Mandatory = $true)][string]$DatabasePath)
+    if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
+        return [ordered]@{ status = 'NOT_PRESENT'; success = $true }
+    }
+    $probeCode = @'
+import pathlib, sqlite3, sys
+p = pathlib.Path(sys.argv[1]).resolve()
+c = sqlite3.connect(p.as_uri() + '?mode=ro', uri=True, timeout=0.2)
+c.execute('PRAGMA schema_version').fetchone()
+c.close()
+'@
+    $probeOutput = @(& py -3 -c $probeCode $DatabasePath 2>&1)
+    $probeExitCode = $LASTEXITCODE
+    return [ordered]@{
+        status = if ($probeExitCode -eq 0) { 'PASS' } else { 'FAILED' }
+        success = $probeExitCode -eq 0
+        error_code = if ($probeExitCode -eq 0) { $null } else { 'RUNTIME-DATABASE-READONLY-OPEN-FAILED' }
+    }
+}
+
+function Invoke-RuntimeUnlockGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)]$LogCaptures,
+        [int]$MaximumAttempts = 5,
+        [int]$DelayMilliseconds = 200
+    )
+    $attempts = @()
+    $databasePath = Join-Path $RuntimeRoot 'data\ytm-free.db'
+    for ($attemptNumber = 1; $attemptNumber -le $MaximumAttempts; $attemptNumber++) {
+        $lockedLogCount = 0
+        foreach ($captureRecord in @($LogCaptures)) {
+            foreach ($rawLogPath in @($captureRecord.raw_stdout_path, $captureRecord.raw_stderr_path)) {
+                if (-not (Test-FileExclusiveAccess -LiteralPath $rawLogPath)) { $lockedLogCount++ }
+            }
+        }
+        $databaseExclusive = Test-FileExclusiveAccess -LiteralPath $databasePath
+        $databaseReadOnly = Test-SqliteReadOnlyOpenClose -DatabasePath $databasePath
+        $attemptPassed = $lockedLogCount -eq 0 -and $databaseExclusive -and $databaseReadOnly.success
+        $attempts += [ordered]@{
+            attempt = $attemptNumber
+            timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+            locked_log_count = $lockedLogCount
+            database_exclusive_access = [bool]$databaseExclusive
+            database_read_only_open_close = [string]$databaseReadOnly.status
+            status = if ($attemptPassed) { 'PASS' } else { 'RETRY' }
+        }
+        if ($attemptPassed) {
+            return [ordered]@{ status = 'PASS'; attempts = $attempts }
+        }
+        if ($attemptNumber -lt $MaximumAttempts) { Start-Sleep -Milliseconds $DelayMilliseconds }
+    }
+    $attempts[-1].status = 'FAILED'
+    return [ordered]@{ status = 'FAILED'; error_code = 'RUNTIME-FILE-LOCK-PERSISTED'; attempts = $attempts }
+}
+
 function Get-EvidenceInventory {
     param(
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][byte[]]$HmacKey,
         [string[]]$ExcludeRelativePaths = @()
     )
     $exclusions = @($ExcludeRelativePaths | ForEach-Object { $_.Replace('\', '/') })
@@ -1252,10 +1909,25 @@ function Get-EvidenceInventory {
     foreach ($file in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force | Sort-Object FullName)) {
         $relativePath = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $file.FullName).Replace('\', '/')
         if ($relativePath -in $exclusions) { continue }
-        $entries += [ordered]@{
-            relative_path = $relativePath
-            size = [int64]$file.Length
-            sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        $relativePathHmac = Get-HmacHex -Key $HmacKey -Value $relativePath.ToLowerInvariant()
+        try {
+            $entries += [ordered]@{
+                relative_path = $relativePath
+                relative_path_hmac = $relativePathHmac
+                size = [int64]$file.Length
+                hash_status = 'OK'
+                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+                error_code = $null
+            }
+        }
+        catch {
+            $entries += [ordered]@{
+                relative_path_hmac = $relativePathHmac
+                size = [int64]$file.Length
+                hash_status = 'UNREADABLE'
+                sha256 = $null
+                error_code = 'EVIDENCE-FILE-UNREADABLE'
+            }
         }
     }
     return $entries
@@ -1310,6 +1982,8 @@ function Invoke-HarnessFinalization {
         [AllowNull()]$ProtectedBefore,
         [AllowNull()]$EnvironmentBefore,
         [Parameter(Mandatory = $true)]$OwnedProcessIdentities,
+        [Parameter(Mandatory = $true)]$OwnedProcessObjects,
+        [Parameter(Mandatory = $true)]$LogCaptures,
         [AllowNull()]$PrimaryFailure,
         [Parameter(Mandatory = $true)]$Context
     )
@@ -1328,6 +2002,72 @@ function Invoke-HarnessFinalization {
     $privacyAfter = $null
     $protectedAfter = $null
     $evidenceRootPreserved = $false
+    $processLifecycle = $null
+    $processWaitStatus = 'UNKNOWN'
+    $processObjectDisposeStatus = 'UNKNOWN'
+    $logHandleReleaseStatus = 'UNKNOWN'
+    $rawLogCleanupStatus = 'UNKNOWN'
+    $sanitizedLogStatus = 'UNKNOWN'
+    $runtimeUnlockResult = [ordered]@{ status = 'NOT_RUN'; attempts = @() }
+    $clearPathMatchCount = 0
+    $evidenceSanitization = $null
+    $unreadableEvidenceCount = 0
+
+    try {
+        $processLifecycle = Invoke-OwnedProcessShutdown -ProcessIdentities $OwnedProcessIdentities `
+            -ProcessObjectRecords $OwnedProcessObjects -LogCaptures $LogCaptures `
+            -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot `
+            -Stage 'finalizer' -StopRunning $true
+        $ownedProcessCleanupResults = @($processLifecycle.stop_results)
+        $ownedProcessCleanupStatus = if ($processLifecycle.all_processes_exited) { 'PASS' } else { 'FAILED' }
+        $processWaitStatus = if ($processLifecycle.all_process_waits_completed) { 'PASS' } else { 'FAILED' }
+        $processObjectDisposeStatus = if ($processLifecycle.all_process_objects_disposed) { 'PASS' } else { 'FAILED' }
+        $logHandleReleaseStatus = if ($processLifecycle.all_log_handles_released) { 'PASS' } else { 'FAILED' }
+        if ($ownedProcessCleanupStatus -ne 'PASS' -or $processWaitStatus -ne 'PASS' -or
+            $processObjectDisposeStatus -ne 'PASS' -or $logHandleReleaseStatus -ne 'PASS') {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-lifecycle' `
+                -Message 'OWNED-PROCESS-WAIT-OR-HANDLE-RELEASE-INCOMPLETE'
+        }
+    }
+    catch {
+        $ownedProcessCleanupStatus = 'FAILED'
+        $processWaitStatus = 'FAILED'
+        $processObjectDisposeStatus = 'FAILED'
+        $logHandleReleaseStatus = 'FAILED'
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-lifecycle' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    try {
+        $runtimeUnlockResult = Invoke-RuntimeUnlockGate -RuntimeRoot $RuntimeRoot -LogCaptures $LogCaptures
+        if ($runtimeUnlockResult.status -ne 'PASS') {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-unlock-gate' `
+                -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+        }
+    }
+    catch {
+        $runtimeUnlockResult = [ordered]@{ status = 'FAILED'; attempts = @(); error_code = 'RUNTIME-FILE-LOCK-PERSISTED' }
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-unlock-gate' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    if ($runtimeUnlockResult.status -eq 'PASS') {
+        foreach ($captureRecord in @($LogCaptures)) {
+            try {
+                Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+            }
+            catch {
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'sanitized-log-publication' `
+                    -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+            }
+        }
+    }
+    $rawLogCleanupStatus = if (@($LogCaptures | Where-Object { -not $_.raw_logs_removed }).Count -eq 0) { 'PASS' } else { 'FAILED' }
+    $sanitizedLogStatus = if (@($LogCaptures | Where-Object { -not $_.sanitized_logs_created }).Count -eq 0) { 'PASS' } else { 'FAILED' }
+    if ($rawLogCleanupStatus -ne 'PASS' -or $sanitizedLogStatus -ne 'PASS') {
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'sanitized-log-publication' `
+            -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+    }
 
     if ($null -ne $EnvironmentBefore) {
         try {
@@ -1335,9 +2075,7 @@ function Invoke-HarnessFinalization {
             $environmentRestoreStatus = if (@($environmentRestoreResults | Where-Object { $_.status -ne 'PASS' }).Count -eq 0) {
                 'PASS'
             }
-            else {
-                'FAILED'
-            }
+            else { 'FAILED' }
             if ($environmentRestoreStatus -ne 'PASS') {
                 Add-FinalizationFailure -List $finalizationFailures -Stage 'environment-restore' `
                     -Message 'ENVIRONMENT-RESTORE-INCOMPLETE'
@@ -1346,31 +2084,6 @@ function Invoke-HarnessFinalization {
         catch {
             $environmentRestoreStatus = 'FAILED'
             Add-FinalizationFailure -List $finalizationFailures -Stage 'environment-restore' `
-                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
-        }
-    }
-
-    foreach ($identity in @($OwnedProcessIdentities | Sort-Object process_id -Descending -Unique)) {
-        try {
-            Stop-OwnedProcessIdentity -Identity $identity
-            $stillPresent = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($identity.process_id)" -ErrorAction SilentlyContinue)
-            $ownedProcessCleanupResults += [ordered]@{
-                process_id = [int]$identity.process_id
-                status = if ($stillPresent) { 'FAILED' } else { 'PASS' }
-            }
-            if ($stillPresent) {
-                $ownedProcessCleanupStatus = 'FAILED'
-                Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-cleanup' `
-                    -Message 'OWNED-PROCESS-RESIDUAL'
-            }
-        }
-        catch {
-            $ownedProcessCleanupStatus = 'FAILED'
-            $ownedProcessCleanupResults += [ordered]@{
-                process_id = [int]$identity.process_id
-                status = 'FAILED'
-            }
-            Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-cleanup' `
                 -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
         }
     }
@@ -1437,21 +2150,29 @@ function Invoke-HarnessFinalization {
         }
     }
 
-    try {
-        if (Test-Path -LiteralPath $RuntimeRoot) {
-            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $RuntimeRoot -Prefix $RuntimePrefix -Token $RunToken
-            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+    if ($runtimeUnlockResult.status -eq 'PASS' -and $ownedProcessCleanupStatus -eq 'PASS' -and
+        $processObjectDisposeStatus -eq 'PASS' -and $logHandleReleaseStatus -eq 'PASS') {
+        try {
+            if (Test-Path -LiteralPath $RuntimeRoot) {
+                $safeRuntime = Assert-NoReparseDescendant -LiteralPath $RuntimeRoot -Prefix $RuntimePrefix -Token $RunToken
+                Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+            }
+            $runtimeRootCleanupStatus = if (Test-Path -LiteralPath $RuntimeRoot) { 'FAILED' } else { 'PASS' }
+            if ($runtimeRootCleanupStatus -ne 'PASS') {
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
+                    -Message 'RUNTIME-ROOT-CLEANUP-INCOMPLETE'
+            }
         }
-        $runtimeRootCleanupStatus = if (Test-Path -LiteralPath $RuntimeRoot) { 'FAILED' } else { 'PASS' }
-        if ($runtimeRootCleanupStatus -ne 'PASS') {
+        catch {
+            $runtimeRootCleanupStatus = 'FAILED'
             Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
-                -Message 'RUNTIME-ROOT-CLEANUP-INCOMPLETE'
+                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
         }
     }
-    catch {
+    else {
         $runtimeRootCleanupStatus = 'FAILED'
         Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
-            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+            -Message 'RUNTIME-FILE-LOCK-PERSISTED'
     }
 
     try {
@@ -1479,6 +2200,12 @@ function Invoke-HarnessFinalization {
             status = $ownedProcessCleanupStatus
             processes = $ownedProcessCleanupResults
         }
+        process_wait_status = $processWaitStatus
+        process_object_dispose_status = $processObjectDisposeStatus
+        log_handle_release_status = $logHandleReleaseStatus
+        raw_log_cleanup_status = $rawLogCleanupStatus
+        sanitized_log_status = $sanitizedLogStatus
+        runtime_unlock_status = $runtimeUnlockResult
         port_release_status = [ordered]@{
             status = $portReleaseStatus
             listener_count = $portListenersAfter.Count
@@ -1491,13 +2218,45 @@ function Invoke-HarnessFinalization {
     }
     Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
 
+    try {
+        $evidenceSanitization = Invoke-EvidenceSanitization -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+        $clearPathMatchCount = [int]$evidenceSanitization.clear_personal_path_match_count
+        if ($clearPathMatchCount -ne 0) {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-redaction' `
+                -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
+        }
+        if ($evidenceSanitization.unreadable_files.Count -ne 0) {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-redaction' `
+                -Message 'EVIDENCE-FILE-UNREADABLE'
+        }
+    }
+    catch {
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-redaction' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+    Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
+    $null = Invoke-EvidenceSanitization -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+
     $inventoryPath = Join-Path $EvidenceRoot 'final-evidence-inventory.json'
     $manifestPath = Join-Path $EvidenceRoot 'final-manifest.json'
     $inventoryExclusions = @('final-evidence-inventory.json', 'final-manifest.json')
-    $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -ExcludeRelativePaths $inventoryExclusions)
+    $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -HmacKey $HmacKey `
+        -ExcludeRelativePaths $inventoryExclusions)
+    $unreadableEvidenceCount = @($inventory | Where-Object { $_.hash_status -eq 'UNREADABLE' }).Count
+    if ($unreadableEvidenceCount -ne 0) {
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-inventory' `
+            -Message 'EVIDENCE-FILE-UNREADABLE'
+        $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
+        $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -HmacKey $HmacKey `
+            -ExcludeRelativePaths $inventoryExclusions)
+    }
     Write-JsonFile -LiteralPath $inventoryPath -Value ([ordered]@{
         schema_version = 1
         excluded_relative_paths = $inventoryExclusions
+        unreadable_entry_count = $unreadableEvidenceCount
         entries = $inventory
     })
     $inventorySha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
@@ -1524,12 +2283,45 @@ function Invoke-HarnessFinalization {
         restart_status = [string]$Context.restart_status
         cleanup_status = $cleanupStatus
         privacy_comparison_status = $privacyComparisonStatus
-        evidence_completeness = if ($inventory.Count -gt 0) { 'FINALIZED' } else { 'INCOMPLETE' }
+        evidence_completeness = if ($inventory.Count -gt 0 -and $unreadableEvidenceCount -eq 0 -and
+            $clearPathMatchCount -eq 0) { 'FINALIZED' } else { 'INCOMPLETE' }
         finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
         final_evidence_inventory_sha256 = $inventorySha256
         final_evidence_inventory_excludes = $inventoryExclusions
     }
-    Write-JsonFile -LiteralPath $manifestPath -Value $manifest
+    $manifestText = ($manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine
+    $sanitizedManifestText = ConvertTo-RedactedText -Value $manifestText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+    Test-RedactedStructuredText -LiteralPath $manifestPath -Text $sanitizedManifestText
+    Write-Utf8NoBom -LiteralPath $manifestPath -Value $sanitizedManifestText
+    $postManifestClearPathCount = 0
+    $finalRedactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)
+    foreach ($finalEvidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force)) {
+        if ([IO.Path]::GetExtension($finalEvidenceFile.Name) -notin @('.json', '.jsonl', '.log', '.txt', '.csv')) { continue }
+        try {
+            $finalEvidenceText = [IO.File]::ReadAllText($finalEvidenceFile.FullName)
+            foreach ($finalRedactionRule in $finalRedactionRules) {
+                $postManifestClearPathCount += [regex]::Matches(
+                    $finalEvidenceText,
+                    [regex]::Escape($finalRedactionRule.value),
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+                ).Count
+            }
+        }
+        catch { }
+    }
+    if ($postManifestClearPathCount -ne 0) {
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-redaction' `
+            -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
+        $cleanupStatus = 'FAILED'
+        $manifest.cleanup_status = $cleanupStatus
+        if ($null -eq $PrimaryFailure) { $manifest.run_status = 'BLOCKED' }
+        $manifest.evidence_completeness = 'INCOMPLETE'
+        $manifest.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        $manifestText = ($manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine
+        $sanitizedManifestText = ConvertTo-RedactedText -Value $manifestText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+        Test-RedactedStructuredText -LiteralPath $manifestPath -Text $sanitizedManifestText
+        Write-Utf8NoBom -LiteralPath $manifestPath -Value $sanitizedManifestText
+    }
     $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
 
     return [ordered]@{
@@ -1545,6 +2337,7 @@ function Invoke-HarnessFinalization {
         environment_restore_status = $environmentRestoreStatus
         runtime_root_cleanup_status = $runtimeRootCleanupStatus
         evidence_root_preserved = [bool]$evidenceRootPreserved
+        clear_personal_path_match_count = $postManifestClearPathCount
         finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
     }
 }
@@ -1649,6 +2442,7 @@ function Invoke-SyntheticFailureFinalizationValidation {
             -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
             -PersonalRoots $personalRoots -PrivacyBefore $privacyBefore -ProtectedPaths $protectedPaths `
             -ProtectedBefore $protectedBefore -EnvironmentBefore $environmentBefore -OwnedProcessIdentities @() `
+            -OwnedProcessObjects @() -LogCaptures @() `
             -PrimaryFailure $primaryFailure -Context ([ordered]@{
                 first_incomplete_phase = 'wdio-create'
                 app_baseline_sha = $ExpectedAppBaseline
@@ -1734,8 +2528,325 @@ function Invoke-SyntheticFailureFinalizationValidation {
     }
 }
 
+function Invoke-MonitorAndFinalizationValidation {
+    $Script:OwnedProcessIdentities = @()
+    $Script:OwnedProcessObjects.Clear()
+    $Script:LogCaptures.Clear()
+    $runToken = 'monitor-finalization-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-monitor-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-monitor-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+    $environmentBefore = $null
+    $privacyBefore = $null
+    $protectedBefore = $null
+    $primaryFailure = $null
+    $finalization = $null
+    $syntheticProcess = $null
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $randomGenerator.GetBytes($hmacKey) }
+    finally { $randomGenerator.Dispose() }
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+        $Script:ActiveEvidenceRoot = $evidenceRoot
+        $Script:ActiveRuntimeRoot = $runtimeRoot
+
+        $dataDir = Join-Path $runtimeRoot 'data'
+        $rawLogRoot = Join-Path $runtimeRoot 'raw-logs\synthetic-monitor'
+        $syntheticSurface = Join-Path $runtimeRoot 'synthetic-surface'
+        foreach ($directory in @($dataDir, $rawLogRoot, $syntheticSurface)) {
+            $null = New-Item -ItemType Directory -Path $directory -Force
+        }
+        Write-Utf8NoBom -LiteralPath (Join-Path $syntheticSurface 'surface.txt') -Value "synthetic-private-surface`n"
+        $syntheticProtectedPath = Join-Path $runtimeRoot 'synthetic-protected.txt'
+        Write-Utf8NoBom -LiteralPath $syntheticProtectedPath -Value "synthetic-protected`n"
+        $databasePath = Join-Path $dataDir 'ytm-free.db'
+        $databaseCreateCode = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table synthetic(id integer primary key)'); c.commit(); c.close()"
+        $null = @(& py -3 -c $databaseCreateCode $databasePath 2>&1)
+        $databaseCreateExitCode = $LASTEXITCODE
+        if ($databaseCreateExitCode -ne 0) { throw 'SYNTHETIC-DATABASE-CREATE-FAILED' }
+
+        $personalRoots = [ordered]@{ synthetic_surface = $syntheticSurface }
+        $protectedPaths = [ordered]@{ synthetic_protected = $syntheticProtectedPath }
+        $privacyBefore = Capture-PrivacySnapshots -Roots $personalRoots -Key $hmacKey `
+            -EvidenceRoot $evidenceRoot -Moment 'before'
+        $protectedBefore = @(Get-ProtectedFileSnapshots -Paths $protectedPaths -Key $hmacKey)
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'protected-files-before.json') -Value $protectedBefore
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            run_token = $runToken
+            scenario = 'SYNTHETIC-WDIO-MONITOR-FAILURE'
+        })
+
+        $environmentBefore = Set-ProcessEnvironment -Values ([ordered]@{
+            YTM_SYNTHETIC_DB_PATH = $databasePath
+            YTM_SYNTHETIC_REPO_PATH = $RepoRoot
+            YTM_SYNTHETIC_RUNTIME_PATH = $runtimeRoot
+            YTM_SYNTHETIC_EVIDENCE_PATH = $evidenceRoot
+            YTM_SYNTHETIC_USERPROFILE_PATH = $env:USERPROFILE
+            YTM_SYNTHETIC_TEMP_PATH = $env:TEMP
+            YTM_SYNTHETIC_APPDATA_PATH = $env:APPDATA
+            YTM_SYNTHETIC_LOCALAPPDATA_PATH = $env:LOCALAPPDATA
+        })
+        $childScript = @'
+$databaseStream = [IO.File]::Open($env:YTM_SYNTHETIC_DB_PATH, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    Write-Output "repo=$env:YTM_SYNTHETIC_REPO_PATH"
+    Write-Output "runtime=$env:YTM_SYNTHETIC_RUNTIME_PATH"
+    Write-Output "evidence=$env:YTM_SYNTHETIC_EVIDENCE_PATH"
+    Write-Output "userprofile=$env:YTM_SYNTHETIC_USERPROFILE_PATH"
+    [Console]::Error.WriteLine("temp=$env:YTM_SYNTHETIC_TEMP_PATH")
+    [Console]::Error.WriteLine("appdata=$env:YTM_SYNTHETIC_APPDATA_PATH")
+    [Console]::Error.WriteLine("localappdata=$env:YTM_SYNTHETIC_LOCALAPPDATA_PATH")
+    while ($true) { Start-Sleep -Milliseconds 250 }
+}
+finally { $databaseStream.Dispose() }
+'@
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+        $captureRecord = [pscustomobject][ordered]@{
+            role = 'synthetic-monitor'
+            raw_stdout_path = Join-Path $rawLogRoot 'synthetic.stdout.raw.log'
+            raw_stderr_path = Join-Path $rawLogRoot 'synthetic.stderr.raw.log'
+            evidence_stdout_path = Join-Path $evidenceRoot 'synthetic.stdout.log'
+            evidence_stderr_path = Join-Path $evidenceRoot 'synthetic.stderr.log'
+            sanitized_logs_created = $false
+            raw_logs_removed = $false
+        }
+        $Script:LogCaptures.Add($captureRecord) | Out-Null
+        $syntheticProcess = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-EncodedCommand', $encodedCommand) -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path
+        $null = Register-OwnedProcessObject -Process $syntheticProcess -Role 'synthetic-monitor' -CaptureRecord $captureRecord
+        $launcherIdentity = $null
+        for ($identityAttempt = 1; $identityAttempt -le 20 -and $null -eq $launcherIdentity; $identityAttempt++) {
+            $launcherCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($syntheticProcess.Id)" -ErrorAction SilentlyContinue
+            if ($null -ne $launcherCim) { $launcherIdentity = Get-ProcessIdentity -CimProcess $launcherCim }
+            else { Start-Sleep -Milliseconds 100 }
+        }
+        if ($null -eq $launcherIdentity) { throw 'SYNTHETIC-LAUNCHER-IDENTITY-MISSING' }
+        Register-OwnedProcessIdentity -Identity $launcherIdentity
+
+        $childReady = $false
+        for ($readyAttempt = 1; $readyAttempt -le 30 -and -not $childReady; $readyAttempt++) {
+            $stdoutReady = (Test-Path -LiteralPath $captureRecord.raw_stdout_path -PathType Leaf) -and
+                ((Get-Item -LiteralPath $captureRecord.raw_stdout_path).Length -gt 0)
+            $databaseLocked = -not (Test-FileExclusiveAccess -LiteralPath $databasePath)
+            $childReady = $stdoutReady -and $databaseLocked
+            if (-not $childReady) { Start-Sleep -Milliseconds 100 }
+        }
+        if (-not $childReady) { throw 'SYNTHETIC-OWNED-PROCESS-NOT-READY' }
+
+        try { throw 'WDIO-MONITOR-FAILURE: synthetic monitor failure' }
+        catch {
+            $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'wdio-monitor'
+            Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+        }
+
+        $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+            -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+            -PersonalRoots $personalRoots -PrivacyBefore $privacyBefore -ProtectedPaths $protectedPaths `
+            -ProtectedBefore $protectedBefore -EnvironmentBefore $environmentBefore `
+            -OwnedProcessIdentities @($Script:OwnedProcessIdentities) `
+            -OwnedProcessObjects @($Script:OwnedProcessObjects) -LogCaptures @($Script:LogCaptures) `
+            -PrimaryFailure $primaryFailure -Context ([ordered]@{
+                first_incomplete_phase = 'wdio-monitor'
+                app_baseline_sha = $ExpectedAppBaseline
+                harness_head_sha = 'synthetic-no-head'
+                build_status = 'NOT RUN'
+                application_launch_status = 'NOT RUN'
+                wdio_status = 'FAILED-MONITOR'
+                create_status = 'FAILED-MONITOR'
+                restart_status = 'NOT RUN'
+            })
+
+        $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $finalization.manifest_path -Raw | ConvertFrom-Json
+        $inventory = Get-Content -LiteralPath $finalization.inventory_path -Raw | ConvertFrom-Json
+        if (-not (Test-Path -LiteralPath $captureRecord.evidence_stdout_path -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $captureRecord.evidence_stderr_path -PathType Leaf)) {
+            $sanitizedLogDiagnostic = [ordered]@{
+                owned_process_cleanup_status = $cleanupLedger.owned_process_cleanup_status.status
+                process_wait_status = $cleanupLedger.process_wait_status
+                process_object_dispose_status = $cleanupLedger.process_object_dispose_status
+                log_handle_release_status = $cleanupLedger.log_handle_release_status
+                runtime_unlock_status = $cleanupLedger.runtime_unlock_status.status
+                raw_log_cleanup_status = $cleanupLedger.raw_log_cleanup_status
+                sanitized_log_status = $cleanupLedger.sanitized_log_status
+            }
+            throw ('SYNTHETIC-SANITIZED-LOGS-MISSING:' + ($sanitizedLogDiagnostic | ConvertTo-Json -Compress))
+        }
+        $sanitizedStdout = Get-Content -LiteralPath $captureRecord.evidence_stdout_path -Raw
+        $sanitizedStderr = Get-Content -LiteralPath $captureRecord.evidence_stderr_path -Raw
+        $syntheticClearPathCount = [int]$finalization.clear_personal_path_match_count
+        $privacyAfterCaptured = Test-Path -LiteralPath (Join-Path $evidenceRoot 'privacy-synthetic_surface-after.json') -PathType Leaf
+        $environmentRestored = @($cleanupLedger.environment_restore_status.variables | Where-Object { $_.status -ne 'PASS' }).Count -eq 0
+        $inventoryPaths = @($inventory.entries | Where-Object { $_.hash_status -eq 'OK' } | ForEach-Object { [string]$_.relative_path })
+
+        if ($primaryFailure.failure_code -ne 'WDIO-MONITOR-FAILURE') { throw 'SYNTHETIC-MONITOR-FAILURE-NOT-PRESERVED' }
+        if ($cleanupLedger.owned_process_cleanup_status.status -ne 'PASS') { throw 'SYNTHETIC-OWNED-PROCESS-NOT-STOPPED' }
+        if ($cleanupLedger.process_wait_status -ne 'PASS') { throw 'SYNTHETIC-PROCESS-WAIT-INCOMPLETE' }
+        if ($cleanupLedger.log_handle_release_status -ne 'PASS') { throw 'SYNTHETIC-LOG-HANDLE-NOT-RELEASED' }
+        if ($cleanupLedger.runtime_unlock_status.status -ne 'PASS') { throw 'SYNTHETIC-DB-HANDLE-NOT-RELEASED' }
+        if (-not $captureRecord.raw_logs_removed) { throw 'SYNTHETIC-RAW-LOGS-RESIDUAL' }
+        if (-not $captureRecord.sanitized_logs_created -or
+            $sanitizedStdout -notmatch '%REPO%' -or $sanitizedStdout -notmatch '%RUNTIME_ROOT%' -or
+            $sanitizedStdout -notmatch '%EVIDENCE_ROOT%' -or $sanitizedStdout -notmatch '%USERPROFILE%' -or
+            $sanitizedStderr -notmatch '%TEMP%' -or $sanitizedStderr -notmatch '%APPDATA%' -or
+            $sanitizedStderr -notmatch '%LOCALAPPDATA%') { throw 'SYNTHETIC-SANITIZED-LOGS-INVALID' }
+        if ($syntheticClearPathCount -ne 0) { throw 'SYNTHETIC-CLEAR-PERSONAL-PATH-DETECTED' }
+        if (-not $privacyAfterCaptured) { throw 'SYNTHETIC-PRIVACY-AFTER-MISSING' }
+        if (-not $environmentRestored) { throw 'SYNTHETIC-ENVIRONMENT-RESTORE-FAILED' }
+        if (Test-Path -LiteralPath $runtimeRoot) { throw 'SYNTHETIC-RUNTIME-ROOT-RESIDUAL' }
+        if (-not (Test-Path -LiteralPath $finalization.cleanup_ledger_path -PathType Leaf)) { throw 'SYNTHETIC-CLEANUP-LEDGER-MISSING' }
+        if (-not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or
+            'final-evidence-inventory.json' -in $inventoryPaths -or 'final-manifest.json' -in $inventoryPaths) {
+            throw 'SYNTHETIC-FINAL-INVENTORY-FAILED'
+        }
+        if (-not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf) -or
+            $manifest.run_status -ne 'FAILED' -or $manifest.primary_failure.failure_code -ne 'WDIO-MONITOR-FAILURE') {
+            throw 'SYNTHETIC-FINAL-MANIFEST-FAILED'
+        }
+        if ($finalization.finalization_failures.Count -ne 0) { throw 'SYNTHETIC-FINALIZATION-FAILURES-NONZERO' }
+
+        return [ordered]@{
+            SYNTHETIC_MONITOR_FAILURE_PRESERVED = 'PASS'
+            SYNTHETIC_OWNED_PROCESS_STOPPED = 'PASS'
+            SYNTHETIC_PROCESS_WAIT_COMPLETED = 'PASS'
+            SYNTHETIC_LOG_HANDLES_RELEASED = 'PASS'
+            SYNTHETIC_DB_HANDLE_RELEASED = 'PASS'
+            SYNTHETIC_RAW_LOGS_REMOVED = 'PASS'
+            SYNTHETIC_SANITIZED_LOGS_CREATED = 'PASS'
+            SYNTHETIC_CLEAR_PATH_COUNT = 0
+            SYNTHETIC_PRIVACY_AFTER_CAPTURED = 'PASS'
+            SYNTHETIC_RUNTIME_ROOT_REMOVED = 'PASS'
+            SYNTHETIC_CLEANUP_LEDGER = 'PASS'
+            SYNTHETIC_FINAL_INVENTORY = 'PASS'
+            SYNTHETIC_FINAL_MANIFEST = 'PASS'
+            SYNTHETIC_FINALIZATION_FAILURE_COUNT = 0
+        }
+    }
+    finally {
+        if ($null -ne $environmentBefore) { $null = Restore-ProcessEnvironment -Previous $environmentBefore }
+        if ($null -ne $syntheticProcess) {
+            try {
+                $syntheticProcess.Refresh()
+                if (-not $syntheticProcess.HasExited) {
+                    $launcherCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($syntheticProcess.Id)" -ErrorAction SilentlyContinue
+                    if ($null -ne $launcherCim) {
+                        $null = Stop-OwnedProcessIdentity -Identity (Get-ProcessIdentity -CimProcess $launcherCim)
+                        $null = $syntheticProcess.WaitForExit(5000)
+                    }
+                }
+            }
+            catch { }
+            try { $syntheticProcess.Dispose() } catch { }
+        }
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+        $Script:ActiveEvidenceRoot = $null
+        $Script:ActiveRuntimeRoot = $null
+        $Script:OwnedProcessIdentities = @()
+        $Script:OwnedProcessObjects.Clear()
+        $Script:LogCaptures.Clear()
+    }
+}
+
+function Invoke-UnreadableEvidenceFinalizationValidation {
+    $runToken = 'unreadable-evidence-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-unreadable-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-unreadable-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+    $lockedEvidenceStream = $null
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $randomGenerator.GetBytes($hmacKey) }
+    finally { $randomGenerator.Dispose() }
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+        $lockedEvidencePath = Join-Path $evidenceRoot 'intentionally-unreadable.json'
+        Write-JsonFile -LiteralPath $lockedEvidencePath -Value ([ordered]@{
+            schema_version = 1
+            scenario = 'SYNTHETIC-EVIDENCE-FILE-UNREADABLE'
+        })
+        $lockedEvidenceStream = [IO.File]::Open(
+            $lockedEvidencePath,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::None
+        )
+
+        $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+            -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+            -PersonalRoots ([ordered]@{}) -PrivacyBefore $null -ProtectedPaths ([ordered]@{}) `
+            -ProtectedBefore $null -EnvironmentBefore $null -OwnedProcessIdentities @() `
+            -OwnedProcessObjects @() -LogCaptures @() -PrimaryFailure $null -Context ([ordered]@{
+                first_incomplete_phase = 'synthetic-unreadable-evidence'
+                app_baseline_sha = $ExpectedAppBaseline
+                harness_head_sha = 'synthetic-no-head'
+                build_status = 'NOT RUN'
+                application_launch_status = 'NOT RUN'
+                wdio_status = 'NOT RUN'
+                create_status = 'NOT RUN'
+                restart_status = 'NOT RUN'
+            })
+
+        $inventoryDocument = Get-Content -LiteralPath $finalization.inventory_path -Raw | ConvertFrom-Json
+        $manifestDocument = Get-Content -LiteralPath $finalization.manifest_path -Raw | ConvertFrom-Json
+        $unreadableEntries = @($inventoryDocument.entries | Where-Object {
+            $_.hash_status -eq 'UNREADABLE' -and $_.error_code -eq 'EVIDENCE-FILE-UNREADABLE'
+        })
+        if ($unreadableEntries.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$unreadableEntries[0].relative_path_hmac) -or
+            $null -ne $unreadableEntries[0].PSObject.Properties['relative_path']) {
+            throw 'SYNTHETIC-UNREADABLE-INVENTORY-ENTRY-INVALID'
+        }
+        if ($manifestDocument.evidence_completeness -ne 'INCOMPLETE' -or
+            -not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf)) {
+            throw 'SYNTHETIC-UNREADABLE-MANIFEST-NOT-FINALIZED'
+        }
+        return 'PASS'
+    }
+    finally {
+        if ($null -ne $lockedEvidenceStream) { $lockedEvidenceStream.Dispose() }
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+    }
+}
+
 function Invoke-FullRuntimeHarness {
-    $preflight = Invoke-SafePreflight
+    $Script:OwnedProcessIdentities = @()
+    $Script:OwnedProcessObjects.Clear()
+    $Script:LogCaptures.Clear()
+    $preflight = $null
     $runToken = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8).ToLowerInvariant()
     $evidencePrefix = 'ytm-free-import-delete-evidence-b3200d4f8d41-'
     $runtimePrefix = 'ytm-free-import-delete-runtime-'
@@ -1743,6 +2854,8 @@ function Invoke-FullRuntimeHarness {
     $runtimeRoot = Join-Path $env:TEMP "ytm-free-import-delete-runtime-$runToken"
     $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
     $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+    $Script:ActiveEvidenceRoot = $evidenceRoot
+    $Script:ActiveRuntimeRoot = $runtimeRoot
 
     $hmacKey = New-Object byte[] 32
     $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -1763,12 +2876,18 @@ function Invoke-FullRuntimeHarness {
     $primaryFailure = $null
     $finalization = $null
     $firstIncompletePhase = 'setup'
+    $contextHarnessHead = 'UNKNOWN'
     $buildStatus = 'NOT RUN'
     $applicationLaunchStatus = 'NOT RUN'
     $wdioStatus = 'NOT RUN'
     $createStatus = 'NOT RUN'
     $restartStatus = 'NOT RUN'
     try {
+        $firstIncompletePhase = 'preflight'
+        $headRead = @(Invoke-GitRead -Arguments @('rev-parse', 'HEAD'))
+        if ($headRead.Count -eq 1) { $contextHarnessHead = [string]$headRead[0] }
+        $preflight = Invoke-SafePreflight
+
         $dataDir = Join-Path $runtimeRoot 'data'
         $spotifyDir = Join-Path $runtimeRoot 'spotify'
         $webViewDataDir = Join-Path $runtimeRoot 'webview2'
@@ -1838,8 +2957,7 @@ function Invoke-FullRuntimeHarness {
         $rustc = Get-Command rustc.exe -CommandType Application | Select-Object -First 1
         $shimCompileExit = Invoke-ExternalCaptured -FilePath ([string]$rustc.Source) -Arguments @(
             '--edition', '2021', $ShimSource, '-o', $shimExe
-        ) -WorkingDirectory $RepoRoot -StdoutPath (Join-Path $evidenceRoot 'shim-build.stdout.log') `
-            -StderrPath (Join-Path $evidenceRoot 'shim-build.stderr.log')
+        ) -WorkingDirectory $RepoRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'shim-build'
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-executable-metadata.json') -Value ([ordered]@{
             executable_sha256 = (Get-FileHash -LiteralPath $shimExe -Algorithm SHA256).Hash
             executable_size = [int64](Get-Item -LiteralPath $shimExe).Length
@@ -1851,8 +2969,7 @@ function Invoke-FullRuntimeHarness {
         $buildStart = (Get-Date).ToUniversalTime()
         $npm = Get-Command npm.cmd -CommandType Application | Select-Object -First 1
         $buildExit = Invoke-ExternalCaptured -FilePath ([string]$npm.Source) -Arguments @('run', 'harness:build') `
-            -WorkingDirectory $RepoRoot -StdoutPath (Join-Path $evidenceRoot 'build.stdout.log') `
-            -StderrPath (Join-Path $evidenceRoot 'build.stderr.log')
+            -WorkingDirectory $RepoRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -LogName 'build'
         $buildEnd = (Get-Date).ToUniversalTime()
         $binaryPath = Join-Path $RepoRoot 'src-tauri\target\debug\ytm-free.exe'
         if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
@@ -1931,7 +3048,8 @@ function Invoke-FullRuntimeHarness {
         $applicationLaunchStatus = 'CREATE ATTEMPTED'
         $wdioStatus = 'CREATE IN PROGRESS'
         $createStatus = 'IN PROGRESS'
-        $createResult = Start-WdioPhase -LaunchPlan $createLaunchPlan -PhaseEvidenceRoot $createEvidence -WebViewDataDir $webViewDataDir
+        $createResult = Start-WdioPhase -LaunchPlan $createLaunchPlan -PhaseEvidenceRoot $createEvidence `
+            -WebViewDataDir $webViewDataDir -RuntimeRoot $runtimeRoot
         $createStatus = 'PASS'
         $applicationLaunchStatus = 'CREATE PASS'
         $wdioStatus = 'CREATE PASS'
@@ -1940,7 +3058,8 @@ function Invoke-FullRuntimeHarness {
         $applicationLaunchStatus = 'RESTART ATTEMPTED'
         $wdioStatus = 'RESTART IN PROGRESS'
         $restartStatus = 'IN PROGRESS'
-        $restartResult = Start-WdioPhase -LaunchPlan $restartLaunchPlan -PhaseEvidenceRoot $restartEvidence -WebViewDataDir $webViewDataDir
+        $restartResult = Start-WdioPhase -LaunchPlan $restartLaunchPlan -PhaseEvidenceRoot $restartEvidence `
+            -WebViewDataDir $webViewDataDir -RuntimeRoot $runtimeRoot
         $restartStatus = 'PASS'
         $applicationLaunchStatus = 'PASS'
         $wdioStatus = 'PASS'
@@ -2013,10 +3132,17 @@ function Invoke-FullRuntimeHarness {
                 -PersonalRoots $personalRoots -PrivacyBefore $privacyBefore -ProtectedPaths $protectedPaths `
                 -ProtectedBefore $protectedBefore -EnvironmentBefore $environmentBefore `
                 -OwnedProcessIdentities @($Script:OwnedProcessIdentities) -PrimaryFailure $primaryFailure `
+                -OwnedProcessObjects @($Script:OwnedProcessObjects) -LogCaptures @($Script:LogCaptures) `
                 -Context ([ordered]@{
                     first_incomplete_phase = $firstIncompletePhase
-                    app_baseline_sha = $preflight.git.APP_BASELINE_SHA
-                    harness_head_sha = $preflight.git.HARNESS_HEAD_SHA
+                    app_baseline_sha = if ($null -ne $preflight) {
+                        [string]$preflight.git.APP_BASELINE_SHA
+                    }
+                    else { $ExpectedAppBaseline }
+                    harness_head_sha = if ($null -ne $preflight) {
+                        [string]$preflight.git.HARNESS_HEAD_SHA
+                    }
+                    else { $contextHarnessHead }
                     build_status = $buildStatus
                     application_launch_status = $applicationLaunchStatus
                     wdio_status = $wdioStatus
@@ -2028,9 +3154,11 @@ function Invoke-FullRuntimeHarness {
             Write-Warning ('FAILURE-FINALIZATION-INCOMPLETE: ' + (ConvertTo-RedactedText -Value $_.Exception.Message))
         }
         [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+        $Script:ActiveEvidenceRoot = $null
+        $Script:ActiveRuntimeRoot = $null
     }
 
-    Write-Output "EVIDENCE_ROOT=$evidenceRoot"
+    Write-Output "EVIDENCE_ROOT=%TEMP%\$(Split-Path -Leaf $evidenceRoot)"
     if ($null -ne $finalization) {
         Write-Output "FINAL_EVIDENCE_INVENTORY_SHA256:$($finalization.inventory_sha256)"
         Write-Output "FINAL_MANIFEST_SHA256:$($finalization.manifest_sha256)"
@@ -2045,9 +3173,14 @@ function Invoke-FullRuntimeHarness {
 }
 
 Set-Location $RepoRoot
-$selectedModes = @(@($ContractValidateOnly, $PreflightOnly, $LaunchPlanValidateOnly) | Where-Object { $_ })
+$selectedModes = @(@(
+    $ContractValidateOnly,
+    $PreflightOnly,
+    $LaunchPlanValidateOnly,
+    $MonitorAndFinalizationValidateOnly
+) | Where-Object { $_ })
 if ($selectedModes.Count -gt 1) {
-    throw 'ContractValidateOnly, PreflightOnly, and LaunchPlanValidateOnly are mutually exclusive'
+    throw 'ContractValidateOnly, PreflightOnly, LaunchPlanValidateOnly, and MonitorAndFinalizationValidateOnly are mutually exclusive'
 }
 
 if ($ContractValidateOnly) {
@@ -2063,6 +3196,7 @@ if ($ContractValidateOnly) {
     Write-Output "SNAPSHOT_REPARSE_REJECTION: $($result.SNAPSHOT_REPARSE_REJECTION)"
     Write-Output "CLEANUP_REPARSE_REJECTION: $($result.CLEANUP_REPARSE_REJECTION)"
     Write-Output "EXTERNAL_REPARSE_TARGET_UNCHANGED: $($result.EXTERNAL_REPARSE_TARGET_UNCHANGED)"
+    Write-Output "AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT:$($result.AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT)"
     Write-Output "SYNTHETIC_PRIMARY_FAILURE_PRESERVED:$($result.SYNTHETIC_PRIMARY_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_PRIVACY_AFTER_CAPTURED:$($result.SYNTHETIC_PRIVACY_AFTER_CAPTURED)"
     Write-Output "SYNTHETIC_PRIVACY_EQUALITY:$($result.SYNTHETIC_PRIVACY_EQUALITY)"
@@ -2089,6 +3223,28 @@ if ($LaunchPlanValidateOnly) {
     Write-Output "CREATE_ARGUMENT_LIST_TYPE:$($result.CREATE_ARGUMENT_LIST_TYPE)"
     Write-Output "RESTART_ARGUMENT_LIST_TYPE:$($result.RESTART_ARGUMENT_LIST_TYPE)"
     Write-Output "START_PROCESS_CALLED:$($result.START_PROCESS_CALLED)"
+    Write-NonClaims
+    exit 0
+}
+
+if ($MonitorAndFinalizationValidateOnly) {
+    $result = Invoke-MonitorAndFinalizationValidation
+    $unreadableEvidenceResult = Invoke-UnreadableEvidenceFinalizationValidation
+    Write-Output "SYNTHETIC_MONITOR_FAILURE_PRESERVED:$($result.SYNTHETIC_MONITOR_FAILURE_PRESERVED)"
+    Write-Output "SYNTHETIC_OWNED_PROCESS_STOPPED:$($result.SYNTHETIC_OWNED_PROCESS_STOPPED)"
+    Write-Output "SYNTHETIC_PROCESS_WAIT_COMPLETED:$($result.SYNTHETIC_PROCESS_WAIT_COMPLETED)"
+    Write-Output "SYNTHETIC_LOG_HANDLES_RELEASED:$($result.SYNTHETIC_LOG_HANDLES_RELEASED)"
+    Write-Output "SYNTHETIC_DB_HANDLE_RELEASED:$($result.SYNTHETIC_DB_HANDLE_RELEASED)"
+    Write-Output "SYNTHETIC_RAW_LOGS_REMOVED:$($result.SYNTHETIC_RAW_LOGS_REMOVED)"
+    Write-Output "SYNTHETIC_SANITIZED_LOGS_CREATED:$($result.SYNTHETIC_SANITIZED_LOGS_CREATED)"
+    Write-Output "SYNTHETIC_CLEAR_PATH_COUNT:$($result.SYNTHETIC_CLEAR_PATH_COUNT)"
+    Write-Output "SYNTHETIC_PRIVACY_AFTER_CAPTURED:$($result.SYNTHETIC_PRIVACY_AFTER_CAPTURED)"
+    Write-Output "SYNTHETIC_RUNTIME_ROOT_REMOVED:$($result.SYNTHETIC_RUNTIME_ROOT_REMOVED)"
+    Write-Output "SYNTHETIC_CLEANUP_LEDGER:$($result.SYNTHETIC_CLEANUP_LEDGER)"
+    Write-Output "SYNTHETIC_FINAL_INVENTORY:$($result.SYNTHETIC_FINAL_INVENTORY)"
+    Write-Output "SYNTHETIC_FINAL_MANIFEST:$($result.SYNTHETIC_FINAL_MANIFEST)"
+    Write-Output "SYNTHETIC_FINALIZATION_FAILURE_COUNT:$($result.SYNTHETIC_FINALIZATION_FAILURE_COUNT)"
+    Write-Output "SYNTHETIC_UNREADABLE_EVIDENCE_FINALIZATION:$unreadableEvidenceResult"
     Write-NonClaims
     exit 0
 }
