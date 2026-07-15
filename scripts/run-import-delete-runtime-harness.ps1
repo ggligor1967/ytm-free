@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ExpectedBaseline = 'b3200d4f8d4187bc25cc1f1d49d55bcbcf277212'
+$ExpectedAppBaseline = 'b3200d4f8d4187bc25cc1f1d49d55bcbcf277212'
 $ExpectedBranch = 'feat/import-delete-runtime-harness'
 $EmbeddedPort = 4447
 $StreamPort = 3456
@@ -20,7 +20,7 @@ $SpecPath = Join-Path $RepoRoot 'tests\e2e\import-delete-runtime.spec.ts'
 $WdioConfig = Join-Path $RepoRoot 'wdio.conf.ts'
 $LogicalSnapshotScript = Join-Path $RepoRoot 'scripts\seed-semantic-search-query-fixture.py'
 
-$AuthorizedPaths = @(
+$AllowedHarnessPaths = @(
     'scripts/run-import-delete-runtime-harness.ps1',
     'scripts/yt-dlp-import-delete-shim.rs',
     'tests/e2e/import-delete-runtime.spec.ts'
@@ -45,7 +45,15 @@ $RequiredEnvironmentNames = @(
 )
 $StopConditions = @(
     'BASELINE-DRIFT',
+    'HARNESS-BRANCH-MISMATCH',
+    'APP-BASELINE-NOT-ANCESTOR',
+    'ORIGIN-MAIN-BASELINE-DRIFT',
+    'HARNESS-MERGE-BASE-MISMATCH',
+    'HARNESS-MERGE-COMMIT-DETECTED',
+    'HARNESS-DELTA-SCOPE-MISMATCH',
     'DIRTY-TRACKED-WORKTREE',
+    'NONEMPTY-STAGING',
+    'UNEXPECTED-UNTRACKED-FILE',
     'TEMP-ROOT-UNSAFE',
     'APPDATA-ISOLATION-NOT-PROVEN',
     'DOWNLOAD-ISOLATION-NOT-PROVEN',
@@ -281,55 +289,84 @@ function Assert-OllamaStateEvidenceSchema {
     }
 }
 
-function Assert-GitContext {
+function Get-OrdinalSortedPaths {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+    $list = [Collections.Generic.List[string]]::new()
+    foreach ($path in $Paths) {
+        $list.Add((Normalize-RepositoryPath -Value $path))
+    }
+    $list.Sort([StringComparer]::Ordinal)
+    return @($list)
+}
+
+function Get-HarnessGitIdentity {
     $branch = (Invoke-GitRead -Arguments @('branch', '--show-current') | Select-Object -First 1).Trim()
     $head = (Invoke-GitRead -Arguments @('rev-parse', 'HEAD') | Select-Object -First 1).Trim()
     $originMain = (Invoke-GitRead -Arguments @('rev-parse', 'origin/main') | Select-Object -First 1).Trim()
-    if ($branch -ne $ExpectedBranch -or $head -ne $ExpectedBaseline -or $originMain -ne $ExpectedBaseline) {
-        throw "BASELINE-DRIFT: branch=$branch head=$head origin_main=$originMain"
+    if ($branch -ne $ExpectedBranch) {
+        throw "HARNESS-BRANCH-MISMATCH: branch=$branch expected=$ExpectedBranch"
     }
+    if ($originMain -ne $ExpectedAppBaseline) {
+        throw "ORIGIN-MAIN-BASELINE-DRIFT: origin_main=$originMain"
+    }
+    try {
+        $null = Invoke-GitRead -Arguments @('merge-base', '--is-ancestor', $ExpectedAppBaseline, 'HEAD')
+    }
+    catch {
+        throw 'APP-BASELINE-NOT-ANCESTOR'
+    }
+    $mergeBase = (Invoke-GitRead -Arguments @('merge-base', 'HEAD', 'origin/main') | Select-Object -First 1).Trim()
+    if ($mergeBase -ne $ExpectedAppBaseline) {
+        throw "HARNESS-MERGE-BASE-MISMATCH: merge_base=$mergeBase"
+    }
+    $mergeCommits = @(Invoke-GitRead -Arguments @('rev-list', '--merges', "$ExpectedAppBaseline..HEAD") |
+        Where-Object { $_.Trim() })
+    if ($mergeCommits.Count -ne 0) {
+        throw "HARNESS-MERGE-COMMIT-DETECTED: $($mergeCommits -join ',')"
+    }
+    $actualDeltaPaths = @(Invoke-GitRead -Arguments @('diff', '--name-only', "$ExpectedAppBaseline..HEAD") |
+        Where-Object { $_.Trim() } |
+        ForEach-Object { Normalize-RepositoryPath -Value $_ })
+    $actualSorted = @(Get-OrdinalSortedPaths -Paths $actualDeltaPaths)
+    $allowedSorted = @(Get-OrdinalSortedPaths -Paths $AllowedHarnessPaths)
+    if (($actualSorted -join "`n") -cne ($allowedSorted -join "`n")) {
+        throw "HARNESS-DELTA-SCOPE-MISMATCH: actual=$($actualSorted -join ',')"
+    }
+    $commitCount = [int]((Invoke-GitRead -Arguments @('rev-list', '--count', "$ExpectedAppBaseline..HEAD") |
+        Select-Object -First 1).Trim())
+    return [ordered]@{
+        branch = $branch
+        APP_BASELINE_SHA = $ExpectedAppBaseline
+        HARNESS_HEAD_SHA = $head
+        ORIGIN_MAIN_SHA = $originMain
+        HARNESS_MERGE_BASE_SHA = $mergeBase
+        HARNESS_DELTA_PATHS = $actualSorted
+        HARNESS_COMMIT_COUNT = $commitCount
+    }
+}
 
+function Assert-GitContext {
+    $identity = Get-HarnessGitIdentity
     $unstaged = @(Invoke-GitRead -Arguments @('diff', '--name-only') | Where-Object { $_.Trim() })
     if ($unstaged.Count -ne 0) {
         throw 'DIRTY-TRACKED-WORKTREE: unstaged tracked changes exist'
     }
-    $cached = @(Invoke-GitRead -Arguments @('diff', '--cached', '--name-only') |
-        Where-Object { $_.Trim() } |
-        ForEach-Object { Normalize-RepositoryPath -Value $_ })
+    $cached = @(Invoke-GitRead -Arguments @('diff', '--cached', '--name-only') | Where-Object { $_.Trim() })
     if ($cached.Count -ne 0) {
-        $expectedCached = @($AuthorizedPaths | Sort-Object)
-        $actualCached = @($cached | Sort-Object)
-        if (($actualCached -join "`n") -ne ($expectedCached -join "`n")) {
-            throw 'DIRTY-TRACKED-WORKTREE: staged paths differ from the authorized harness patch'
-        }
-        $cachedStatus = @(Invoke-GitRead -Arguments @('diff', '--cached', '--name-status'))
-        foreach ($line in $cachedStatus) {
-            $parts = $line -split "`t", 2
-            if ($parts.Count -ne 2 -or $parts[0] -ne 'A' -or
-                $AuthorizedPaths -notcontains (Normalize-RepositoryPath -Value $parts[1])) {
-                throw "DIRTY-TRACKED-WORKTREE: staged entry is not an authorized addition: $line"
-            }
-        }
+        throw 'NONEMPTY-STAGING'
     }
-
     $status = @(Invoke-GitRead -Arguments @('status', '--porcelain=v1', '--untracked-files=all'))
     foreach ($line in $status) {
-        if ($line.StartsWith('?? ')) {
-            $path = Normalize-RepositoryPath -Value $line.Substring(3)
-            if ($ProtectedUntrackedPaths -notcontains $path) {
-                throw "SCOPE-EXPANSION-REQUIRED: unexpected untracked path $path"
-            }
-            continue
-        }
-        if (-not $line.StartsWith('A  ')) {
+        if (-not $line.StartsWith('?? ')) {
             throw "DIRTY-TRACKED-WORKTREE: $line"
         }
         $path = Normalize-RepositoryPath -Value $line.Substring(3)
-        if ($AuthorizedPaths -notcontains $path) {
-            throw "DIRTY-TRACKED-WORKTREE: unauthorized staged path $path"
+        if ($ProtectedUntrackedPaths -notcontains $path) {
+            throw "UNEXPECTED-UNTRACKED-FILE: $path"
         }
     }
-    return [ordered]@{ branch = $branch; head = $head; origin_main = $originMain; status = $status }
+    $identity.status = $status
+    return $identity
 }
 
 function Assert-RequiredTools {
@@ -467,6 +504,19 @@ function Invoke-ContractValidation {
         'PRIVACY-REPARSE-POINT-DETECTED',
         'RUNTIME-REPARSE-POINT-DETECTED'
     )
+    Assert-ContainsAll -Text $harness -Label 'harness Git identity contract' -Values @(
+        'function Get-HarnessGitIdentity',
+        'merge-base',
+        '--is-ancestor',
+        '--merges',
+        'HARNESS-DELTA-SCOPE-MISMATCH',
+        'APP_BASELINE_SHA',
+        'HARNESS_HEAD_SHA',
+        'ORIGIN_MAIN_SHA',
+        'HARNESS_MERGE_BASE_SHA',
+        'HARNESS_DELTA_PATHS',
+        'HARNESS_COMMIT_COUNT'
+    )
 
     $validationToken = 'contractvalidation-00000000'
     $alpha = '{"id":"s6R3B1A001","title":"Step6R3B1 Alpha ' + $validationToken + '","channel":"Step6R3B1 Synthetic Artist","duration":123,"thumbnail":"data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="}'
@@ -474,21 +524,42 @@ function Invoke-ContractValidation {
     $null = $alpha | ConvertFrom-Json
     $null = $beta | ConvertFrom-Json
 
-    if ($ExpectedBaseline -ne 'b3200d4f8d4187bc25cc1f1d49d55bcbcf277212' -or
+    $expectedAllowedPaths = @(
+        'scripts/run-import-delete-runtime-harness.ps1',
+        'scripts/yt-dlp-import-delete-shim.rs',
+        'tests/e2e/import-delete-runtime.spec.ts'
+    )
+    if ($ExpectedAppBaseline -ne 'b3200d4f8d4187bc25cc1f1d49d55bcbcf277212' -or
         $ExpectedBranch -ne 'feat/import-delete-runtime-harness' -or
         $EmbeddedPort -ne 4447 -or $StreamPort -ne 3456) {
         throw 'Contract constants do not match Step-6R.3B2A'
     }
+    if ((@(Get-OrdinalSortedPaths -Paths $AllowedHarnessPaths) -join "`n") -cne
+        (@(Get-OrdinalSortedPaths -Paths $expectedAllowedPaths) -join "`n")) {
+        throw 'HARNESS-DELTA-SCOPE-MISMATCH'
+    }
+    $gitIdentity = Get-HarnessGitIdentity
     $safeTreeValidation = Invoke-SafeTreeContractValidation
     return [ordered]@{
         result = ('PASS ' + [char]0x2014 + ' CONTRACT-VALIDATED')
-        baseline = $ExpectedBaseline
+        APP_BASELINE_SHA = $gitIdentity.APP_BASELINE_SHA
+        HARNESS_HEAD_SHA = $gitIdentity.HARNESS_HEAD_SHA
+        ORIGIN_MAIN_SHA = $gitIdentity.ORIGIN_MAIN_SHA
+        HARNESS_MERGE_BASE_SHA = $gitIdentity.HARNESS_MERGE_BASE_SHA
+        HARNESS_DELTA_PATHS = $gitIdentity.HARNESS_DELTA_PATHS
+        HARNESS_COMMIT_COUNT = $gitIdentity.HARNESS_COMMIT_COUNT
         branch = $ExpectedBranch
         ports = @($StreamPort, $EmbeddedPort)
         exact_yt_dlp_argv_classes = @('version', 'search-alpha', 'search-beta')
         exact_outputs_parse = $true
         required_environment_names = $RequiredEnvironmentNames
         stop_conditions = $StopConditions
+        APP_BASELINE_CONSTANT = 'PASS'
+        ALLOWED_HARNESS_PATH_SET = 'PASS'
+        HEAD_DESCENDS_FROM_APP_BASELINE = 'PASS'
+        MERGE_BASE_MATCH = 'PASS'
+        NO_HARNESS_MERGE_COMMITS = 'PASS'
+        HARNESS_DELTA_SCOPE = 'PASS'
         OLLAMA_STATE_SCHEMA_CONTRACT = 'PASS'
         SAFE_TREE_NORMAL_CASE = $safeTreeValidation.SAFE_TREE_NORMAL_CASE
         SNAPSHOT_REPARSE_REJECTION = $safeTreeValidation.SNAPSHOT_REPARSE_REJECTION
@@ -1017,7 +1088,12 @@ function Invoke-FullRuntimeHarness {
             build_start_utc = $buildStart.ToString('o')
             build_end_utc = $buildEnd.ToString('o')
             build_exit = $buildExit
-            baseline_sha = $ExpectedBaseline
+            APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
+            HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
+            ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
+            HARNESS_MERGE_BASE_SHA = $preflight.git.HARNESS_MERGE_BASE_SHA
+            HARNESS_DELTA_PATHS = $preflight.git.HARNESS_DELTA_PATHS
+            HARNESS_COMMIT_COUNT = $preflight.git.HARNESS_COMMIT_COUNT
             binary_path = 'src-tauri/target/debug/ytm-free.exe'
             binary_size = [int64]$binary.Length
             binary_last_write_utc = $binary.LastWriteTimeUtc.ToString('o')
@@ -1118,7 +1194,12 @@ function Invoke-FullRuntimeHarness {
         $inventory = @(Get-EvidenceInventory -EvidenceRoot $evidenceRoot)
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'manifest.json') -Value ([ordered]@{
             result = ('PASS ' + [char]0x2014 + ' IMPORT-DELETE-RESTART-RUNTIME-PROVEN')
-            baseline_sha = $ExpectedBaseline
+            APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
+            HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
+            ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
+            HARNESS_MERGE_BASE_SHA = $preflight.git.HARNESS_MERGE_BASE_SHA
+            HARNESS_DELTA_PATHS = $preflight.git.HARNESS_DELTA_PATHS
+            HARNESS_COMMIT_COUNT = $preflight.git.HARNESS_COMMIT_COUNT
             run_token = $runToken
             evidence_root_identity = 'new-owned-temp-root'
             runtime_root_cleanup_required = $true
@@ -1155,6 +1236,12 @@ if ($ContractValidateOnly -and $PreflightOnly) {
 
 if ($ContractValidateOnly) {
     $result = Invoke-ContractValidation
+    Write-Output "APP_BASELINE_CONSTANT: $($result.APP_BASELINE_CONSTANT)"
+    Write-Output "ALLOWED_HARNESS_PATH_SET: $($result.ALLOWED_HARNESS_PATH_SET)"
+    Write-Output "HEAD_DESCENDS_FROM_APP_BASELINE: $($result.HEAD_DESCENDS_FROM_APP_BASELINE)"
+    Write-Output "MERGE_BASE_MATCH: $($result.MERGE_BASE_MATCH)"
+    Write-Output "NO_HARNESS_MERGE_COMMITS: $($result.NO_HARNESS_MERGE_COMMITS)"
+    Write-Output "HARNESS_DELTA_SCOPE: $($result.HARNESS_DELTA_SCOPE)"
     Write-Output "OLLAMA_STATE_SCHEMA_CONTRACT: $($result.OLLAMA_STATE_SCHEMA_CONTRACT)"
     Write-Output "SAFE_TREE_NORMAL_CASE: $($result.SAFE_TREE_NORMAL_CASE)"
     Write-Output "SNAPSHOT_REPARSE_REJECTION: $($result.SNAPSHOT_REPARSE_REJECTION)"
