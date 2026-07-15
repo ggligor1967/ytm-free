@@ -99,6 +99,8 @@ $StopConditions = @(
     'POWERSHELL-AUTOMATIC-VARIABLE-COLLISION',
     'CLEAR-PERSONAL-PATH-IN-EVIDENCE',
     'EVIDENCE-FILE-UNREADABLE',
+    'SANITIZED-LOG-PUBLICATION-FAILED',
+    'RAW-LOG-CLEANUP-FAILED',
     'RUNTIME-FILE-LOCK-PERSISTED',
     'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
     'FAILURE-FINALIZATION-INCOMPLETE'
@@ -107,9 +109,18 @@ $StopConditions = @(
 function Write-Utf8NoBom {
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
-        [Parameter(Mandatory = $true)][string]$Value
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [object]$Value
     )
-    [IO.File]::WriteAllText($LiteralPath, $Value, [Text.UTF8Encoding]::new($false))
+    if ($null -eq $Value) {
+        throw 'WRITE-UTF8-VALUE-NULL'
+    }
+    if ($Value -isnot [string]) {
+        throw 'WRITE-UTF8-VALUE-TYPE-MISMATCH'
+    }
+    [IO.File]::WriteAllText($LiteralPath, [string]$Value, [Text.UTF8Encoding]::new($false))
 }
 
 function Write-JsonFile {
@@ -599,6 +610,8 @@ function Invoke-ContractValidation {
     )
     Assert-ContainsAll -Text $harness -Label 'failure finalization contract' -Values @(
         'function Invoke-HarnessFinalization',
+        'function Write-Utf8NoBom',
+        'WRITE-UTF8-VALUE-NULL',
         'primary_failure_present',
         'cleanup-ledger.json',
         'final-evidence-inventory.json',
@@ -609,7 +622,14 @@ function Invoke-ContractValidation {
         'WDIO-MONITOR-FAILURE',
         'CLEAR-PERSONAL-PATH-IN-EVIDENCE',
         'EVIDENCE-FILE-UNREADABLE',
-        'RUNTIME-FILE-LOCK-PERSISTED'
+        'RUNTIME-FILE-LOCK-PERSISTED',
+        'SANITIZED-LOG-PUBLICATION-FAILED',
+        'RAW-LOG-CLEANUP-FAILED',
+        'persistently_locked_file_count',
+        'finalization_status',
+        'evidence_completeness',
+        'SYNTHETIC-EMPTY-STDOUT-STDERR',
+        'SYNTHETIC-SANITIZED-PUBLICATION-FAILURE'
     )
 
     $validationToken = 'contractvalidation-00000000'
@@ -638,6 +658,13 @@ function Invoke-ContractValidation {
         throw ('POWERSHELL-AUTOMATIC-VARIABLE-COLLISION: ' +
             (($automaticVariableCollisions | ConvertTo-Json -Compress) -join ''))
     }
+    $evidenceCompletenessFinalizedAssignmentCount = [regex]::Matches(
+        $harness,
+        '(?im)evidence_completeness\s*=\s*[''\"]FINALIZED[''\"]'
+    ).Count
+    if ($evidenceCompletenessFinalizedAssignmentCount -ne 0) {
+        throw 'MANIFEST-EVIDENCE-COMPLETENESS-SEMANTICS-INVALID'
+    }
     $safeTreeValidation = Invoke-SafeTreeContractValidation
     $syntheticFailureValidation = Invoke-SyntheticFailureFinalizationValidation
     return [ordered]@{
@@ -661,6 +688,7 @@ function Invoke-ContractValidation {
         NO_HARNESS_MERGE_COMMITS = 'PASS'
         HARNESS_DELTA_SCOPE = 'PASS'
         AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT = $automaticVariableCollisions.Count
+        EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT = $evidenceCompletenessFinalizedAssignmentCount
         OLLAMA_STATE_SCHEMA_CONTRACT = 'PASS'
         SAFE_TREE_NORMAL_CASE = $safeTreeValidation.SAFE_TREE_NORMAL_CASE
         SNAPSHOT_REPARSE_REJECTION = $safeTreeValidation.SNAPSHOT_REPARSE_REJECTION
@@ -970,7 +998,9 @@ function ConvertTo-RedactedText {
 function Test-RedactedStructuredText {
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
-        [Parameter(Mandatory = $true)][string]$Text
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
     )
     $extension = [IO.Path]::GetExtension($LiteralPath)
     if ($extension -ieq '.json') {
@@ -1121,10 +1151,12 @@ function Invoke-ExternalCaptured {
     $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
     $captureRecord = [pscustomobject][ordered]@{
         role = $LogName
+        process_launched = $false
         raw_stdout_path = Join-Path $rawLogRoot "$LogName.stdout.raw.log"
         raw_stderr_path = Join-Path $rawLogRoot "$LogName.stderr.raw.log"
         evidence_stdout_path = Join-Path $EvidenceRoot "$LogName.stdout.log"
         evidence_stderr_path = Join-Path $EvidenceRoot "$LogName.stderr.log"
+        stream_publications = @()
         sanitized_logs_created = $false
         raw_logs_removed = $false
     }
@@ -1132,6 +1164,7 @@ function Invoke-ExternalCaptured {
     $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
         -WindowStyle Hidden -PassThru
+    $captureRecord.process_launched = $true
     try {
         $process.WaitForExit()
         $externalExitCode = $process.ExitCode
@@ -1171,32 +1204,137 @@ function Publish-SanitizedLogCapture {
     param(
         [Parameter(Mandatory = $true)]$CaptureRecord,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
-        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [ValidateSet('stdout', 'stderr')][string]$InjectFailureStream
     )
     if ($CaptureRecord.sanitized_logs_created -and $CaptureRecord.raw_logs_removed) { return }
-    foreach ($rawLogPath in @($CaptureRecord.raw_stdout_path, $CaptureRecord.raw_stderr_path)) {
-        if (-not (Test-FileExclusiveAccess -LiteralPath $rawLogPath)) {
-            throw 'RUNTIME-FILE-LOCK-PERSISTED: raw log handle is not released'
-        }
+
+    if ([string]::IsNullOrWhiteSpace($InjectFailureStream) -and
+        $null -ne $CaptureRecord.PSObject.Properties['inject_publication_failure_stream']) {
+        $InjectFailureStream = [string]$CaptureRecord.inject_publication_failure_stream
     }
+
+    $processLaunched = $false
+    if ($null -ne $CaptureRecord.PSObject.Properties['process_launched']) {
+        $processLaunched = [bool]$CaptureRecord.process_launched
+    }
+    $publicationRecords = [Collections.Generic.List[object]]::new()
+    $publicationFailed = $false
+    $rawCleanupFailed = $false
+
     foreach ($logPair in @(
-        [pscustomobject]@{ raw = $CaptureRecord.raw_stdout_path; sanitized = $CaptureRecord.evidence_stdout_path },
-        [pscustomobject]@{ raw = $CaptureRecord.raw_stderr_path; sanitized = $CaptureRecord.evidence_stderr_path }
+        [pscustomobject]@{
+            stream = 'stdout'
+            raw = $CaptureRecord.raw_stdout_path
+            sanitized = $CaptureRecord.evidence_stdout_path
+        },
+        [pscustomobject]@{
+            stream = 'stderr'
+            raw = $CaptureRecord.raw_stderr_path
+            sanitized = $CaptureRecord.evidence_stderr_path
+        }
     )) {
-        $rawText = if (Test-Path -LiteralPath $logPair.raw -PathType Leaf) {
-            [IO.File]::ReadAllText($logPair.raw)
+        $rawExists = Test-Path -LiteralPath $logPair.raw -PathType Leaf
+        $rawSize = if ($rawExists) { [int64](Get-Item -LiteralPath $logPair.raw).Length } else { $null }
+        $publicationRecord = [ordered]@{
+            role = [string]$CaptureRecord.role
+            stream = [string]$logPair.stream
+            raw_exists = [bool]$rawExists
+            raw_status = if ($rawExists) { 'PRESENT' } elseif ($processLaunched) { 'MISSING' } else { 'NOT_CREATED' }
+            raw_size = $rawSize
+            sanitized_exists = $false
+            sanitized_size = $null
+            publication_status = 'FAILED'
+            raw_cleanup_status = 'NOT_ATTEMPTED'
+            clear_path_match_count = 0
+            error_code = $null
         }
-        else { '' }
-        $sanitizedText = ConvertTo-RedactedText -Value $rawText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
-        Write-Utf8NoBom -LiteralPath $logPair.sanitized -Value $sanitizedText
-    }
-    $CaptureRecord.sanitized_logs_created = $true
-    foreach ($rawLogPath in @($CaptureRecord.raw_stdout_path, $CaptureRecord.raw_stderr_path)) {
-        if (Test-Path -LiteralPath $rawLogPath -PathType Leaf) {
-            Remove-Item -LiteralPath $rawLogPath -Force
+
+        if (-not $rawExists) {
+            $publicationRecord.publication_status = if ($processLaunched) { 'FAILED' } else { 'NOT_CREATED' }
+            $publicationRecord.raw_cleanup_status = 'NOT_CREATED'
+            if ($processLaunched) {
+                $publicationRecord.error_code = 'SANITIZED-LOG-PUBLICATION-FAILED'
+                $publicationFailed = $true
+            }
+            $publicationRecords.Add($publicationRecord) | Out-Null
+            continue
         }
+
+        if (-not (Test-FileExclusiveAccess -LiteralPath $logPair.raw)) {
+            $publicationRecord.error_code = 'SANITIZED-LOG-PUBLICATION-FAILED'
+            $publicationFailed = $true
+            $publicationRecords.Add($publicationRecord) | Out-Null
+            continue
+        }
+
+        try {
+            $rawText = [IO.File]::ReadAllText($logPair.raw)
+            if ($InjectFailureStream -eq $logPair.stream) {
+                throw 'SANITIZED-LOG-PUBLICATION-FAILED: synthetic publication failure'
+            }
+            $sanitizedText = ConvertTo-RedactedText -Value $rawText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+            Write-Utf8NoBom -LiteralPath $logPair.sanitized -Value $sanitizedText
+            $publicationRecord.sanitized_exists = Test-Path -LiteralPath $logPair.sanitized -PathType Leaf
+            if (-not $publicationRecord.sanitized_exists) {
+                throw 'SANITIZED-LOG-PUBLICATION-FAILED: sanitized file missing after write'
+            }
+            $publicationRecord.sanitized_size = [int64](Get-Item -LiteralPath $logPair.sanitized).Length
+            foreach ($redactionRule in @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)) {
+                $publicationRecord.clear_path_match_count += [regex]::Matches(
+                    $sanitizedText,
+                    [regex]::Escape($redactionRule.value),
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+                ).Count
+            }
+            if ($publicationRecord.clear_path_match_count -ne 0) {
+                throw 'SANITIZED-LOG-PUBLICATION-FAILED: clear path remains after sanitization'
+            }
+            if ($rawSize -eq 0 -and $publicationRecord.sanitized_size -ne 0) {
+                throw 'SANITIZED-LOG-PUBLICATION-FAILED: empty stream was not published as zero bytes'
+            }
+            $publicationRecord.publication_status = if ($rawSize -eq 0) { 'PASS_EMPTY' } else { 'PASS_CONTENT' }
+        }
+        catch {
+            $publicationRecord.publication_status = 'FAILED'
+            $publicationRecord.error_code = 'SANITIZED-LOG-PUBLICATION-FAILED'
+            $publicationFailed = $true
+            $publicationRecords.Add($publicationRecord) | Out-Null
+            continue
+        }
+
+        try {
+            Remove-Item -LiteralPath $logPair.raw -Force
+            $publicationRecord.raw_cleanup_status = if (Test-Path -LiteralPath $logPair.raw) { 'FAILED' } else { 'PASS' }
+            if ($publicationRecord.raw_cleanup_status -ne 'PASS') {
+                $publicationRecord.error_code = 'RAW-LOG-CLEANUP-FAILED'
+                $rawCleanupFailed = $true
+            }
+        }
+        catch {
+            $publicationRecord.raw_cleanup_status = 'FAILED'
+            $publicationRecord.error_code = 'RAW-LOG-CLEANUP-FAILED'
+            $rawCleanupFailed = $true
+        }
+        $publicationRecords.Add($publicationRecord) | Out-Null
     }
-    $CaptureRecord.raw_logs_removed = $true
+
+    $CaptureRecord.stream_publications = @($publicationRecords | ForEach-Object { $_ })
+    $CaptureRecord.sanitized_logs_created = @(
+        $CaptureRecord.stream_publications | Where-Object { $_.publication_status -eq 'FAILED' }
+    ).Count -eq 0
+    $remainingRawLogs = @(@(
+        $CaptureRecord.raw_stdout_path,
+        $CaptureRecord.raw_stderr_path
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    $CaptureRecord.raw_logs_removed = $remainingRawLogs.Count -eq 0
+
+    if ($publicationFailed) {
+        throw 'SANITIZED-LOG-PUBLICATION-FAILED'
+    }
+    if ($rawCleanupFailed) {
+        throw 'RAW-LOG-CLEANUP-FAILED'
+    }
 }
 
 function Get-ProcessTable {
@@ -1744,10 +1882,12 @@ function Start-WdioPhase {
     $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
     $captureRecord = [pscustomobject][ordered]@{
         role = "wdio-$Phase"
+        process_launched = $false
         raw_stdout_path = Join-Path $rawLogRoot 'wdio.stdout.raw.log'
         raw_stderr_path = Join-Path $rawLogRoot 'wdio.stderr.raw.log'
         evidence_stdout_path = Join-Path $PhaseEvidenceRoot 'wdio.stdout.log'
         evidence_stderr_path = Join-Path $PhaseEvidenceRoot 'wdio.stderr.log'
+        stream_publications = @()
         sanitized_logs_created = $false
         raw_logs_removed = $false
     }
@@ -1755,6 +1895,7 @@ function Start-WdioPhase {
     $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
         -WindowStyle Hidden -PassThru
+    $captureRecord.process_launched = $true
     $null = Register-OwnedProcessObject -Process $process -Role "wdio-$Phase" -CaptureRecord $captureRecord
     $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
     if ($null -eq $cim) { throw 'WDIO-MONITOR-FAILURE: launcher identity unavailable immediately after start' }
@@ -1866,36 +2007,80 @@ function Invoke-RuntimeUnlockGate {
     param(
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)]$LogCaptures,
+        [Parameter(Mandatory = $true)][byte[]]$HmacKey,
         [int]$MaximumAttempts = 5,
         [int]$DelayMilliseconds = 200
     )
     $attempts = @()
+    $lockedFileProbeCount = 0
+    $persistentlyLockedFiles = @()
     $databasePath = Join-Path $RuntimeRoot 'data\ytm-free.db'
     for ($attemptNumber = 1; $attemptNumber -le $MaximumAttempts; $attemptNumber++) {
-        $lockedLogCount = 0
+        $lockedFiles = [Collections.Generic.List[string]]::new()
         foreach ($captureRecord in @($LogCaptures)) {
             foreach ($rawLogPath in @($captureRecord.raw_stdout_path, $captureRecord.raw_stderr_path)) {
-                if (-not (Test-FileExclusiveAccess -LiteralPath $rawLogPath)) { $lockedLogCount++ }
+                if (-not (Test-Path -LiteralPath $rawLogPath -PathType Leaf)) { continue }
+                $lockedFileProbeCount++
+                if (-not (Test-FileExclusiveAccess -LiteralPath $rawLogPath)) {
+                    $lockedFiles.Add([IO.Path]::GetFullPath($rawLogPath)) | Out-Null
+                }
             }
         }
-        $databaseExclusive = Test-FileExclusiveAccess -LiteralPath $databasePath
+        $databasePresent = Test-Path -LiteralPath $databasePath -PathType Leaf
+        $databaseExclusive = $true
+        if ($databasePresent) {
+            $lockedFileProbeCount++
+            $databaseExclusive = Test-FileExclusiveAccess -LiteralPath $databasePath
+            if (-not $databaseExclusive) {
+                $lockedFiles.Add([IO.Path]::GetFullPath($databasePath)) | Out-Null
+            }
+        }
         $databaseReadOnly = Test-SqliteReadOnlyOpenClose -DatabasePath $databasePath
-        $attemptPassed = $lockedLogCount -eq 0 -and $databaseExclusive -and $databaseReadOnly.success
+        $lockedRelativePathHmacs = @($lockedFiles | Sort-Object -Unique | ForEach-Object {
+            $lockedRelativePath = (Get-RelativePathPortable -BasePath $RuntimeRoot -ChildPath $_).Replace('\', '/')
+            Get-HmacHex -Key $HmacKey -Value $lockedRelativePath.ToLowerInvariant()
+        })
+        $attemptPassed = $lockedFiles.Count -eq 0 -and $databaseReadOnly.success
         $attempts += [ordered]@{
             attempt = $attemptNumber
             timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
-            locked_log_count = $lockedLogCount
+            locked_file_count = $lockedFiles.Count
+            locked_relative_path_hmacs = $lockedRelativePathHmacs
             database_exclusive_access = [bool]$databaseExclusive
             database_read_only_open_close = [string]$databaseReadOnly.status
             status = if ($attemptPassed) { 'PASS' } else { 'RETRY' }
         }
         if ($attemptPassed) {
-            return [ordered]@{ status = 'PASS'; attempts = $attempts }
+            return [ordered]@{
+                status = 'PASS'
+                error_code = $null
+                attempts = $attempts
+                locked_file_probe_count = $lockedFileProbeCount
+                persistently_locked_file_count = 0
+                persistently_locked_relative_path_hmacs = @()
+            }
         }
+        $persistentlyLockedFiles = @($lockedFiles | Sort-Object -Unique)
         if ($attemptNumber -lt $MaximumAttempts) { Start-Sleep -Milliseconds $DelayMilliseconds }
     }
     $attempts[-1].status = 'FAILED'
-    return [ordered]@{ status = 'FAILED'; error_code = 'RUNTIME-FILE-LOCK-PERSISTED'; attempts = $attempts }
+    $persistentlyLockedRelativePathHmacs = @($persistentlyLockedFiles | ForEach-Object {
+        $persistentlyLockedRelativePath = (Get-RelativePathPortable -BasePath $RuntimeRoot -ChildPath $_).Replace('\', '/')
+        Get-HmacHex -Key $HmacKey -Value $persistentlyLockedRelativePath.ToLowerInvariant()
+    })
+    return [ordered]@{
+        status = 'FAILED'
+        error_code = if ($persistentlyLockedFiles.Count -gt 0) {
+            'RUNTIME-FILE-LOCK-PERSISTED'
+        }
+        else {
+            'RUNTIME-UNLOCK-GATE-FAILED'
+        }
+        attempts = $attempts
+        locked_file_probe_count = $lockedFileProbeCount
+        persistently_locked_file_count = $persistentlyLockedFiles.Count
+        persistently_locked_relative_path_hmacs = $persistentlyLockedRelativePathHmacs
+    }
 }
 
 function Get-EvidenceInventory {
@@ -1938,14 +2123,43 @@ function Add-FinalizationFailure {
         [Parameter(Mandatory = $true)]$List,
         [Parameter(Mandatory = $true)][string]$Stage,
         [Parameter(Mandatory = $true)][string]$Message,
-        [string]$ExceptionType = 'HarnessFinalizationFailure'
+        [string]$ExceptionType = 'HarnessFinalizationFailure',
+        [AllowNull()][string]$FailureCode
     )
+    if ([string]::IsNullOrWhiteSpace($FailureCode)) {
+        foreach ($stopCondition in $StopConditions) {
+            if ($Message -match [regex]::Escape($stopCondition)) {
+                $FailureCode = $stopCondition
+                break
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($FailureCode)) {
+        $FailureCode = 'UNCLASSIFIED-FINALIZATION-FAILURE'
+    }
     $List.Add([ordered]@{
+        failure_code = $FailureCode
         stage = $Stage
         exception_type = $ExceptionType
         message_redacted = ConvertTo-RedactedText -Value $Message
         timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
     }) | Out-Null
+}
+
+function Add-FinalizationFailureOnce {
+    param(
+        [Parameter(Mandatory = $true)]$List,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$FailureCode,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$ExceptionType = 'HarnessFinalizationFailure'
+    )
+    if (@($List | Where-Object {
+        $_.failure_code -eq $FailureCode -and $_.stage -eq $Stage
+    }).Count -eq 0) {
+        Add-FinalizationFailure -List $List -Stage $Stage -Message $Message `
+            -ExceptionType $ExceptionType -FailureCode $FailureCode
+    }
 }
 
 function Compare-SnapshotMaps {
@@ -2008,7 +2222,15 @@ function Invoke-HarnessFinalization {
     $logHandleReleaseStatus = 'UNKNOWN'
     $rawLogCleanupStatus = 'UNKNOWN'
     $sanitizedLogStatus = 'UNKNOWN'
-    $runtimeUnlockResult = [ordered]@{ status = 'NOT_RUN'; attempts = @() }
+    $runtimeUnlockResult = [ordered]@{
+        status = 'NOT_RUN'
+        error_code = $null
+        attempts = @()
+        locked_file_probe_count = 0
+        persistently_locked_file_count = 0
+        persistently_locked_relative_path_hmacs = @()
+    }
+    $logPublicationRecords = @()
     $clearPathMatchCount = 0
     $evidenceSanitization = $null
     $unreadableEvidenceCount = 0
@@ -2039,34 +2261,68 @@ function Invoke-HarnessFinalization {
     }
 
     try {
-        $runtimeUnlockResult = Invoke-RuntimeUnlockGate -RuntimeRoot $RuntimeRoot -LogCaptures $LogCaptures
+        $runtimeUnlockResult = Invoke-RuntimeUnlockGate -RuntimeRoot $RuntimeRoot -LogCaptures $LogCaptures `
+            -HmacKey $HmacKey
         if ($runtimeUnlockResult.status -ne 'PASS') {
-            Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-unlock-gate' `
-                -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+            Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'runtime-unlock-gate' `
+                -FailureCode ([string]$runtimeUnlockResult.error_code) `
+                -Message ([string]$runtimeUnlockResult.error_code)
         }
     }
     catch {
-        $runtimeUnlockResult = [ordered]@{ status = 'FAILED'; attempts = @(); error_code = 'RUNTIME-FILE-LOCK-PERSISTED' }
+        $runtimeUnlockResult = [ordered]@{
+            status = 'FAILED'
+            error_code = 'RUNTIME-UNLOCK-GATE-FAILED'
+            attempts = @()
+            locked_file_probe_count = 0
+            persistently_locked_file_count = 0
+            persistently_locked_relative_path_hmacs = @()
+        }
         Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-unlock-gate' `
-            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName `
+            -FailureCode 'RUNTIME-UNLOCK-GATE-FAILED'
     }
 
-    if ($runtimeUnlockResult.status -eq 'PASS') {
+    if ($logHandleReleaseStatus -eq 'PASS' -and
+        [int]$runtimeUnlockResult.persistently_locked_file_count -eq 0) {
         foreach ($captureRecord in @($LogCaptures)) {
             try {
                 Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
             }
             catch {
-                Add-FinalizationFailure -List $finalizationFailures -Stage 'sanitized-log-publication' `
-                    -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+                $publicationFailureCode = if ($_.Exception.Message -match 'RAW-LOG-CLEANUP-FAILED') {
+                    'RAW-LOG-CLEANUP-FAILED'
+                }
+                else {
+                    'SANITIZED-LOG-PUBLICATION-FAILED'
+                }
+                Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'sanitized-log-publication' `
+                    -FailureCode $publicationFailureCode -Message $publicationFailureCode `
+                    -ExceptionType $_.Exception.GetType().FullName
             }
         }
     }
-    $rawLogCleanupStatus = if (@($LogCaptures | Where-Object { -not $_.raw_logs_removed }).Count -eq 0) { 'PASS' } else { 'FAILED' }
-    $sanitizedLogStatus = if (@($LogCaptures | Where-Object { -not $_.sanitized_logs_created }).Count -eq 0) { 'PASS' } else { 'FAILED' }
-    if ($rawLogCleanupStatus -ne 'PASS' -or $sanitizedLogStatus -ne 'PASS') {
-        Add-FinalizationFailure -List $finalizationFailures -Stage 'sanitized-log-publication' `
-            -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+    $logPublicationRecords = @($LogCaptures | ForEach-Object { @($_.stream_publications) })
+    $failedPublicationRecords = @($logPublicationRecords | Where-Object { $_.publication_status -eq 'FAILED' })
+    $failedRawCleanupRecords = @($logPublicationRecords | Where-Object { $_.raw_cleanup_status -eq 'FAILED' })
+    $retainedRawRecords = @($logPublicationRecords | Where-Object { $_.raw_cleanup_status -eq 'NOT_ATTEMPTED' })
+    $rawLogCleanupStatus = if ($failedRawCleanupRecords.Count -gt 0) {
+        'FAILED'
+    }
+    elseif ($retainedRawRecords.Count -gt 0) {
+        'SKIPPED'
+    }
+    else {
+        'PASS'
+    }
+    $sanitizedLogStatus = if ($failedPublicationRecords.Count -eq 0) { 'PASS' } else { 'FAILED' }
+    if ($sanitizedLogStatus -eq 'FAILED') {
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'sanitized-log-publication' `
+            -FailureCode 'SANITIZED-LOG-PUBLICATION-FAILED' -Message 'SANITIZED-LOG-PUBLICATION-FAILED'
+    }
+    if ($rawLogCleanupStatus -eq 'FAILED') {
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'raw-log-cleanup' `
+            -FailureCode 'RAW-LOG-CLEANUP-FAILED' -Message 'RAW-LOG-CLEANUP-FAILED'
     }
 
     if ($null -ne $EnvironmentBefore) {
@@ -2151,7 +2407,8 @@ function Invoke-HarnessFinalization {
     }
 
     if ($runtimeUnlockResult.status -eq 'PASS' -and $ownedProcessCleanupStatus -eq 'PASS' -and
-        $processObjectDisposeStatus -eq 'PASS' -and $logHandleReleaseStatus -eq 'PASS') {
+        $processObjectDisposeStatus -eq 'PASS' -and $logHandleReleaseStatus -eq 'PASS' -and
+        $sanitizedLogStatus -eq 'PASS' -and $rawLogCleanupStatus -eq 'PASS') {
         try {
             if (Test-Path -LiteralPath $RuntimeRoot) {
                 $safeRuntime = Assert-NoReparseDescendant -LiteralPath $RuntimeRoot -Prefix $RuntimePrefix -Token $RunToken
@@ -2171,8 +2428,14 @@ function Invoke-HarnessFinalization {
     }
     else {
         $runtimeRootCleanupStatus = 'FAILED'
-        Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
-            -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+        if ([int]$runtimeUnlockResult.persistently_locked_file_count -gt 0) {
+            Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'runtime-root-cleanup' `
+                -FailureCode 'RUNTIME-FILE-LOCK-PERSISTED' -Message 'RUNTIME-FILE-LOCK-PERSISTED'
+        }
+        else {
+            Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'runtime-root-cleanup' `
+                -FailureCode 'RUNTIME-ROOT-CLEANUP-INCOMPLETE' -Message 'RUNTIME-ROOT-CLEANUP-INCOMPLETE'
+        }
     }
 
     try {
@@ -2205,7 +2468,11 @@ function Invoke-HarnessFinalization {
         log_handle_release_status = $logHandleReleaseStatus
         raw_log_cleanup_status = $rawLogCleanupStatus
         sanitized_log_status = $sanitizedLogStatus
+        log_publications = $logPublicationRecords
         runtime_unlock_status = $runtimeUnlockResult
+        locked_file_probe_count = [int]$runtimeUnlockResult.locked_file_probe_count
+        persistently_locked_file_count = [int]$runtimeUnlockResult.persistently_locked_file_count
+        persistently_locked_relative_path_hmacs = @($runtimeUnlockResult.persistently_locked_relative_path_hmacs)
         port_release_status = [ordered]@{
             status = $portReleaseStatus
             listener_count = $portListenersAfter.Count
@@ -2235,24 +2502,129 @@ function Invoke-HarnessFinalization {
             -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
     }
 
+    $mandatoryEvidencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $notApplicableEvidencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($mandatoryEvidencePath in @('.step6r3b1-owned.json', 'owned-process-final-snapshot-finalizer.json', 'cleanup-ledger.json')) {
+        $mandatoryEvidencePaths.Add($mandatoryEvidencePath) | Out-Null
+    }
+    if ($null -ne $PrimaryFailure) { $mandatoryEvidencePaths.Add('primary-failure.json') | Out-Null }
+    if ($null -ne $PrivacyBefore) {
+        foreach ($privacySurface in $PrivacyBefore.Keys) {
+            $mandatoryEvidencePaths.Add("privacy-$privacySurface-after.json") | Out-Null
+        }
+        $mandatoryEvidencePaths.Add('privacy-comparison.json') | Out-Null
+    }
+    if ($null -ne $ProtectedBefore) {
+        $mandatoryEvidencePaths.Add('protected-files-after.json') | Out-Null
+        $mandatoryEvidencePaths.Add('protected-files-comparison.json') | Out-Null
+    }
+    if ($Context -is [Collections.IDictionary] -and $Context.Contains('mandatory_evidence_relative_paths')) {
+        foreach ($contextMandatoryPath in @($Context.mandatory_evidence_relative_paths)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$contextMandatoryPath)) {
+                $mandatoryEvidencePaths.Add(([string]$contextMandatoryPath).Replace('\', '/')) | Out-Null
+            }
+        }
+    }
+    if ($Context -is [Collections.IDictionary] -and $Context.Contains('not_applicable_evidence_relative_paths')) {
+        foreach ($contextNotApplicablePath in @($Context.not_applicable_evidence_relative_paths)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$contextNotApplicablePath)) {
+                $notApplicableEvidencePaths.Add(([string]$contextNotApplicablePath).Replace('\', '/')) | Out-Null
+            }
+        }
+    }
+    foreach ($captureRecord in @($LogCaptures)) {
+        $captureProcessLaunched = $null -ne $captureRecord.PSObject.Properties['process_launched'] -and
+            [bool]$captureRecord.process_launched
+        foreach ($evidenceLogPath in @($captureRecord.evidence_stdout_path, $captureRecord.evidence_stderr_path)) {
+            $relativeEvidenceLogPath = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $evidenceLogPath).Replace('\', '/')
+            if ($captureProcessLaunched) {
+                $mandatoryEvidencePaths.Add($relativeEvidenceLogPath) | Out-Null
+            }
+            else {
+                $notApplicableEvidencePaths.Add($relativeEvidenceLogPath) | Out-Null
+            }
+        }
+    }
+    foreach ($mandatoryEvidencePath in @($mandatoryEvidencePaths)) {
+        $notApplicableEvidencePaths.Remove($mandatoryEvidencePath) | Out-Null
+    }
+
+    $missingMandatoryPaths = @($mandatoryEvidencePaths | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $EvidenceRoot $_) -PathType Leaf)
+    })
+    if ($missingMandatoryPaths.Count -gt 0) {
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'evidence-completeness' `
+            -FailureCode 'MANDATORY-EVIDENCE-MISSING' -Message 'MANDATORY-EVIDENCE-MISSING'
+    }
+
     $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
     Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
-    $null = Invoke-EvidenceSanitization -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+    $evidenceSanitization = Invoke-EvidenceSanitization -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+    $clearPathMatchCount = [int]$evidenceSanitization.clear_personal_path_match_count
+    if ($clearPathMatchCount -ne 0) {
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'evidence-redaction' `
+            -FailureCode 'CLEAR-PERSONAL-PATH-IN-EVIDENCE' -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
+        $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
+    }
 
     $inventoryPath = Join-Path $EvidenceRoot 'final-evidence-inventory.json'
     $manifestPath = Join-Path $EvidenceRoot 'final-manifest.json'
     $inventoryExclusions = @('final-evidence-inventory.json', 'final-manifest.json')
     $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -HmacKey $HmacKey `
         -ExcludeRelativePaths $inventoryExclusions)
-    $unreadableEvidenceCount = @($inventory | Where-Object { $_.hash_status -eq 'UNREADABLE' }).Count
+    $unreadableEvidenceCount = @($inventory | Where-Object { $_.hash_status -ne 'OK' }).Count
     if ($unreadableEvidenceCount -ne 0) {
-        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-inventory' `
-            -Message 'EVIDENCE-FILE-UNREADABLE'
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'evidence-inventory' `
+            -FailureCode 'EVIDENCE-FILE-UNREADABLE' -Message 'EVIDENCE-FILE-UNREADABLE'
         $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
         Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
         $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -HmacKey $HmacKey `
             -ExcludeRelativePaths $inventoryExclusions)
+        $unreadableEvidenceCount = @($inventory | Where-Object { $_.hash_status -ne 'OK' }).Count
     }
+
+    $evidenceRequirements = @()
+    foreach ($mandatoryEvidencePath in @($mandatoryEvidencePaths | Sort-Object)) {
+        $mandatoryPathHmac = Get-HmacHex -Key $HmacKey -Value $mandatoryEvidencePath.ToLowerInvariant()
+        $matchingInventoryEntries = @($inventory | Where-Object { $_.relative_path_hmac -eq $mandatoryPathHmac })
+        $requirementStatus = if ($matchingInventoryEntries.Count -eq 0) {
+            'MISSING'
+        }
+        elseif ($matchingInventoryEntries[0].hash_status -ne 'OK') {
+            'UNREADABLE'
+        }
+        else {
+            'PRODUCED'
+        }
+        $evidenceRequirements += [ordered]@{
+            relative_path = $mandatoryEvidencePath
+            phase_requirement = 'REACHED'
+            status = $requirementStatus
+        }
+    }
+    foreach ($notApplicableEvidencePath in @($notApplicableEvidencePaths | Sort-Object)) {
+        $evidenceRequirements += [ordered]@{
+            relative_path = $notApplicableEvidencePath
+            phase_requirement = 'NOT_REACHED'
+            status = 'NOT_APPLICABLE'
+        }
+    }
+    $missingMandatoryEvidenceCount = @($evidenceRequirements | Where-Object {
+        $_.phase_requirement -eq 'REACHED' -and $_.status -ne 'PRODUCED'
+    }).Count
+    $publicationFailureCount = @($logPublicationRecords | Where-Object {
+        $_.publication_status -eq 'FAILED'
+    }).Count
+    $evidenceCompleteness = if ($unreadableEvidenceCount -eq 0 -and
+        $publicationFailureCount -eq 0 -and $missingMandatoryEvidenceCount -eq 0 -and
+        $clearPathMatchCount -eq 0) {
+        'COMPLETE'
+    }
+    else {
+        'INCOMPLETE'
+    }
+
     Write-JsonFile -LiteralPath $inventoryPath -Value ([ordered]@{
         schema_version = 1
         excluded_relative_paths = $inventoryExclusions
@@ -2269,7 +2641,15 @@ function Invoke-HarnessFinalization {
         $privacyAfterSnapshotStatus -notin @('FAILED') -and
         $protectedFileComparisonStatus -notin @('FAILED') -and
         $evidenceRootPreserved) { 'PASS' } else { 'FAILED' }
-    $runStatus = if ($null -ne $PrimaryFailure) { 'FAILED' } elseif ($cleanupStatus -eq 'PASS') { 'PASS' } else { 'BLOCKED' }
+    $runStatus = if ($null -ne $PrimaryFailure) {
+        'FAILED'
+    }
+    elseif ($cleanupStatus -eq 'PASS' -and $evidenceCompleteness -eq 'COMPLETE') {
+        'PASS'
+    }
+    else {
+        'BLOCKED'
+    }
     $manifest = [ordered]@{
         run_status = $runStatus
         primary_failure = $PrimaryFailure
@@ -2283,8 +2663,9 @@ function Invoke-HarnessFinalization {
         restart_status = [string]$Context.restart_status
         cleanup_status = $cleanupStatus
         privacy_comparison_status = $privacyComparisonStatus
-        evidence_completeness = if ($inventory.Count -gt 0 -and $unreadableEvidenceCount -eq 0 -and
-            $clearPathMatchCount -eq 0) { 'FINALIZED' } else { 'INCOMPLETE' }
+        finalization_status = 'PARTIAL'
+        evidence_completeness = $evidenceCompleteness
+        evidence_requirements = $evidenceRequirements
         finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
         final_evidence_inventory_sha256 = $inventorySha256
         final_evidence_inventory_excludes = $inventoryExclusions
@@ -2293,6 +2674,7 @@ function Invoke-HarnessFinalization {
     $sanitizedManifestText = ConvertTo-RedactedText -Value $manifestText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
     Test-RedactedStructuredText -LiteralPath $manifestPath -Text $sanitizedManifestText
     Write-Utf8NoBom -LiteralPath $manifestPath -Value $sanitizedManifestText
+
     $postManifestClearPathCount = 0
     $finalRedactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)
     foreach ($finalEvidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force)) {
@@ -2310,13 +2692,46 @@ function Invoke-HarnessFinalization {
         catch { }
     }
     if ($postManifestClearPathCount -ne 0) {
-        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-redaction' `
-            -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
+        Add-FinalizationFailureOnce -List $finalizationFailures -Stage 'evidence-redaction' `
+            -FailureCode 'CLEAR-PERSONAL-PATH-IN-EVIDENCE' -Message 'CLEAR-PERSONAL-PATH-IN-EVIDENCE'
         $cleanupStatus = 'FAILED'
+        $evidenceCompleteness = 'INCOMPLETE'
+        $cleanupLedger.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
+        $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -HmacKey $HmacKey `
+            -ExcludeRelativePaths $inventoryExclusions)
+        Write-JsonFile -LiteralPath $inventoryPath -Value ([ordered]@{
+            schema_version = 1
+            excluded_relative_paths = $inventoryExclusions
+            unreadable_entry_count = @($inventory | Where-Object { $_.hash_status -ne 'OK' }).Count
+            entries = $inventory
+        })
+        $inventorySha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
         $manifest.cleanup_status = $cleanupStatus
         if ($null -eq $PrimaryFailure) { $manifest.run_status = 'BLOCKED' }
-        $manifest.evidence_completeness = 'INCOMPLETE'
+        $manifest.evidence_completeness = $evidenceCompleteness
         $manifest.finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        $manifest.final_evidence_inventory_sha256 = $inventorySha256
+        $manifestText = ($manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine
+        $sanitizedManifestText = ConvertTo-RedactedText -Value $manifestText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+        Test-RedactedStructuredText -LiteralPath $manifestPath -Text $sanitizedManifestText
+        Write-Utf8NoBom -LiteralPath $manifestPath -Value $sanitizedManifestText
+    }
+
+    $manifestReadBack = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $primaryFailurePreserved = if ($null -eq $PrimaryFailure) {
+        $null -eq $manifestReadBack.primary_failure
+    }
+    else {
+        $manifestReadBack.primary_failure.failure_code -eq $PrimaryFailure.failure_code
+    }
+    $finalizationFailuresRecorded = @($manifestReadBack.finalization_failures).Count -eq $finalizationFailures.Count
+    $structuralFinalizationComplete = (Test-Path -LiteralPath $cleanupLedgerPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $inventoryPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $manifestPath -PathType Leaf) -and
+        $primaryFailurePreserved -and $finalizationFailuresRecorded
+    if ($structuralFinalizationComplete) {
+        $manifest.finalization_status = 'FINALIZED'
         $manifestText = ($manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine
         $sanitizedManifestText = ConvertTo-RedactedText -Value $manifestText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
         Test-RedactedStructuredText -LiteralPath $manifestPath -Text $sanitizedManifestText
@@ -2332,12 +2747,15 @@ function Invoke-HarnessFinalization {
         manifest_path = $manifestPath
         manifest_sha256 = $manifestSha256
         cleanup_status = $cleanupStatus
+        finalization_status = [string]$manifest.finalization_status
+        evidence_completeness = $evidenceCompleteness
         privacy_comparison_status = $privacyComparisonStatus
         protected_file_comparison_status = $protectedFileComparisonStatus
         environment_restore_status = $environmentRestoreStatus
         runtime_root_cleanup_status = $runtimeRootCleanupStatus
         evidence_root_preserved = [bool]$evidenceRootPreserved
         clear_personal_path_match_count = $postManifestClearPathCount
+        persistently_locked_file_count = [int]$runtimeUnlockResult.persistently_locked_file_count
         finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
     }
 }
@@ -2452,6 +2870,20 @@ function Invoke-SyntheticFailureFinalizationValidation {
                 wdio_status = 'FAILED-BEFORE-LAUNCH'
                 create_status = 'FAILED-BEFORE-LAUNCH'
                 restart_status = 'NOT RUN'
+                mandatory_evidence_relative_paths = @(
+                    'git-preflight.json',
+                    'toolchain.json',
+                    'run-metadata.json',
+                    'build-provenance.json',
+                    'fixture-metadata.json',
+                    'shim-source-metadata.json',
+                    'shim-executable-metadata.json',
+                    'protected-files-before.json'
+                )
+                not_applicable_evidence_relative_paths = @(
+                    'create/create-state.json',
+                    'restart/restart-state.json'
+                )
             })
 
         $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
@@ -2491,10 +2923,15 @@ function Invoke-SyntheticFailureFinalizationValidation {
         }
         if (-not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf) -or
             $manifest.run_status -ne 'FAILED' -or
-            $manifest.primary_failure.failure_code -ne 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE') {
+            $manifest.primary_failure.failure_code -ne 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE' -or
+            $manifest.finalization_status -ne 'FINALIZED' -or
+            $manifest.evidence_completeness -ne 'COMPLETE') {
             throw 'SYNTHETIC-FAILED-MANIFEST-FAILED'
         }
-        if ($finalization.finalization_failures.Count -ne 0) { throw 'SYNTHETIC-FINALIZATION-FAILURES-NONZERO' }
+        if ($finalization.finalization_failures.Count -ne 0) {
+            throw ('SYNTHETIC-FINALIZATION-FAILURES-NONZERO:' +
+                ($finalization.finalization_failures | ConvertTo-Json -Depth 10 -Compress))
+        }
         if ($cleanupLedger.owned_process_cleanup_status.processes.Count -ne 0) { throw 'SYNTHETIC-PROCESS-CLEANUP-NONZERO' }
         if ($clearPersonalPathFound) { throw 'SYNTHETIC-CLEAR-PERSONAL-PATH-DETECTED' }
 
@@ -2612,10 +3049,12 @@ finally { $databaseStream.Dispose() }
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
         $captureRecord = [pscustomobject][ordered]@{
             role = 'synthetic-monitor'
+            process_launched = $false
             raw_stdout_path = Join-Path $rawLogRoot 'synthetic.stdout.raw.log'
             raw_stderr_path = Join-Path $rawLogRoot 'synthetic.stderr.raw.log'
             evidence_stdout_path = Join-Path $evidenceRoot 'synthetic.stdout.log'
             evidence_stderr_path = Join-Path $evidenceRoot 'synthetic.stderr.log'
+            stream_publications = @()
             sanitized_logs_created = $false
             raw_logs_removed = $false
         }
@@ -2623,6 +3062,7 @@ finally { $databaseStream.Dispose() }
         $syntheticProcess = Start-Process -FilePath 'powershell.exe' `
             -ArgumentList @('-NoProfile', '-EncodedCommand', $encodedCommand) -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path
+        $captureRecord.process_launched = $true
         $null = Register-OwnedProcessObject -Process $syntheticProcess -Role 'synthetic-monitor' -CaptureRecord $captureRecord
         $launcherIdentity = $null
         for ($identityAttempt = 1; $identityAttempt -le 20 -and $null -eq $launcherIdentity; $identityAttempt++) {
@@ -2664,6 +3104,11 @@ finally { $databaseStream.Dispose() }
                 wdio_status = 'FAILED-MONITOR'
                 create_status = 'FAILED-MONITOR'
                 restart_status = 'NOT RUN'
+                mandatory_evidence_relative_paths = @(
+                    'run-metadata.json',
+                    'protected-files-before.json'
+                )
+                not_applicable_evidence_relative_paths = @('restart/restart-state.json')
             })
 
         $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
@@ -2694,8 +3139,22 @@ finally { $databaseStream.Dispose() }
         if ($cleanupLedger.process_wait_status -ne 'PASS') { throw 'SYNTHETIC-PROCESS-WAIT-INCOMPLETE' }
         if ($cleanupLedger.log_handle_release_status -ne 'PASS') { throw 'SYNTHETIC-LOG-HANDLE-NOT-RELEASED' }
         if ($cleanupLedger.runtime_unlock_status.status -ne 'PASS') { throw 'SYNTHETIC-DB-HANDLE-NOT-RELEASED' }
-        if (-not $captureRecord.raw_logs_removed) { throw 'SYNTHETIC-RAW-LOGS-RESIDUAL' }
-        if (-not $captureRecord.sanitized_logs_created -or
+        if ($cleanupLedger.raw_log_cleanup_status -ne 'PASS' -or
+            @($cleanupLedger.log_publications | Where-Object { $_.raw_cleanup_status -ne 'PASS' }).Count -ne 0) {
+            $rawLogResidualDiagnostic = [ordered]@{
+                runtime_unlock_status = $cleanupLedger.runtime_unlock_status.status
+                persistently_locked_file_count = $cleanupLedger.persistently_locked_file_count
+                log_handle_release_status = $cleanupLedger.log_handle_release_status
+                raw_log_cleanup_status = $cleanupLedger.raw_log_cleanup_status
+                sanitized_log_status = $cleanupLedger.sanitized_log_status
+                log_publications = $cleanupLedger.log_publications
+            }
+            throw ('SYNTHETIC-RAW-LOGS-RESIDUAL:' + ($rawLogResidualDiagnostic | ConvertTo-Json -Depth 10 -Compress))
+        }
+        if ($cleanupLedger.sanitized_log_status -ne 'PASS' -or
+            @($cleanupLedger.log_publications | Where-Object {
+                $_.publication_status -notin @('PASS_EMPTY', 'PASS_CONTENT', 'NOT_CREATED')
+            }).Count -ne 0 -or
             $sanitizedStdout -notmatch '%REPO%' -or $sanitizedStdout -notmatch '%RUNTIME_ROOT%' -or
             $sanitizedStdout -notmatch '%EVIDENCE_ROOT%' -or $sanitizedStdout -notmatch '%USERPROFILE%' -or
             $sanitizedStderr -notmatch '%TEMP%' -or $sanitizedStderr -notmatch '%APPDATA%' -or
@@ -2710,10 +3169,14 @@ finally { $databaseStream.Dispose() }
             throw 'SYNTHETIC-FINAL-INVENTORY-FAILED'
         }
         if (-not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf) -or
-            $manifest.run_status -ne 'FAILED' -or $manifest.primary_failure.failure_code -ne 'WDIO-MONITOR-FAILURE') {
+            $manifest.run_status -ne 'FAILED' -or $manifest.primary_failure.failure_code -ne 'WDIO-MONITOR-FAILURE' -or
+            $manifest.finalization_status -ne 'FINALIZED' -or $manifest.evidence_completeness -ne 'COMPLETE') {
             throw 'SYNTHETIC-FINAL-MANIFEST-FAILED'
         }
-        if ($finalization.finalization_failures.Count -ne 0) { throw 'SYNTHETIC-FINALIZATION-FAILURES-NONZERO' }
+        if ($finalization.finalization_failures.Count -ne 0) {
+            throw ('SYNTHETIC-FINALIZATION-FAILURES-NONZERO:' +
+                ($finalization.finalization_failures | ConvertTo-Json -Depth 10 -Compress))
+        }
 
         return [ordered]@{
             SYNTHETIC_MONITOR_FAILURE_PRESERVED = 'PASS'
@@ -2765,6 +3228,260 @@ finally { $databaseStream.Dispose() }
     }
 }
 
+function Invoke-EmptyLogFinalizationValidation {
+    $runToken = 'empty-log-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-empty-log-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-empty-log-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $randomGenerator.GetBytes($hmacKey) }
+    finally { $randomGenerator.Dispose() }
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            scenario = 'SYNTHETIC-EMPTY-STDOUT-STDERR'
+            application_launch = 'NOT RUN'
+        })
+        $rawLogRoot = Join-Path $runtimeRoot 'raw-logs\empty'
+        $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
+        $captureRecord = [pscustomobject][ordered]@{
+            role = 'synthetic-empty'
+            process_launched = $true
+            raw_stdout_path = Join-Path $rawLogRoot 'empty.stdout.raw.log'
+            raw_stderr_path = Join-Path $rawLogRoot 'empty.stderr.raw.log'
+            evidence_stdout_path = Join-Path $evidenceRoot 'empty.stdout.log'
+            evidence_stderr_path = Join-Path $evidenceRoot 'empty.stderr.log'
+            stream_publications = @()
+            sanitized_logs_created = $false
+            raw_logs_removed = $false
+        }
+        [IO.File]::WriteAllBytes($captureRecord.raw_stdout_path, [byte[]]@())
+        [IO.File]::WriteAllBytes($captureRecord.raw_stderr_path, [byte[]]@())
+
+        $nullValueRejected = $false
+        try {
+            Write-Utf8NoBom -LiteralPath (Join-Path $runtimeRoot 'null-value-must-not-exist.txt') -Value $null
+        }
+        catch {
+            $nullValueRejected = $_.Exception.Message -match 'WRITE-UTF8-VALUE-NULL'
+        }
+        if (-not $nullValueRejected) { throw 'SYNTHETIC-NULL-TEXT-VALUE-NOT-REJECTED' }
+
+        Publish-SanitizedLogCapture -CaptureRecord $captureRecord -EvidenceRoot $evidenceRoot -RuntimeRoot $runtimeRoot
+        $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+            -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+            -PersonalRoots ([ordered]@{}) -PrivacyBefore $null -ProtectedPaths ([ordered]@{}) `
+            -ProtectedBefore $null -EnvironmentBefore $null -OwnedProcessIdentities @() `
+            -OwnedProcessObjects @() -LogCaptures @($captureRecord) -PrimaryFailure $null -Context ([ordered]@{
+                first_incomplete_phase = 'complete'
+                app_baseline_sha = $ExpectedAppBaseline
+                harness_head_sha = 'synthetic-no-head'
+                build_status = 'NOT RUN'
+                application_launch_status = 'NOT RUN'
+                wdio_status = 'NOT RUN'
+                create_status = 'NOT RUN'
+                restart_status = 'NOT RUN'
+                mandatory_evidence_relative_paths = @('run-metadata.json', 'empty.stdout.log', 'empty.stderr.log')
+                not_applicable_evidence_relative_paths = @(
+                    'create/create-state.json',
+                    'restart/restart-state.json'
+                )
+            })
+
+        $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $finalization.manifest_path -Raw | ConvertFrom-Json
+        $stdoutPublication = @($cleanupLedger.log_publications | Where-Object { $_.stream -eq 'stdout' })
+        $stderrPublication = @($cleanupLedger.log_publications | Where-Object { $_.stream -eq 'stderr' })
+        $stdoutBytes = [IO.File]::ReadAllBytes($captureRecord.evidence_stdout_path)
+        $stderrBytes = [IO.File]::ReadAllBytes($captureRecord.evidence_stderr_path)
+        $falseLockFailures = @($manifest.finalization_failures | Where-Object {
+            $_.failure_code -eq 'RUNTIME-FILE-LOCK-PERSISTED'
+        })
+
+        if ($stdoutPublication.Count -ne 1 -or $stdoutPublication[0].publication_status -ne 'PASS_EMPTY' -or
+            $stderrPublication.Count -ne 1 -or $stderrPublication[0].publication_status -ne 'PASS_EMPTY') {
+            throw 'SYNTHETIC-EMPTY-LOG-PUBLICATION-FAILED'
+        }
+        if ($stdoutBytes.Length -ne 0 -or $stderrBytes.Length -ne 0) {
+            throw 'SYNTHETIC-EMPTY-LOG-SIZE-MISMATCH'
+        }
+        if ($cleanupLedger.raw_log_cleanup_status -ne 'PASS' -or
+            @($cleanupLedger.log_publications | Where-Object { $_.raw_cleanup_status -ne 'PASS' }).Count -ne 0 -or
+            (Test-Path -LiteralPath $captureRecord.raw_stdout_path) -or
+            (Test-Path -LiteralPath $captureRecord.raw_stderr_path)) {
+            throw 'SYNTHETIC-EMPTY-RAW-LOGS-RESIDUAL'
+        }
+        if ([int]$finalization.clear_personal_path_match_count -ne 0) { throw 'SYNTHETIC-EMPTY-CLEAR-PATH-DETECTED' }
+        if ($falseLockFailures.Count -ne 0 -or [int]$cleanupLedger.persistently_locked_file_count -ne 0) {
+            throw 'SYNTHETIC-EMPTY-FALSE-LOCK-CLASSIFICATION'
+        }
+        if ($manifest.finalization_status -ne 'FINALIZED' -or $manifest.evidence_completeness -ne 'COMPLETE') {
+            throw 'SYNTHETIC-EMPTY-MANIFEST-SEMANTICS-INVALID'
+        }
+        if (-not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf)) {
+            throw 'SYNTHETIC-EMPTY-FINAL-EVIDENCE-MISSING'
+        }
+        if ($finalization.finalization_failures.Count -ne 0) {
+            throw ('SYNTHETIC-EMPTY-FINALIZATION-FAILURES-NONZERO:' +
+                ($finalization.finalization_failures | ConvertTo-Json -Depth 10 -Compress))
+        }
+        if (Test-Path -LiteralPath $runtimeRoot) { throw 'SYNTHETIC-EMPTY-RUNTIME-ROOT-RESIDUAL' }
+
+        return [ordered]@{
+            SYNTHETIC_NULL_VALUE_REJECTED = 'PASS'
+            SYNTHETIC_EMPTY_STDOUT_PUBLICATION = 'PASS'
+            SYNTHETIC_EMPTY_STDERR_PUBLICATION = 'PASS'
+            SYNTHETIC_EMPTY_STDOUT_SIZE = 0
+            SYNTHETIC_EMPTY_STDERR_SIZE = 0
+            SYNTHETIC_EMPTY_LOG_BOM_ABSENT = 'PASS'
+            SYNTHETIC_EMPTY_RAW_LOGS_REMOVED = 'PASS'
+            SYNTHETIC_EMPTY_CLEAR_PATH_COUNT = 0
+            SYNTHETIC_EMPTY_FALSE_LOCK_CODE_ABSENT = 'PASS'
+            SYNTHETIC_EMPTY_PERSISTENT_LOCK_COUNT = 0
+            SYNTHETIC_EMPTY_FINALIZATION_STATUS = 'FINALIZED'
+            SYNTHETIC_EMPTY_EVIDENCE_COMPLETENESS = 'COMPLETE'
+            SYNTHETIC_EMPTY_INVENTORY = 'PASS'
+            SYNTHETIC_EMPTY_MANIFEST = 'PASS'
+            SYNTHETIC_EMPTY_FINALIZATION_FAILURE_COUNT = 0
+        }
+    }
+    finally {
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+    }
+}
+
+function Invoke-PublicationFailureFinalizationValidation {
+    $runToken = 'publication-failure-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-publication-failure-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-publication-failure-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $randomGenerator.GetBytes($hmacKey) }
+    finally { $randomGenerator.Dispose() }
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            scenario = 'SYNTHETIC-SANITIZED-PUBLICATION-FAILURE'
+            application_launch = 'NOT RUN'
+        })
+        $rawLogRoot = Join-Path $runtimeRoot 'raw-logs\publication-failure'
+        $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
+        $captureRecord = [pscustomobject][ordered]@{
+            role = 'synthetic-publication-failure'
+            process_launched = $true
+            raw_stdout_path = Join-Path $rawLogRoot 'failure.stdout.raw.log'
+            raw_stderr_path = Join-Path $rawLogRoot 'failure.stderr.raw.log'
+            evidence_stdout_path = Join-Path $evidenceRoot 'failure.stdout.log'
+            evidence_stderr_path = Join-Path $evidenceRoot 'failure.stderr.log'
+            stream_publications = @()
+            sanitized_logs_created = $false
+            raw_logs_removed = $false
+            inject_publication_failure_stream = 'stdout'
+        }
+        Write-Utf8NoBom -LiteralPath $captureRecord.raw_stdout_path -Value "synthetic stdout`n"
+        Write-Utf8NoBom -LiteralPath $captureRecord.raw_stderr_path -Value ''
+
+        $primaryFailure = $null
+        try { throw 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE' }
+        catch {
+            $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'synthetic-publication'
+            Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+        }
+
+        $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+            -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+            -PersonalRoots ([ordered]@{}) -PrivacyBefore $null -ProtectedPaths ([ordered]@{}) `
+            -ProtectedBefore $null -EnvironmentBefore $null -OwnedProcessIdentities @() `
+            -OwnedProcessObjects @() -LogCaptures @($captureRecord) -PrimaryFailure $primaryFailure -Context ([ordered]@{
+                first_incomplete_phase = 'synthetic-publication'
+                app_baseline_sha = $ExpectedAppBaseline
+                harness_head_sha = 'synthetic-no-head'
+                build_status = 'NOT RUN'
+                application_launch_status = 'NOT RUN'
+                wdio_status = 'NOT RUN'
+                create_status = 'NOT RUN'
+                restart_status = 'NOT RUN'
+                mandatory_evidence_relative_paths = @('run-metadata.json', 'failure.stdout.log', 'failure.stderr.log')
+                not_applicable_evidence_relative_paths = @(
+                    'create/create-state.json',
+                    'restart/restart-state.json'
+                )
+            })
+
+        $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $finalization.manifest_path -Raw | ConvertFrom-Json
+        $publicationFailures = @($manifest.finalization_failures | Where-Object {
+            $_.failure_code -eq 'SANITIZED-LOG-PUBLICATION-FAILED'
+        })
+        $falseLockFailures = @($manifest.finalization_failures | Where-Object {
+            $_.failure_code -eq 'RUNTIME-FILE-LOCK-PERSISTED'
+        })
+        if ($publicationFailures.Count -eq 0) { throw 'SYNTHETIC-PUBLICATION-FAILURE-CODE-MISSING' }
+        if ($falseLockFailures.Count -ne 0 -or [int]$cleanupLedger.persistently_locked_file_count -ne 0) {
+            throw 'SYNTHETIC-PUBLICATION-FALSE-LOCK-CLASSIFICATION'
+        }
+        if ($manifest.finalization_status -ne 'FINALIZED' -or $manifest.evidence_completeness -ne 'INCOMPLETE') {
+            throw 'SYNTHETIC-PUBLICATION-MANIFEST-SEMANTICS-INVALID'
+        }
+        if (-not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf)) {
+            throw 'SYNTHETIC-PUBLICATION-FINAL-EVIDENCE-MISSING'
+        }
+        if ($manifest.primary_failure.failure_code -ne $primaryFailure.failure_code) {
+            throw 'SYNTHETIC-PUBLICATION-PRIMARY-FAILURE-NOT-PRESERVED'
+        }
+
+        return [ordered]@{
+            SYNTHETIC_PUBLICATION_FAILURE_CODE = 'SANITIZED-LOG-PUBLICATION-FAILED'
+            SYNTHETIC_PUBLICATION_FALSE_LOCK_CODE_ABSENT = 'PASS'
+            SYNTHETIC_PUBLICATION_PERSISTENT_LOCK_COUNT = 0
+            SYNTHETIC_PUBLICATION_FINALIZATION_STATUS = 'FINALIZED'
+            SYNTHETIC_PUBLICATION_EVIDENCE_COMPLETENESS = 'INCOMPLETE'
+            SYNTHETIC_PUBLICATION_INVENTORY_PRESENT = 'PASS'
+            SYNTHETIC_PUBLICATION_MANIFEST_PRESENT = 'PASS'
+            SYNTHETIC_PUBLICATION_PRIMARY_FAILURE_PRESERVED = 'PASS'
+        }
+    }
+    finally {
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+    }
+}
+
 function Invoke-UnreadableEvidenceFinalizationValidation {
     $runToken = 'unreadable-evidence-' + [guid]::NewGuid().ToString('N')
     $evidencePrefix = 'ytm-free-import-delete-unreadable-evidence-'
@@ -2809,6 +3526,11 @@ function Invoke-UnreadableEvidenceFinalizationValidation {
                 wdio_status = 'NOT RUN'
                 create_status = 'NOT RUN'
                 restart_status = 'NOT RUN'
+                mandatory_evidence_relative_paths = @('intentionally-unreadable.json')
+                not_applicable_evidence_relative_paths = @(
+                    'create/create-state.json',
+                    'restart/restart-state.json'
+                )
             })
 
         $inventoryDocument = Get-Content -LiteralPath $finalization.inventory_path -Raw | ConvertFrom-Json
@@ -2821,7 +3543,8 @@ function Invoke-UnreadableEvidenceFinalizationValidation {
             $null -ne $unreadableEntries[0].PSObject.Properties['relative_path']) {
             throw 'SYNTHETIC-UNREADABLE-INVENTORY-ENTRY-INVALID'
         }
-        if ($manifestDocument.evidence_completeness -ne 'INCOMPLETE' -or
+        if ($manifestDocument.finalization_status -ne 'FINALIZED' -or
+            $manifestDocument.evidence_completeness -ne 'INCOMPLETE' -or
             -not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or
             -not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf)) {
             throw 'SYNTHETIC-UNREADABLE-MANIFEST-NOT-FINALIZED'
@@ -2882,8 +3605,27 @@ function Invoke-FullRuntimeHarness {
     $wdioStatus = 'NOT RUN'
     $createStatus = 'NOT RUN'
     $restartStatus = 'NOT RUN'
+    $phaseEvidenceCatalog = @(
+        'git-preflight.json',
+        'toolchain.json',
+        'run-metadata.json',
+        'fixture-metadata.json',
+        'protected-files-before.json',
+        'shim-source-metadata.json',
+        'shim-executable-metadata.json',
+        'build-provenance.json',
+        'wdio-launch-plans.json',
+        'controlled-environment-readback.json',
+        'create/create-state.json',
+        'restart/restart-state.json',
+        'final-logical-snapshot.json'
+    )
+    $mandatoryEvidenceRelativePaths = [Collections.Generic.List[string]]::new()
     try {
         $firstIncompletePhase = 'preflight'
+        foreach ($preflightEvidencePath in @('git-preflight.json', 'toolchain.json', 'run-metadata.json')) {
+            $mandatoryEvidenceRelativePaths.Add($preflightEvidencePath) | Out-Null
+        }
         $headRead = @(Invoke-GitRead -Arguments @('rev-parse', 'HEAD'))
         if ($headRead.Count -eq 1) { $contextHarnessHead = [string]$headRead[0] }
         $preflight = Invoke-SafePreflight
@@ -2926,6 +3668,7 @@ function Invoke-FullRuntimeHarness {
         })
 
         $firstIncompletePhase = 'fixture'
+        $mandatoryEvidenceRelativePaths.Add('fixture-metadata.json') | Out-Null
         $fixtureStem = "step6r3b1-import-$runToken"
         $fixtureName = "$fixtureStem.csv"
         $playlistName = "Step6R3B1 Playlist $runToken"
@@ -2944,11 +3687,17 @@ function Invoke-FullRuntimeHarness {
         })
 
         $firstIncompletePhase = 'privacy-before'
+        foreach ($privacySurfaceName in $personalRoots.Keys) {
+            $mandatoryEvidenceRelativePaths.Add("privacy-$privacySurfaceName-before.json") | Out-Null
+        }
+        $mandatoryEvidenceRelativePaths.Add('protected-files-before.json') | Out-Null
         $privacyBefore = Capture-PrivacySnapshots -Roots $personalRoots -Key $hmacKey -EvidenceRoot $evidenceRoot -Moment 'before'
         $protectedBefore = @(Get-ProtectedFileSnapshots -Paths $protectedPaths -Key $hmacKey)
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'protected-files-before.json') -Value $protectedBefore
 
         $firstIncompletePhase = 'shim-build'
+        $mandatoryEvidenceRelativePaths.Add('shim-source-metadata.json') | Out-Null
+        $mandatoryEvidenceRelativePaths.Add('shim-executable-metadata.json') | Out-Null
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-source-metadata.json') -Value ([ordered]@{
             source_relative_path = 'scripts/yt-dlp-import-delete-shim.rs'
             source_sha256 = (Get-FileHash -LiteralPath $ShimSource -Algorithm SHA256).Hash
@@ -2965,6 +3714,7 @@ function Invoke-FullRuntimeHarness {
         })
 
         $firstIncompletePhase = 'application-build'
+        $mandatoryEvidenceRelativePaths.Add('build-provenance.json') | Out-Null
         $buildStatus = 'IN PROGRESS'
         $buildStart = (Get-Date).ToUniversalTime()
         $npm = Get-Command npm.cmd -CommandType Application | Select-Object -First 1
@@ -2997,6 +3747,8 @@ function Invoke-FullRuntimeHarness {
         $buildStatus = 'PASS'
 
         $firstIncompletePhase = 'wdio-launch-plan'
+        $mandatoryEvidenceRelativePaths.Add('wdio-launch-plans.json') | Out-Null
+        $mandatoryEvidenceRelativePaths.Add('controlled-environment-readback.json') | Out-Null
         $createLaunchPlan = New-WdioLaunchPlan -Phase 'create'
         $restartLaunchPlan = New-WdioLaunchPlan -Phase 'restart'
         Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'wdio-launch-plans.json') -Value ([ordered]@{
@@ -3045,6 +3797,7 @@ function Invoke-FullRuntimeHarness {
         })
 
         $firstIncompletePhase = 'wdio-create'
+        $mandatoryEvidenceRelativePaths.Add('create/create-state.json') | Out-Null
         $applicationLaunchStatus = 'CREATE ATTEMPTED'
         $wdioStatus = 'CREATE IN PROGRESS'
         $createStatus = 'IN PROGRESS'
@@ -3055,6 +3808,7 @@ function Invoke-FullRuntimeHarness {
         $wdioStatus = 'CREATE PASS'
 
         $firstIncompletePhase = 'wdio-restart'
+        $mandatoryEvidenceRelativePaths.Add('restart/restart-state.json') | Out-Null
         $applicationLaunchStatus = 'RESTART ATTEMPTED'
         $wdioStatus = 'RESTART IN PROGRESS'
         $restartStatus = 'IN PROGRESS'
@@ -3065,6 +3819,7 @@ function Invoke-FullRuntimeHarness {
         $wdioStatus = 'PASS'
 
         $firstIncompletePhase = 'runtime-evidence-validation'
+        $mandatoryEvidenceRelativePaths.Add('final-logical-snapshot.json') | Out-Null
         $createDetails = Get-Content -LiteralPath (Join-Path $createEvidence 'create-state.json') -Raw | ConvertFrom-Json
         $restartDetails = Get-Content -LiteralPath (Join-Path $restartEvidence 'restart-state.json') -Raw | ConvertFrom-Json
         $createOllamaState = Assert-OllamaStateEvidenceSchema -State $createDetails -Phase 'create'
@@ -3148,6 +3903,10 @@ function Invoke-FullRuntimeHarness {
                     wdio_status = $wdioStatus
                     create_status = $createStatus
                     restart_status = $restartStatus
+                    mandatory_evidence_relative_paths = @($mandatoryEvidenceRelativePaths)
+                    not_applicable_evidence_relative_paths = @($phaseEvidenceCatalog | Where-Object {
+                        $_ -notin @($mandatoryEvidenceRelativePaths)
+                    })
                 })
         }
         catch {
@@ -3197,6 +3956,7 @@ if ($ContractValidateOnly) {
     Write-Output "CLEANUP_REPARSE_REJECTION: $($result.CLEANUP_REPARSE_REJECTION)"
     Write-Output "EXTERNAL_REPARSE_TARGET_UNCHANGED: $($result.EXTERNAL_REPARSE_TARGET_UNCHANGED)"
     Write-Output "AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT:$($result.AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT)"
+    Write-Output "EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT:$($result.EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT)"
     Write-Output "SYNTHETIC_PRIMARY_FAILURE_PRESERVED:$($result.SYNTHETIC_PRIMARY_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_PRIVACY_AFTER_CAPTURED:$($result.SYNTHETIC_PRIVACY_AFTER_CAPTURED)"
     Write-Output "SYNTHETIC_PRIVACY_EQUALITY:$($result.SYNTHETIC_PRIVACY_EQUALITY)"
@@ -3229,6 +3989,8 @@ if ($LaunchPlanValidateOnly) {
 
 if ($MonitorAndFinalizationValidateOnly) {
     $result = Invoke-MonitorAndFinalizationValidation
+    $emptyLogResult = Invoke-EmptyLogFinalizationValidation
+    $publicationFailureResult = Invoke-PublicationFailureFinalizationValidation
     $unreadableEvidenceResult = Invoke-UnreadableEvidenceFinalizationValidation
     Write-Output "SYNTHETIC_MONITOR_FAILURE_PRESERVED:$($result.SYNTHETIC_MONITOR_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_OWNED_PROCESS_STOPPED:$($result.SYNTHETIC_OWNED_PROCESS_STOPPED)"
@@ -3244,6 +4006,29 @@ if ($MonitorAndFinalizationValidateOnly) {
     Write-Output "SYNTHETIC_FINAL_INVENTORY:$($result.SYNTHETIC_FINAL_INVENTORY)"
     Write-Output "SYNTHETIC_FINAL_MANIFEST:$($result.SYNTHETIC_FINAL_MANIFEST)"
     Write-Output "SYNTHETIC_FINALIZATION_FAILURE_COUNT:$($result.SYNTHETIC_FINALIZATION_FAILURE_COUNT)"
+    Write-Output "SYNTHETIC_NULL_VALUE_REJECTED:$($emptyLogResult.SYNTHETIC_NULL_VALUE_REJECTED)"
+    Write-Output "SYNTHETIC_EMPTY_STDOUT_PUBLICATION:$($emptyLogResult.SYNTHETIC_EMPTY_STDOUT_PUBLICATION)"
+    Write-Output "SYNTHETIC_EMPTY_STDERR_PUBLICATION:$($emptyLogResult.SYNTHETIC_EMPTY_STDERR_PUBLICATION)"
+    Write-Output "SYNTHETIC_EMPTY_STDOUT_SIZE:$($emptyLogResult.SYNTHETIC_EMPTY_STDOUT_SIZE)"
+    Write-Output "SYNTHETIC_EMPTY_STDERR_SIZE:$($emptyLogResult.SYNTHETIC_EMPTY_STDERR_SIZE)"
+    Write-Output "SYNTHETIC_EMPTY_LOG_BOM_ABSENT:$($emptyLogResult.SYNTHETIC_EMPTY_LOG_BOM_ABSENT)"
+    Write-Output "SYNTHETIC_EMPTY_RAW_LOGS_REMOVED:$($emptyLogResult.SYNTHETIC_EMPTY_RAW_LOGS_REMOVED)"
+    Write-Output "SYNTHETIC_EMPTY_CLEAR_PATH_COUNT:$($emptyLogResult.SYNTHETIC_EMPTY_CLEAR_PATH_COUNT)"
+    Write-Output "SYNTHETIC_EMPTY_FALSE_LOCK_CODE_ABSENT:$($emptyLogResult.SYNTHETIC_EMPTY_FALSE_LOCK_CODE_ABSENT)"
+    Write-Output "SYNTHETIC_EMPTY_PERSISTENT_LOCK_COUNT:$($emptyLogResult.SYNTHETIC_EMPTY_PERSISTENT_LOCK_COUNT)"
+    Write-Output "SYNTHETIC_EMPTY_FINALIZATION_STATUS:$($emptyLogResult.SYNTHETIC_EMPTY_FINALIZATION_STATUS)"
+    Write-Output "SYNTHETIC_EMPTY_EVIDENCE_COMPLETENESS:$($emptyLogResult.SYNTHETIC_EMPTY_EVIDENCE_COMPLETENESS)"
+    Write-Output "SYNTHETIC_EMPTY_INVENTORY:$($emptyLogResult.SYNTHETIC_EMPTY_INVENTORY)"
+    Write-Output "SYNTHETIC_EMPTY_MANIFEST:$($emptyLogResult.SYNTHETIC_EMPTY_MANIFEST)"
+    Write-Output "SYNTHETIC_EMPTY_FINALIZATION_FAILURE_COUNT:$($emptyLogResult.SYNTHETIC_EMPTY_FINALIZATION_FAILURE_COUNT)"
+    Write-Output "SYNTHETIC_PUBLICATION_FAILURE_CODE:$($publicationFailureResult.SYNTHETIC_PUBLICATION_FAILURE_CODE)"
+    Write-Output "SYNTHETIC_PUBLICATION_FALSE_LOCK_CODE_ABSENT:$($publicationFailureResult.SYNTHETIC_PUBLICATION_FALSE_LOCK_CODE_ABSENT)"
+    Write-Output "SYNTHETIC_PUBLICATION_PERSISTENT_LOCK_COUNT:$($publicationFailureResult.SYNTHETIC_PUBLICATION_PERSISTENT_LOCK_COUNT)"
+    Write-Output "SYNTHETIC_PUBLICATION_FINALIZATION_STATUS:$($publicationFailureResult.SYNTHETIC_PUBLICATION_FINALIZATION_STATUS)"
+    Write-Output "SYNTHETIC_PUBLICATION_EVIDENCE_COMPLETENESS:$($publicationFailureResult.SYNTHETIC_PUBLICATION_EVIDENCE_COMPLETENESS)"
+    Write-Output "SYNTHETIC_PUBLICATION_INVENTORY_PRESENT:$($publicationFailureResult.SYNTHETIC_PUBLICATION_INVENTORY_PRESENT)"
+    Write-Output "SYNTHETIC_PUBLICATION_MANIFEST_PRESENT:$($publicationFailureResult.SYNTHETIC_PUBLICATION_MANIFEST_PRESENT)"
+    Write-Output "SYNTHETIC_PUBLICATION_PRIMARY_FAILURE_PRESERVED:$($publicationFailureResult.SYNTHETIC_PUBLICATION_PRIMARY_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_UNREADABLE_EVIDENCE_FINALIZATION:$unreadableEvidenceResult"
     Write-NonClaims
     exit 0
