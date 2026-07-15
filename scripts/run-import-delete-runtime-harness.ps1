@@ -5,7 +5,9 @@ param(
     [switch]$LaunchPlanValidateOnly,
     [switch]$MonitorAndFinalizationValidateOnly,
     [switch]$ExternalCommandValidateOnly,
-    [switch]$WebViewIsolationValidateOnly
+    [switch]$WebViewIsolationValidateOnly,
+    [ValidateSet('Enforce', 'Observe')]
+    [string]$NetworkGateMode = 'Enforce'
 )
 
 Set-StrictMode -Version Latest
@@ -25,6 +27,12 @@ $Script:LogCaptures = [Collections.Generic.List[object]]::new()
 $Script:ActiveEvidenceRoot = $null
 $Script:ActiveRuntimeRoot = $null
 $Script:AdditionalCleanupPorts = @()
+$Script:CachedUsernameRedactionValues = $null
+$Script:UsernameRedactionLedger = [ordered]@{
+    total_count = 0
+    non_path_context_count = 0
+    non_path_categories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+}
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $HarnessPath = Join-Path $RepoRoot 'scripts\run-import-delete-runtime-harness.ps1'
@@ -990,6 +998,41 @@ function Capture-PrivacySnapshots {
     return $result
 }
 
+function Get-UsernameRedactionValues {
+    if ($null -ne $Script:CachedUsernameRedactionValues) { return @($Script:CachedUsernameRedactionValues) }
+    $usernameValues = [Collections.Generic.List[string]]::new()
+    $usernameValue = [string]$env:USERNAME
+    if (-not [string]::IsNullOrWhiteSpace($usernameValue)) { $usernameValues.Add($usernameValue) }
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:USERPROFILE)) {
+            $shortProfilePath = [string](New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:USERPROFILE).ShortPath
+            $shortProfileLeaf = [string](Split-Path -Leaf $shortProfilePath)
+            if (-not [string]::IsNullOrWhiteSpace($shortProfileLeaf) -and
+                @($usernameValues | Where-Object {
+                    [string]::Equals($_, $shortProfileLeaf, [StringComparison]::OrdinalIgnoreCase)
+                }).Count -eq 0) {
+                $usernameValues.Add($shortProfileLeaf)
+            }
+        }
+    }
+    catch { }
+    $Script:CachedUsernameRedactionValues = @($usernameValues)
+    return @($Script:CachedUsernameRedactionValues)
+}
+
+function Get-ClearPathScanTokens {
+    $scanTokens = @()
+    foreach ($usernameValue in @(Get-UsernameRedactionValues)) {
+        $scanTokens += [pscustomobject]@{ category = 'USERNAME'; value = $usernameValue }
+    }
+    foreach ($usersPathPrefix in @(
+        'C:\Users\', 'C:/Users/', 'C:\\Users\\', 'file:///C:/Users/', '%5CUsers', '%2FUsers'
+    )) {
+        $scanTokens += [pscustomobject]@{ category = 'USERS_PATH_PREFIX'; value = $usersPathPrefix }
+    }
+    return @($scanTokens)
+}
+
 function Get-EvidenceRedactionRules {
     param(
         [AllowNull()][string]$EvidenceRoot = $Script:ActiveEvidenceRoot,
@@ -1003,7 +1046,7 @@ function Get-EvidenceRedactionRules {
         [pscustomobject]@{ category = 'LOCALAPPDATA'; value = $env:LOCALAPPDATA; replacement = '%LOCALAPPDATA%' },
         [pscustomobject]@{ category = 'APPDATA'; value = $env:APPDATA; replacement = '%APPDATA%' },
         [pscustomobject]@{ category = 'TEMP'; value = $env:TEMP; replacement = '%TEMP%' },
-        [pscustomobject]@{ category = 'USERPROFILE'; value = $env:USERPROFILE; replacement = '%USERPROFILE%' }
+        [pscustomobject]@{ category = 'USERPROFILE'; value = $env:USERPROFILE; replacement = '%REDACTED_USERPROFILE%' }
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.value) } |
         Sort-Object { ([string]$_.value).Length } -Descending
 
@@ -1016,7 +1059,7 @@ function Get-EvidenceRedactionRules {
             $sourceValue,
             $sourceValue.Replace('\', '/'),
             $sourceValue.Replace('\', '\\')
-        ) | Sort-Object Length -Descending -Unique
+        ) | Select-Object -Unique | Sort-Object Length -Descending
         foreach ($variant in $variants) {
             if ([string]::IsNullOrWhiteSpace($variant)) { continue }
             $rules += [pscustomobject]@{
@@ -1079,6 +1122,27 @@ function Invoke-EvidenceSanitization {
         try {
             $originalText = [IO.File]::ReadAllText($evidenceFile.FullName)
             $sanitizedText = ConvertTo-RedactedText -Value $originalText -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot
+            foreach ($usernameValue in @(Get-UsernameRedactionValues)) {
+                $usernamePattern = [regex]::Escape($usernameValue)
+                foreach ($usernameMatch in @([regex]::Matches(
+                    $sanitizedText, $usernamePattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase))) {
+                    $Script:UsernameRedactionLedger.total_count++
+                    $precedingStart = [Math]::Max(0, $usernameMatch.Index - 12)
+                    $precedingText = $sanitizedText.Substring($precedingStart, $usernameMatch.Index - $precedingStart)
+                    if ($precedingText -match '(?i)users[\\/]{1,2}$' -or $precedingText -match '[\\/]$') { continue }
+                    $Script:UsernameRedactionLedger.non_path_context_count++
+                    $windowStart = [Math]::Max(0, $usernameMatch.Index - 40)
+                    $windowEnd = [Math]::Min($sanitizedText.Length, $usernameMatch.Index + $usernameMatch.Length + 40)
+                    $contextWindow = $sanitizedText.Substring($windowStart, $windowEnd - $windowStart)
+                    $usernameContextCategory = if ($contextWindow -match '(?i)\berror\b|\bwarning\b') { 'compiler message' }
+                    elseif ($contextWindow -match '(?i)node_modules|package') { 'package name' }
+                    elseif ([IO.Path]::GetExtension($evidenceFile.Name) -in @('.json', '.jsonl')) { 'unrelated JSON value' }
+                    else { 'other' }
+                    $null = $Script:UsernameRedactionLedger.non_path_categories.Add($usernameContextCategory)
+                }
+                $sanitizedText = [regex]::Replace($sanitizedText, $usernamePattern, '%REDACTED_USERNAME%',
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            }
             Test-RedactedStructuredText -LiteralPath $evidenceFile.FullName -Text $sanitizedText
             if ($sanitizedText -cne $originalText) {
                 Write-Utf8NoBom -LiteralPath $evidenceFile.FullName -Value $sanitizedText
@@ -1093,7 +1157,8 @@ function Invoke-EvidenceSanitization {
     }
 
     $clearPathMatches = @()
-    $redactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)
+    $redactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot) +
+        @(Get-ClearPathScanTokens)
     foreach ($evidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force | Sort-Object FullName)) {
         if ([IO.Path]::GetExtension($evidenceFile.Name) -notin $supportedExtensions) { continue }
         try {
@@ -1131,6 +1196,9 @@ function Invoke-EvidenceSanitization {
     Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'clear-path-scan.json') -Value ([ordered]@{
         schema_version = 1
         clear_personal_path_match_count = $clearPathMatchCount
+        username_replacement_total_count = [int]$Script:UsernameRedactionLedger.total_count
+        username_replacement_non_path_context_count = [int]$Script:UsernameRedactionLedger.non_path_context_count
+        username_replacement_non_path_categories = @($Script:UsernameRedactionLedger.non_path_categories | Sort-Object)
         matches = $clearPathMatches
         unreadable_files = $unreadableFiles
     })
@@ -2453,11 +2521,68 @@ function Monitor-WdioPhase {
     $nonLoopback = @($connections | Where-Object {
         $_.remote_address -notin @('127.0.0.1', '::1', '0.0.0.0', '::')
     })
-    if ($nonLoopback.Count -ne 0) {
+    $nonLoopbackTuples = @()
+    foreach ($tupleGroup in @($nonLoopback | Group-Object {
+        "$($_.owning_process)|$($_.remote_address)|$($_.remote_port)|$($_.state)"
+    })) {
+        $tupleSample = $tupleGroup.Group[0]
+        $tupleOwnerIdentity = @($owned | Where-Object {
+            [int]$_.process_id -eq [int]$tupleSample.owning_process
+        }) | Select-Object -First 1
+        $tupleTimesSorted = @($tupleGroup.Group | Sort-Object observed_at_utc)
+        $nonLoopbackTuples += [ordered]@{
+            phase = $Phase
+            owning_process = [int]$tupleSample.owning_process
+            process_role = if ($null -ne $tupleOwnerIdentity) { [string]$tupleOwnerIdentity.name } else { 'UNKNOWN' }
+            ownership_evidence = if ($null -ne $tupleOwnerIdentity) { 'owned-process-identity-table' }
+                else { 'pid-missing-from-owned-table' }
+            remote_address = [string]$tupleSample.remote_address
+            remote_port = [int]$tupleSample.remote_port
+            tcp_state = [string]$tupleSample.state
+            first_seen_utc = [string]$tupleTimesSorted[0].observed_at_utc
+            last_seen_utc = [string]$tupleTimesSorted[-1].observed_at_utc
+            observation_count = [int]$tupleGroup.Count
+        }
+    }
+    $networkGatePath = Join-Path $EvidenceRoot "network-gate-$Phase.json"
+    $networkGateRecord = [ordered]@{
+        schema_version = 1
+        network_gate_mode = [string]$NetworkGateMode
+        phase = $Phase
+        owned_non_loopback_tcp_connection_count = $nonLoopback.Count
+        owned_non_loopback_tcp_tuples = $nonLoopbackTuples
+        enforcement_action = if ($nonLoopback.Count -eq 0) { 'NONE' }
+            elseif ($NetworkGateMode -eq 'Enforce') { 'ABORT' } else { 'OBSERVE-CONTINUE' }
+        webview_gate_status = 'NOT RUN'
+        webview_gate_error = $null
+    }
+    Write-JsonFile -LiteralPath $networkGatePath -Value $networkGateRecord
+    if ($nonLoopback.Count -ne 0 -and $NetworkGateMode -eq 'Enforce') {
         throw 'UNEXPECTED-OWNED-PROCESS-NETWORK-CONNECTION'
     }
-    $webViewResult = Assert-WebViewBrowserRoot -OwnedProcesses $owned -WebViewDataDir $WebViewDataDir `
-        -ExpectedProxyPort $ExpectedProxyPort
+    $webViewResult = $null
+    try {
+        $webViewResult = Assert-WebViewBrowserRoot -OwnedProcesses $owned -WebViewDataDir $WebViewDataDir `
+            -ExpectedProxyPort $ExpectedProxyPort
+        $networkGateRecord.webview_gate_status = 'PASS'
+    }
+    catch {
+        $networkGateRecord.webview_gate_error = ConvertTo-RedactedText -Value $_.Exception.Message
+        if ($NetworkGateMode -ne 'Observe') {
+            $networkGateRecord.webview_gate_status = 'FAILED'
+            Write-JsonFile -LiteralPath $networkGatePath -Value $networkGateRecord
+            throw
+        }
+        $networkGateRecord.webview_gate_status = 'OBSERVED-FAILED'
+        $webViewResult = [ordered]@{
+            browser_root = $null
+            subprocess_count = $null
+            network_services = @()
+            flag_audit = $null
+            additional_args_present = $false
+        }
+    }
+    Write-JsonFile -LiteralPath $networkGatePath -Value $networkGateRecord
     if ($Process.ExitCode -ne 0) {
         throw "WDIO $Phase failed with exit $($Process.ExitCode)"
     }
@@ -3418,7 +3543,8 @@ function Invoke-HarnessFinalization {
     Write-Utf8NoBom -LiteralPath $manifestPath -Value $sanitizedManifestText
 
     $postManifestClearPathCount = 0
-    $finalRedactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot)
+    $finalRedactionRules = @(Get-EvidenceRedactionRules -EvidenceRoot $EvidenceRoot -RuntimeRoot $RuntimeRoot) +
+        @(Get-ClearPathScanTokens)
     foreach ($finalEvidenceFile in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force)) {
         if ([IO.Path]::GetExtension($finalEvidenceFile.Name) -notin @('.json', '.jsonl', '.log', '.txt', '.csv')) { continue }
         try {
@@ -3897,7 +4023,7 @@ finally { $databaseStream.Dispose() }
                 $_.publication_status -notin @('PASS_EMPTY', 'PASS_CONTENT', 'NOT_CREATED')
             }).Count -ne 0 -or
             $sanitizedStdout -notmatch '%REPO%' -or $sanitizedStdout -notmatch '%RUNTIME_ROOT%' -or
-            $sanitizedStdout -notmatch '%EVIDENCE_ROOT%' -or $sanitizedStdout -notmatch '%USERPROFILE%' -or
+            $sanitizedStdout -notmatch '%EVIDENCE_ROOT%' -or $sanitizedStdout -notmatch '%REDACTED_USERPROFILE%' -or
             $sanitizedStderr -notmatch '%TEMP%' -or $sanitizedStderr -notmatch '%APPDATA%' -or
             $sanitizedStderr -notmatch '%LOCALAPPDATA%') { throw 'SYNTHETIC-SANITIZED-LOGS-INVALID' }
         if ($syntheticClearPathCount -ne 0) { throw 'SYNTHETIC-CLEAR-PERSONAL-PATH-DETECTED' }
