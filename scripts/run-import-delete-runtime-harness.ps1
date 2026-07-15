@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$ContractValidateOnly,
-    [switch]$PreflightOnly
+    [switch]$PreflightOnly,
+    [switch]$LaunchPlanValidateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -83,7 +84,14 @@ $StopConditions = @(
     'RUNTIME-REPARSE-POINT-DETECTED',
     'RUNTIME-TREE-CONTAINMENT-FAILED',
     'RUNTIME-TREE-ENUMERATION-FAILED',
-    'PRIVACY-SNAPSHOT-COMPARABILITY-LOST'
+    'PRIVACY-SNAPSHOT-COMPARABILITY-LOST',
+    'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND',
+    'WDIO-LAUNCH-EXECUTABLE-AMBIGUOUS',
+    'WDIO-LAUNCH-FILEPATH-TYPE-MISMATCH',
+    'WDIO-LAUNCH-FILEPATH-EMPTY',
+    'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH',
+    'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
+    'FAILURE-FINALIZATION-INCOMPLETE'
 )
 
 function Write-Utf8NoBom {
@@ -517,6 +525,23 @@ function Invoke-ContractValidation {
         'HARNESS_DELTA_PATHS',
         'HARNESS_COMMIT_COUNT'
     )
+    Assert-ContainsAll -Text $harness -Label 'WDIO launch plan contract' -Values @(
+        'function New-WdioLaunchPlan',
+        'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND',
+        'WDIO-LAUNCH-EXECUTABLE-AMBIGUOUS',
+        'WDIO-LAUNCH-FILEPATH-TYPE-MISMATCH',
+        'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH',
+        'LaunchPlanValidateOnly'
+    )
+    Assert-ContainsAll -Text $harness -Label 'failure finalization contract' -Values @(
+        'function Invoke-HarnessFinalization',
+        'primary_failure_present',
+        'cleanup-ledger.json',
+        'final-evidence-inventory.json',
+        'final-manifest.json',
+        'final_evidence_inventory_sha256',
+        'SYNTHETIC-WDIO-PRELAUNCH-FAILURE'
+    )
 
     $validationToken = 'contractvalidation-00000000'
     $alpha = '{"id":"s6R3B1A001","title":"Step6R3B1 Alpha ' + $validationToken + '","channel":"Step6R3B1 Synthetic Artist","duration":123,"thumbnail":"data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="}'
@@ -540,6 +565,7 @@ function Invoke-ContractValidation {
     }
     $gitIdentity = Get-HarnessGitIdentity
     $safeTreeValidation = Invoke-SafeTreeContractValidation
+    $syntheticFailureValidation = Invoke-SyntheticFailureFinalizationValidation
     return [ordered]@{
         result = ('PASS ' + [char]0x2014 + ' CONTRACT-VALIDATED')
         APP_BASELINE_SHA = $gitIdentity.APP_BASELINE_SHA
@@ -565,6 +591,19 @@ function Invoke-ContractValidation {
         SNAPSHOT_REPARSE_REJECTION = $safeTreeValidation.SNAPSHOT_REPARSE_REJECTION
         CLEANUP_REPARSE_REJECTION = $safeTreeValidation.CLEANUP_REPARSE_REJECTION
         EXTERNAL_REPARSE_TARGET_UNCHANGED = $safeTreeValidation.EXTERNAL_REPARSE_TARGET_UNCHANGED
+        SYNTHETIC_PRIMARY_FAILURE_PRESERVED = $syntheticFailureValidation.SYNTHETIC_PRIMARY_FAILURE_PRESERVED
+        SYNTHETIC_PRIVACY_AFTER_CAPTURED = $syntheticFailureValidation.SYNTHETIC_PRIVACY_AFTER_CAPTURED
+        SYNTHETIC_PRIVACY_EQUALITY = $syntheticFailureValidation.SYNTHETIC_PRIVACY_EQUALITY
+        SYNTHETIC_ENVIRONMENT_RESTORED = $syntheticFailureValidation.SYNTHETIC_ENVIRONMENT_RESTORED
+        SYNTHETIC_RUNTIME_ROOT_REMOVED = $syntheticFailureValidation.SYNTHETIC_RUNTIME_ROOT_REMOVED
+        SYNTHETIC_EVIDENCE_ROOT_PRESERVED = $syntheticFailureValidation.SYNTHETIC_EVIDENCE_ROOT_PRESERVED
+        SYNTHETIC_CLEANUP_LEDGER = $syntheticFailureValidation.SYNTHETIC_CLEANUP_LEDGER
+        SYNTHETIC_FINAL_INVENTORY = $syntheticFailureValidation.SYNTHETIC_FINAL_INVENTORY
+        SYNTHETIC_FAILED_MANIFEST = $syntheticFailureValidation.SYNTHETIC_FAILED_MANIFEST
+        SYNTHETIC_FINALIZATION_FAILURE_COUNT = $syntheticFailureValidation.SYNTHETIC_FINALIZATION_FAILURE_COUNT
+        SYNTHETIC_ZERO_PROCESSES_STOPPED = $syntheticFailureValidation.SYNTHETIC_ZERO_PROCESSES_STOPPED
+        SYNTHETIC_ZERO_CLEAR_PERSONAL_PATHS = $syntheticFailureValidation.SYNTHETIC_ZERO_CLEAR_PERSONAL_PATHS
+        SYNTHETIC_INVENTORY_EXCLUSIONS = $syntheticFailureValidation.SYNTHETIC_INVENTORY_EXCLUSIONS
     }
 }
 
@@ -795,6 +834,73 @@ function Capture-PrivacySnapshots {
     return $result
 }
 
+function ConvertTo-RedactedText {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    $text = [string]$Value
+    $replacements = @(
+        [pscustomobject]@{ value = $RepoRoot; replacement = '%REPO%' },
+        [pscustomobject]@{ value = $env:USERPROFILE; replacement = '%USERPROFILE%' },
+        [pscustomobject]@{ value = $env:TEMP; replacement = '%TEMP%' }
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.value) } |
+        Sort-Object { $_.value.Length } -Descending
+    foreach ($replacement in $replacements) {
+        $text = $text.Replace([string]$replacement.value, [string]$replacement.replacement)
+    }
+    return $text
+}
+
+function New-PrimaryFailureRecord {
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Phase
+    )
+    $message = [string]$ErrorRecord.Exception.Message
+    $failureCode = 'UNCLASSIFIED-HARNESS-FAILURE'
+    if ($message -match '^([A-Z0-9][A-Z0-9_-]+)') {
+        $failureCode = $Matches[1]
+    }
+    return [ordered]@{
+        failure_code = $failureCode
+        failure_phase = $Phase
+        exception_type = $ErrorRecord.Exception.GetType().FullName
+        message_redacted = ConvertTo-RedactedText -Value $message
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Get-ProtectedFileSnapshots {
+    param(
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][byte[]]$Key
+    )
+    $entries = @()
+    foreach ($name in $Paths.Keys) {
+        $literalPath = [string]$Paths[$name]
+        $exists = Test-Path -LiteralPath $literalPath -PathType Leaf
+        $entries += [ordered]@{
+            path_hmac = Get-HmacHex -Key $Key -Value ([string]$name).ToLowerInvariant()
+            exists = $exists
+            size = if ($exists) { [int64](Get-Item -LiteralPath $literalPath).Length } else { $null }
+            content_sha256 = if ($exists) { (Get-FileHash -LiteralPath $literalPath -Algorithm SHA256).Hash } else { $null }
+        }
+    }
+    return @($entries | Sort-Object path_hmac)
+}
+
+function Get-ToolchainMetadata {
+    param([Parameter(Mandatory = $true)]$Tools)
+    $metadata = @()
+    foreach ($tool in $Tools) {
+        $metadata += [ordered]@{
+            name = [string]$tool.name
+            source_redacted = ConvertTo-RedactedText -Value $tool.path
+            source_type = if ($tool.path -is [string]) { 'System.String' } else { $tool.path.GetType().FullName }
+        }
+    }
+    return $metadata
+}
+
 function Invoke-ExternalCaptured {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -942,20 +1048,131 @@ function Monitor-WdioPhase {
     }
 }
 
+function New-WdioLaunchPlan {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('create', 'restart')]
+        [string]$Phase
+    )
+
+    $wdioCandidate = Join-Path $RepoRoot 'node_modules\.bin\wdio.cmd'
+    $resolvedExecutable = @(Resolve-Path -LiteralPath $wdioCandidate -ErrorAction SilentlyContinue)
+    if ($resolvedExecutable.Count -eq 0) {
+        throw 'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND'
+    }
+    if ($resolvedExecutable.Count -ne 1) {
+        throw 'WDIO-LAUNCH-EXECUTABLE-AMBIGUOUS'
+    }
+    $filePath = $resolvedExecutable[0].ProviderPath
+    if ($filePath -isnot [string]) {
+        throw 'WDIO-LAUNCH-FILEPATH-TYPE-MISMATCH'
+    }
+    $filePath = [IO.Path]::GetFullPath([string]$filePath)
+    if (-not [IO.Path]::IsPathRooted($filePath) -or
+        -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        throw 'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND'
+    }
+
+    $resolvedSpec = @(Resolve-Path -LiteralPath $SpecPath -ErrorAction SilentlyContinue)
+    if ($resolvedSpec.Count -eq 0) {
+        throw 'WDIO-LAUNCH-SPEC-NOT-FOUND'
+    }
+    if ($resolvedSpec.Count -ne 1) {
+        throw 'WDIO-LAUNCH-SPEC-AMBIGUOUS'
+    }
+    $resolvedSpecPath = $resolvedSpec[0].ProviderPath
+    if ($resolvedSpecPath -isnot [string]) {
+        throw 'WDIO-LAUNCH-SPEC-TYPE-MISMATCH'
+    }
+    $resolvedSpecPath = [IO.Path]::GetFullPath([string]$resolvedSpecPath)
+    if (-not $resolvedSpecPath.Equals([IO.Path]::GetFullPath($SpecPath), [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $resolvedSpecPath -PathType Leaf)) {
+        throw 'WDIO-LAUNCH-SPEC-MISMATCH'
+    }
+
+    [string[]]$argumentList = @(
+        'run',
+        [IO.Path]::GetFullPath($WdioConfig),
+        '--spec',
+        $resolvedSpecPath
+    )
+    return [pscustomobject][ordered]@{
+        FilePath = [string]$filePath
+        ArgumentList = $argumentList
+        WorkingDirectory = [string][IO.Path]::GetFullPath($RepoRoot)
+        Phase = [string]$Phase
+        SpecPath = [string]$resolvedSpecPath
+    }
+}
+
+function Invoke-LaunchPlanValidation {
+    $gitIdentity = Get-HarnessGitIdentity
+    $createOutputs = @(New-WdioLaunchPlan -Phase 'create')
+    $restartOutputs = @(New-WdioLaunchPlan -Phase 'restart')
+    if ($createOutputs.Count -ne 1 -or $restartOutputs.Count -ne 1) {
+        throw 'WDIO-LAUNCH-PLAN-CARDINALITY-MISMATCH'
+    }
+    $createPlan = $createOutputs[0]
+    $restartPlan = $restartOutputs[0]
+    $expectedSpec = [IO.Path]::GetFullPath($SpecPath)
+    return [ordered]@{
+        git = $gitIdentity
+        CREATE_FILEPATH_TYPE = $createPlan.FilePath.GetType().FullName
+        RESTART_FILEPATH_TYPE = $restartPlan.FilePath.GetType().FullName
+        CREATE_FILEPATH_CARDINALITY = @($createPlan.FilePath).Count
+        RESTART_FILEPATH_CARDINALITY = @($restartPlan.FilePath).Count
+        CREATE_SPEC_PATH_MATCH = $createPlan.SpecPath.Equals($expectedSpec, [StringComparison]::OrdinalIgnoreCase)
+        RESTART_SPEC_PATH_MATCH = $restartPlan.SpecPath.Equals($expectedSpec, [StringComparison]::OrdinalIgnoreCase)
+        CREATE_ARGUMENT_LIST_TYPE = $createPlan.ArgumentList.GetType().FullName
+        RESTART_ARGUMENT_LIST_TYPE = $restartPlan.ArgumentList.GetType().FullName
+        START_PROCESS_CALLED = $false
+        create_plan = $createPlan
+        restart_plan = $restartPlan
+    }
+}
+
 function Start-WdioPhase {
     param(
-        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)]$LaunchPlan,
         [Parameter(Mandatory = $true)][string]$PhaseEvidenceRoot,
         [Parameter(Mandatory = $true)][string]$WebViewDataDir
     )
+
+    $FilePath = $LaunchPlan.FilePath
+    $ArgumentList = $LaunchPlan.ArgumentList
+    $WorkingDirectory = $LaunchPlan.WorkingDirectory
+    $Phase = $LaunchPlan.Phase
+    if ($FilePath -isnot [string]) {
+        throw 'WDIO-LAUNCH-FILEPATH-TYPE-MISMATCH'
+    }
+    if ([string]::IsNullOrWhiteSpace($FilePath)) {
+        throw 'WDIO-LAUNCH-FILEPATH-EMPTY'
+    }
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw 'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND'
+    }
+    if ($ArgumentList -isnot [System.Array]) {
+        throw 'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH'
+    }
+    foreach ($argument in $ArgumentList) {
+        if ($null -eq $argument -or $argument -isnot [string]) {
+            throw 'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH'
+        }
+    }
+    if ($Phase -notin @('create', 'restart')) {
+        throw 'WDIO-LAUNCH-PHASE-MISMATCH'
+    }
+    if ($WorkingDirectory -isnot [string] -or
+        -not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw 'WDIO-LAUNCH-WORKING-DIRECTORY-MISMATCH'
+    }
+
     $env:IMPORT_DELETE_PHASE = $Phase
     $env:EVIDENCE_ROOT = $PhaseEvidenceRoot
     $stdout = Join-Path $PhaseEvidenceRoot 'wdio.stdout.log'
     $stderr = Join-Path $PhaseEvidenceRoot 'wdio.stderr.log'
-    $npx = (Get-Command npx.cmd -CommandType Application).Source
-    $process = Start-Process -FilePath $npx -ArgumentList @(
-        'wdio', 'run', 'wdio.conf.ts', '--spec', 'tests/e2e/import-delete-runtime.spec.ts'
-    ) -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
     $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
     $Script:OwnedProcessIdentities += Get-ProcessIdentity -CimProcess $cim
     return Monitor-WdioPhase -Process $process -EvidenceRoot $PhaseEvidenceRoot -Phase $Phase -WebViewDataDir $WebViewDataDir
@@ -986,9 +1203,28 @@ function Set-ProcessEnvironment {
 
 function Restore-ProcessEnvironment {
     param([Parameter(Mandatory = $true)]$Previous)
+    $results = @()
     foreach ($name in $Previous.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $Previous[$name], 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable($name, $Previous[$name], 'Process')
+            $current = [Environment]::GetEnvironmentVariable($name, 'Process')
+            $matches = if ($null -eq $Previous[$name]) { $null -eq $current } else { $current -ceq $Previous[$name] }
+            $results += [ordered]@{
+                name = [string]$name
+                restored = [bool]$matches
+                status = if ($matches) { 'PASS' } else { 'FAILED' }
+            }
+        }
+        catch {
+            $results += [ordered]@{
+                name = [string]$name
+                restored = $false
+                status = 'FAILED'
+                error_redacted = ConvertTo-RedactedText -Value $_.Exception.Message
+            }
+        }
     }
+    return $results
 }
 
 function Invoke-LogicalSnapshotFromHelper {
@@ -1007,11 +1243,17 @@ function Invoke-LogicalSnapshotFromHelper {
 }
 
 function Get-EvidenceInventory {
-    param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [string[]]$ExcludeRelativePaths = @()
+    )
+    $exclusions = @($ExcludeRelativePaths | ForEach-Object { $_.Replace('\', '/') })
     $entries = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Recurse -Force | Sort-Object FullName)) {
+        $relativePath = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $file.FullName).Replace('\', '/')
+        if ($relativePath -in $exclusions) { continue }
         $entries += [ordered]@{
-            relative_path = (Get-RelativePathPortable -BasePath $EvidenceRoot -ChildPath $file.FullName).Replace('\', '/')
+            relative_path = $relativePath
             size = [int64]$file.Length
             sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
         }
@@ -1019,13 +1261,488 @@ function Get-EvidenceInventory {
     return $entries
 }
 
+function Add-FinalizationFailure {
+    param(
+        [Parameter(Mandatory = $true)]$List,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$ExceptionType = 'HarnessFinalizationFailure'
+    )
+    $List.Add([ordered]@{
+        stage = $Stage
+        exception_type = $ExceptionType
+        message_redacted = ConvertTo-RedactedText -Value $Message
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }) | Out-Null
+}
+
+function Compare-SnapshotMaps {
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After
+    )
+    $results = [ordered]@{}
+    $allEqual = $true
+    foreach ($surface in $Before.Keys) {
+        $beforeJson = $Before[$surface] | ConvertTo-Json -Depth 20 -Compress
+        $afterJson = $After[$surface] | ConvertTo-Json -Depth 20 -Compress
+        $equal = $beforeJson -ceq $afterJson
+        $results[$surface] = [bool]$equal
+        if (-not $equal) { $allEqual = $false }
+    }
+    return [ordered]@{
+        surfaces = $results
+        all_equal = [bool]$allEqual
+    }
+}
+
+function Invoke-HarnessFinalization {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$EvidencePrefix,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimePrefix,
+        [Parameter(Mandatory = $true)][string]$RunToken,
+        [Parameter(Mandatory = $true)][byte[]]$HmacKey,
+        [Parameter(Mandatory = $true)]$PersonalRoots,
+        [AllowNull()]$PrivacyBefore,
+        [Parameter(Mandatory = $true)]$ProtectedPaths,
+        [AllowNull()]$ProtectedBefore,
+        [AllowNull()]$EnvironmentBefore,
+        [Parameter(Mandatory = $true)]$OwnedProcessIdentities,
+        [AllowNull()]$PrimaryFailure,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $finalizationFailures = [Collections.Generic.List[object]]::new()
+    $environmentRestoreStatus = 'SKIPPED'
+    $environmentRestoreResults = @()
+    $ownedProcessCleanupStatus = 'PASS'
+    $ownedProcessCleanupResults = @()
+    $portReleaseStatus = 'UNKNOWN'
+    $portListenersAfter = @()
+    $runtimeRootCleanupStatus = 'UNKNOWN'
+    $privacyAfterSnapshotStatus = 'SKIPPED'
+    $privacyComparisonStatus = 'NOT_AVAILABLE'
+    $protectedFileComparisonStatus = 'NOT_AVAILABLE'
+    $privacyAfter = $null
+    $protectedAfter = $null
+    $evidenceRootPreserved = $false
+
+    if ($null -ne $EnvironmentBefore) {
+        try {
+            $environmentRestoreResults = @(Restore-ProcessEnvironment -Previous $EnvironmentBefore)
+            $environmentRestoreStatus = if (@($environmentRestoreResults | Where-Object { $_.status -ne 'PASS' }).Count -eq 0) {
+                'PASS'
+            }
+            else {
+                'FAILED'
+            }
+            if ($environmentRestoreStatus -ne 'PASS') {
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'environment-restore' `
+                    -Message 'ENVIRONMENT-RESTORE-INCOMPLETE'
+            }
+        }
+        catch {
+            $environmentRestoreStatus = 'FAILED'
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'environment-restore' `
+                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+        }
+    }
+
+    foreach ($identity in @($OwnedProcessIdentities | Sort-Object process_id -Descending -Unique)) {
+        try {
+            Stop-OwnedProcessIdentity -Identity $identity
+            $stillPresent = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($identity.process_id)" -ErrorAction SilentlyContinue)
+            $ownedProcessCleanupResults += [ordered]@{
+                process_id = [int]$identity.process_id
+                status = if ($stillPresent) { 'FAILED' } else { 'PASS' }
+            }
+            if ($stillPresent) {
+                $ownedProcessCleanupStatus = 'FAILED'
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-cleanup' `
+                    -Message 'OWNED-PROCESS-RESIDUAL'
+            }
+        }
+        catch {
+            $ownedProcessCleanupStatus = 'FAILED'
+            $ownedProcessCleanupResults += [ordered]@{
+                process_id = [int]$identity.process_id
+                status = 'FAILED'
+            }
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'owned-process-cleanup' `
+                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+        }
+    }
+
+    try {
+        $portListenersAfter = @(Get-ContractPortListeners)
+        $portReleaseStatus = if ($portListenersAfter.Count -eq 0) { 'PASS' } else { 'FAILED' }
+        if ($portReleaseStatus -ne 'PASS') {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'port-release' -Message 'PORT-RELEASE-INCOMPLETE'
+        }
+    }
+    catch {
+        $portReleaseStatus = 'FAILED'
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'port-release' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    if ($null -ne $PrivacyBefore -and $HmacKey.Length -gt 0) {
+        try {
+            $privacyAfter = Capture-PrivacySnapshots -Roots $PersonalRoots -Key $HmacKey `
+                -EvidenceRoot $EvidenceRoot -Moment 'after'
+            $privacyComparison = Compare-SnapshotMaps -Before $PrivacyBefore -After $privacyAfter
+            $privacyAfterSnapshotStatus = 'PASS'
+            $privacyComparisonStatus = if ($privacyComparison.all_equal) { 'PASS' } else { 'FAILED' }
+            Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'privacy-comparison.json') -Value ([ordered]@{
+                surfaces = $privacyComparison.surfaces
+                all_unchanged = $privacyComparison.all_equal
+                comparison_key_persisted = $false
+            })
+            if (-not $privacyComparison.all_equal) {
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'privacy-comparison' `
+                    -Message 'PRIVACY-SNAPSHOT-COMPARABILITY-LOST'
+            }
+        }
+        catch {
+            $privacyAfterSnapshotStatus = 'FAILED'
+            $privacyComparisonStatus = 'FAILED'
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'privacy-after-snapshot' `
+                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+        }
+    }
+
+    if ($null -ne $ProtectedBefore -and $HmacKey.Length -gt 0) {
+        try {
+            $protectedAfter = @(Get-ProtectedFileSnapshots -Paths $ProtectedPaths -Key $HmacKey)
+            Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'protected-files-after.json') -Value $protectedAfter
+            $protectedBeforeMap = [ordered]@{ protected = @($ProtectedBefore) }
+            $protectedAfterMap = [ordered]@{ protected = @($protectedAfter) }
+            $protectedComparison = Compare-SnapshotMaps -Before $protectedBeforeMap -After $protectedAfterMap
+            $protectedFileComparisonStatus = if ($protectedComparison.all_equal) { 'PASS' } else { 'FAILED' }
+            Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'protected-files-comparison.json') -Value ([ordered]@{
+                all_unchanged = $protectedComparison.all_equal
+                comparison_key_persisted = $false
+            })
+            if (-not $protectedComparison.all_equal) {
+                Add-FinalizationFailure -List $finalizationFailures -Stage 'protected-file-comparison' `
+                    -Message 'PROTECTED-FILE-COMPARISON-FAILED'
+            }
+        }
+        catch {
+            $protectedFileComparisonStatus = 'FAILED'
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'protected-file-comparison' `
+                -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+        }
+    }
+
+    try {
+        if (Test-Path -LiteralPath $RuntimeRoot) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $RuntimeRoot -Prefix $RuntimePrefix -Token $RunToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        $runtimeRootCleanupStatus = if (Test-Path -LiteralPath $RuntimeRoot) { 'FAILED' } else { 'PASS' }
+        if ($runtimeRootCleanupStatus -ne 'PASS') {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
+                -Message 'RUNTIME-ROOT-CLEANUP-INCOMPLETE'
+        }
+    }
+    catch {
+        $runtimeRootCleanupStatus = 'FAILED'
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'runtime-root-cleanup' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    try {
+        $safeEvidence = Assert-OwnedRoot -LiteralPath $EvidenceRoot -Prefix $EvidencePrefix -Token $RunToken
+        $evidenceRootPreserved = Test-Path -LiteralPath $safeEvidence -PathType Container
+        if (-not $evidenceRootPreserved) {
+            Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-root-preservation' `
+                -Message 'EVIDENCE-ROOT-NOT-PRESERVED'
+        }
+    }
+    catch {
+        $evidenceRootPreserved = $false
+        Add-FinalizationFailure -List $finalizationFailures -Stage 'evidence-root-preservation' `
+            -Message $_.Exception.Message -ExceptionType $_.Exception.GetType().FullName
+    }
+
+    $cleanupLedgerPath = Join-Path $EvidenceRoot 'cleanup-ledger.json'
+    $cleanupLedger = [ordered]@{
+        primary_failure_present = $null -ne $PrimaryFailure
+        environment_restore_status = [ordered]@{
+            status = $environmentRestoreStatus
+            variables = $environmentRestoreResults
+        }
+        owned_process_cleanup_status = [ordered]@{
+            status = $ownedProcessCleanupStatus
+            processes = $ownedProcessCleanupResults
+        }
+        port_release_status = [ordered]@{
+            status = $portReleaseStatus
+            listener_count = $portListenersAfter.Count
+        }
+        runtime_root_cleanup_status = $runtimeRootCleanupStatus
+        privacy_after_snapshot_status = $privacyAfterSnapshotStatus
+        protected_file_comparison_status = $protectedFileComparisonStatus
+        evidence_root_preserved = [bool]$evidenceRootPreserved
+        finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+    }
+    Write-JsonFile -LiteralPath $cleanupLedgerPath -Value $cleanupLedger
+
+    $inventoryPath = Join-Path $EvidenceRoot 'final-evidence-inventory.json'
+    $manifestPath = Join-Path $EvidenceRoot 'final-manifest.json'
+    $inventoryExclusions = @('final-evidence-inventory.json', 'final-manifest.json')
+    $inventory = @(Get-EvidenceInventory -EvidenceRoot $EvidenceRoot -ExcludeRelativePaths $inventoryExclusions)
+    Write-JsonFile -LiteralPath $inventoryPath -Value ([ordered]@{
+        schema_version = 1
+        excluded_relative_paths = $inventoryExclusions
+        entries = $inventory
+    })
+    $inventorySha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
+
+    $cleanupStatus = if ($finalizationFailures.Count -eq 0 -and
+        $environmentRestoreStatus -notin @('FAILED') -and
+        $ownedProcessCleanupStatus -eq 'PASS' -and
+        $portReleaseStatus -eq 'PASS' -and
+        $runtimeRootCleanupStatus -eq 'PASS' -and
+        $privacyAfterSnapshotStatus -notin @('FAILED') -and
+        $protectedFileComparisonStatus -notin @('FAILED') -and
+        $evidenceRootPreserved) { 'PASS' } else { 'FAILED' }
+    $runStatus = if ($null -ne $PrimaryFailure) { 'FAILED' } elseif ($cleanupStatus -eq 'PASS') { 'PASS' } else { 'BLOCKED' }
+    $manifest = [ordered]@{
+        run_status = $runStatus
+        primary_failure = $PrimaryFailure
+        first_incomplete_phase = [string]$Context.first_incomplete_phase
+        app_baseline_sha = [string]$Context.app_baseline_sha
+        harness_head_sha = [string]$Context.harness_head_sha
+        build_status = [string]$Context.build_status
+        application_launch_status = [string]$Context.application_launch_status
+        wdio_status = [string]$Context.wdio_status
+        create_status = [string]$Context.create_status
+        restart_status = [string]$Context.restart_status
+        cleanup_status = $cleanupStatus
+        privacy_comparison_status = $privacyComparisonStatus
+        evidence_completeness = if ($inventory.Count -gt 0) { 'FINALIZED' } else { 'INCOMPLETE' }
+        finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+        final_evidence_inventory_sha256 = $inventorySha256
+        final_evidence_inventory_excludes = $inventoryExclusions
+    }
+    Write-JsonFile -LiteralPath $manifestPath -Value $manifest
+    $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+
+    return [ordered]@{
+        cleanup_ledger_path = $cleanupLedgerPath
+        inventory_path = $inventoryPath
+        inventory_sha256 = $inventorySha256
+        inventory_exclusions = $inventoryExclusions
+        manifest_path = $manifestPath
+        manifest_sha256 = $manifestSha256
+        cleanup_status = $cleanupStatus
+        privacy_comparison_status = $privacyComparisonStatus
+        protected_file_comparison_status = $protectedFileComparisonStatus
+        environment_restore_status = $environmentRestoreStatus
+        runtime_root_cleanup_status = $runtimeRootCleanupStatus
+        evidence_root_preserved = [bool]$evidenceRootPreserved
+        finalization_failures = @($finalizationFailures | ForEach-Object { $_ })
+    }
+}
+
+function Invoke-SyntheticFailureFinalizationValidation {
+    $runToken = 'synthetic-' + [guid]::NewGuid().ToString('N')
+    $evidencePrefix = 'ytm-free-import-delete-synthetic-evidence-'
+    $runtimePrefix = 'ytm-free-import-delete-synthetic-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $environmentVariableName = 'YTM_FREE_SYNTHETIC_FINALIZATION'
+    $environmentOriginalValue = [Environment]::GetEnvironmentVariable($environmentVariableName, 'Process')
+    $environmentBefore = $null
+    $privacyBefore = $null
+    $protectedBefore = $null
+    $primaryFailure = $null
+    $finalization = $null
+    $evidenceCreated = $false
+    $runtimeCreated = $false
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($hmacKey)
+    }
+    finally {
+        $random.Dispose()
+    }
+
+    try {
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $evidenceCreated = $true
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $runtimeCreated = $true
+
+        $syntheticSurface = Join-Path $runtimeRoot 'synthetic-surface'
+        $null = New-Item -ItemType Directory -Path $syntheticSurface
+        Write-Utf8NoBom -LiteralPath (Join-Path $syntheticSurface 'surface.txt') -Value "synthetic-private-surface`n"
+        $syntheticProtectedPath = Join-Path $runtimeRoot 'synthetic-protected.txt'
+        Write-Utf8NoBom -LiteralPath $syntheticProtectedPath -Value "synthetic-protected`n"
+        $syntheticFixturePath = Join-Path $runtimeRoot 'synthetic-fixture.csv'
+        Write-Utf8NoBom -LiteralPath $syntheticFixturePath -Value "id,title`n1,Synthetic`n"
+        $syntheticShimSource = Join-Path $runtimeRoot 'synthetic-shim.rs'
+        $syntheticShimExecutable = Join-Path $runtimeRoot 'synthetic-shim.exe'
+        Write-Utf8NoBom -LiteralPath $syntheticShimSource -Value "fn main() {}`n"
+        Write-Utf8NoBom -LiteralPath $syntheticShimExecutable -Value "synthetic-executable`n"
+
+        $personalRoots = [ordered]@{ synthetic_surface = $syntheticSurface }
+        $protectedPaths = [ordered]@{ synthetic_protected = $syntheticProtectedPath }
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'git-preflight.json') -Value ([ordered]@{
+            synthetic = $true
+            app_baseline_sha = $ExpectedAppBaseline
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'toolchain.json') -Value ([ordered]@{
+            synthetic = $true
+            application_build = 'NOT RUN'
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            run_token = $runToken
+            scenario = 'SYNTHETIC-FAILURE-BEFORE-WDIO'
+            evidence_root_identity = 'owned-synthetic-temp-root'
+            runtime_root_identity = 'owned-synthetic-temp-root'
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'build-provenance.json') -Value ([ordered]@{
+            synthetic = $true
+            build_status = 'NOT RUN'
+            build_exit = $null
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'fixture-metadata.json') -Value ([ordered]@{
+            synthetic = $true
+            fixture_sha256 = (Get-FileHash -LiteralPath $syntheticFixturePath -Algorithm SHA256).Hash
+            fixture_size = [int64](Get-Item -LiteralPath $syntheticFixturePath).Length
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-source-metadata.json') -Value ([ordered]@{
+            synthetic = $true
+            source_sha256 = (Get-FileHash -LiteralPath $syntheticShimSource -Algorithm SHA256).Hash
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-executable-metadata.json') -Value ([ordered]@{
+            synthetic = $true
+            executable_sha256 = (Get-FileHash -LiteralPath $syntheticShimExecutable -Algorithm SHA256).Hash
+            executable_size = [int64](Get-Item -LiteralPath $syntheticShimExecutable).Length
+            compile_exit = 0
+        })
+
+        $privacyBefore = Capture-PrivacySnapshots -Roots $personalRoots -Key $hmacKey `
+            -EvidenceRoot $evidenceRoot -Moment 'before'
+        $protectedBefore = @(Get-ProtectedFileSnapshots -Paths $protectedPaths -Key $hmacKey)
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'protected-files-before.json') -Value $protectedBefore
+        $environmentBefore = Set-ProcessEnvironment -Values ([ordered]@{
+            $environmentVariableName = 'synthetic-mutated-value'
+        })
+
+        try {
+            throw 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE'
+        }
+        catch {
+            $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'wdio-create'
+            Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+        }
+
+        $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+            -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+            -PersonalRoots $personalRoots -PrivacyBefore $privacyBefore -ProtectedPaths $protectedPaths `
+            -ProtectedBefore $protectedBefore -EnvironmentBefore $environmentBefore -OwnedProcessIdentities @() `
+            -PrimaryFailure $primaryFailure -Context ([ordered]@{
+                first_incomplete_phase = 'wdio-create'
+                app_baseline_sha = $ExpectedAppBaseline
+                harness_head_sha = 'synthetic-no-head'
+                build_status = 'NOT RUN'
+                application_launch_status = 'NOT RUN'
+                wdio_status = 'FAILED-BEFORE-LAUNCH'
+                create_status = 'FAILED-BEFORE-LAUNCH'
+                restart_status = 'NOT RUN'
+            })
+
+        $cleanupLedger = Get-Content -LiteralPath $finalization.cleanup_ledger_path -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $finalization.manifest_path -Raw | ConvertFrom-Json
+        $inventory = Get-Content -LiteralPath $finalization.inventory_path -Raw | ConvertFrom-Json
+        $privacyAfterCaptured = Test-Path -LiteralPath (Join-Path $evidenceRoot 'privacy-synthetic_surface-after.json') -PathType Leaf
+        $privacyComparison = Get-Content -LiteralPath (Join-Path $evidenceRoot 'privacy-comparison.json') -Raw | ConvertFrom-Json
+        $environmentRestored = [Environment]::GetEnvironmentVariable($environmentVariableName, 'Process') -ceq $environmentOriginalValue
+        $inventoryPaths = @($inventory.entries | ForEach-Object { [string]$_.relative_path })
+        $inventoryExclusionsCorrect = 'final-evidence-inventory.json' -notin $inventoryPaths -and
+            'final-manifest.json' -notin $inventoryPaths
+        $clearPersonalPathFound = $false
+        foreach ($file in @(Get-ChildItem -LiteralPath $evidenceRoot -File -Recurse -Force)) {
+            $content = [IO.File]::ReadAllText($file.FullName)
+            if ((-not [string]::IsNullOrWhiteSpace($env:USERPROFILE) -and $content.Contains($env:USERPROFILE)) -or
+                (-not [string]::IsNullOrWhiteSpace($env:TEMP) -and $content.Contains($env:TEMP)) -or
+                $content.Contains($RepoRoot)) {
+                $clearPersonalPathFound = $true
+                break
+            }
+        }
+
+        if ($primaryFailure.failure_code -ne 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE') {
+            throw 'SYNTHETIC-PRIMARY-FAILURE-NOT-PRESERVED'
+        }
+        if (-not $privacyAfterCaptured -or -not $privacyComparison.all_unchanged) {
+            throw 'SYNTHETIC-PRIVACY-FINALIZATION-FAILED'
+        }
+        if (-not $environmentRestored -or $cleanupLedger.environment_restore_status.status -ne 'PASS') {
+            throw 'SYNTHETIC-ENVIRONMENT-RESTORE-FAILED'
+        }
+        if (Test-Path -LiteralPath $runtimeRoot) { throw 'SYNTHETIC-RUNTIME-ROOT-RESIDUAL' }
+        if (-not (Test-Path -LiteralPath $evidenceRoot -PathType Container)) { throw 'SYNTHETIC-EVIDENCE-ROOT-MISSING' }
+        if (-not (Test-Path -LiteralPath $finalization.cleanup_ledger_path -PathType Leaf)) { throw 'SYNTHETIC-CLEANUP-LEDGER-MISSING' }
+        if (-not (Test-Path -LiteralPath $finalization.inventory_path -PathType Leaf) -or -not $inventoryExclusionsCorrect) {
+            throw 'SYNTHETIC-FINAL-INVENTORY-FAILED'
+        }
+        if (-not (Test-Path -LiteralPath $finalization.manifest_path -PathType Leaf) -or
+            $manifest.run_status -ne 'FAILED' -or
+            $manifest.primary_failure.failure_code -ne 'SYNTHETIC-WDIO-PRELAUNCH-FAILURE') {
+            throw 'SYNTHETIC-FAILED-MANIFEST-FAILED'
+        }
+        if ($finalization.finalization_failures.Count -ne 0) { throw 'SYNTHETIC-FINALIZATION-FAILURES-NONZERO' }
+        if ($cleanupLedger.owned_process_cleanup_status.processes.Count -ne 0) { throw 'SYNTHETIC-PROCESS-CLEANUP-NONZERO' }
+        if ($clearPersonalPathFound) { throw 'SYNTHETIC-CLEAR-PERSONAL-PATH-DETECTED' }
+
+        return [ordered]@{
+            SYNTHETIC_PRIMARY_FAILURE_PRESERVED = 'PASS'
+            SYNTHETIC_PRIVACY_AFTER_CAPTURED = 'PASS'
+            SYNTHETIC_PRIVACY_EQUALITY = 'PASS'
+            SYNTHETIC_ENVIRONMENT_RESTORED = 'PASS'
+            SYNTHETIC_RUNTIME_ROOT_REMOVED = 'PASS'
+            SYNTHETIC_EVIDENCE_ROOT_PRESERVED = 'PASS'
+            SYNTHETIC_CLEANUP_LEDGER = 'PASS'
+            SYNTHETIC_FINAL_INVENTORY = 'PASS'
+            SYNTHETIC_FAILED_MANIFEST = 'PASS'
+            SYNTHETIC_FINALIZATION_FAILURE_COUNT = 0
+            SYNTHETIC_ZERO_PROCESSES_STOPPED = 'PASS'
+            SYNTHETIC_ZERO_CLEAR_PERSONAL_PATHS = 'PASS'
+            SYNTHETIC_INVENTORY_EXCLUSIONS = 'PASS'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable($environmentVariableName, $environmentOriginalValue, 'Process')
+        if ($runtimeCreated -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+        if ($evidenceCreated -and (Test-Path -LiteralPath $evidenceRoot)) {
+            $safeEvidence = Assert-NoReparseDescendant -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeEvidence -Recurse -Force
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+    }
+}
+
 function Invoke-FullRuntimeHarness {
     $preflight = Invoke-SafePreflight
     $runToken = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8).ToLowerInvariant()
+    $evidencePrefix = 'ytm-free-import-delete-evidence-b3200d4f8d41-'
+    $runtimePrefix = 'ytm-free-import-delete-runtime-'
     $evidenceRoot = Join-Path $env:TEMP "ytm-free-import-delete-evidence-b3200d4f8d41-$runToken"
     $runtimeRoot = Join-Path $env:TEMP "ytm-free-import-delete-runtime-$runToken"
-    $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix 'ytm-free-import-delete-evidence-b3200d4f8d41-' -Token $runToken
-    $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix 'ytm-free-import-delete-runtime-' -Token $runToken
+    $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+    $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
 
     $hmacKey = New-Object byte[] 32
     $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -1037,8 +1754,20 @@ function Invoke-FullRuntimeHarness {
     }
     $environmentBefore = $null
     $privacyBefore = $null
-    $privacyAfter = $null
     $personalRoots = Get-PersonalSurfaceRoots
+    $protectedPaths = [ordered]@{}
+    foreach ($relativePath in $ProtectedUntrackedPaths) {
+        $protectedPaths[$relativePath] = Join-Path $RepoRoot $relativePath
+    }
+    $protectedBefore = $null
+    $primaryFailure = $null
+    $finalization = $null
+    $firstIncompletePhase = 'setup'
+    $buildStatus = 'NOT RUN'
+    $applicationLaunchStatus = 'NOT RUN'
+    $wdioStatus = 'NOT RUN'
+    $createStatus = 'NOT RUN'
+    $restartStatus = 'NOT RUN'
     try {
         $dataDir = Join-Path $runtimeRoot 'data'
         $spotifyDir = Join-Path $runtimeRoot 'spotify'
@@ -1053,6 +1782,31 @@ function Invoke-FullRuntimeHarness {
         $null = New-Item -ItemType Directory -Path $createEvidence
         $null = New-Item -ItemType Directory -Path $restartEvidence
 
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'git-preflight.json') -Value ([ordered]@{
+            branch = $preflight.git.branch
+            APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
+            HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
+            ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
+            HARNESS_MERGE_BASE_SHA = $preflight.git.HARNESS_MERGE_BASE_SHA
+            HARNESS_DELTA_PATHS = $preflight.git.HARNESS_DELTA_PATHS
+            HARNESS_COMMIT_COUNT = $preflight.git.HARNESS_COMMIT_COUNT
+            status = $preflight.git.status
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'toolchain.json') -Value ([ordered]@{
+            tools = @(Get-ToolchainMetadata -Tools $preflight.tools)
+            full_environment_logged = $false
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            run_token = $runToken
+            started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+            evidence_root_identity = 'new-owned-temp-root'
+            runtime_root_identity = 'new-owned-temp-root'
+            expected_create_phase = 'create'
+            expected_restart_phase = 'restart'
+        })
+
+        $firstIncompletePhase = 'fixture'
         $fixtureStem = "step6r3b1-import-$runToken"
         $fixtureName = "$fixtureStem.csv"
         $playlistName = "Step6R3B1 Playlist $runToken"
@@ -1061,18 +1815,42 @@ function Invoke-FullRuntimeHarness {
             "spotify:track:step6r3b1alpha,Step6R3B1 Alpha $runToken,Step6R3B1 Synthetic Album,Step6R3B1 Synthetic Artist,123000",
             "spotify:track:step6r3b1beta,Step6R3B1 Beta $runToken,Step6R3B1 Synthetic Album,Step6R3B1 Synthetic Artist,234000"
         ) -join "`r`n"
-        Write-Utf8NoBom -LiteralPath (Join-Path $spotifyDir $fixtureName) -Value ($fixture + "`r`n")
+        $fixturePath = Join-Path $spotifyDir $fixtureName
+        Write-Utf8NoBom -LiteralPath $fixturePath -Value ($fixture + "`r`n")
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'fixture-metadata.json') -Value ([ordered]@{
+            fixture_name = $fixtureName
+            parsed_track_count_expected = 2
+            fixture_size = [int64](Get-Item -LiteralPath $fixturePath).Length
+            fixture_sha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+        })
 
+        $firstIncompletePhase = 'privacy-before'
         $privacyBefore = Capture-PrivacySnapshots -Roots $personalRoots -Key $hmacKey -EvidenceRoot $evidenceRoot -Moment 'before'
+        $protectedBefore = @(Get-ProtectedFileSnapshots -Paths $protectedPaths -Key $hmacKey)
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'protected-files-before.json') -Value $protectedBefore
 
+        $firstIncompletePhase = 'shim-build'
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-source-metadata.json') -Value ([ordered]@{
+            source_relative_path = 'scripts/yt-dlp-import-delete-shim.rs'
+            source_sha256 = (Get-FileHash -LiteralPath $ShimSource -Algorithm SHA256).Hash
+        })
         $shimExe = Join-Path $shimDir 'yt-dlp.exe'
-        Invoke-ExternalCaptured -FilePath (Get-Command rustc.exe).Source -Arguments @(
+        $rustc = Get-Command rustc.exe -CommandType Application | Select-Object -First 1
+        $shimCompileExit = Invoke-ExternalCaptured -FilePath ([string]$rustc.Source) -Arguments @(
             '--edition', '2021', $ShimSource, '-o', $shimExe
         ) -WorkingDirectory $RepoRoot -StdoutPath (Join-Path $evidenceRoot 'shim-build.stdout.log') `
-            -StderrPath (Join-Path $evidenceRoot 'shim-build.stderr.log') | Out-Null
+            -StderrPath (Join-Path $evidenceRoot 'shim-build.stderr.log')
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'shim-executable-metadata.json') -Value ([ordered]@{
+            executable_sha256 = (Get-FileHash -LiteralPath $shimExe -Algorithm SHA256).Hash
+            executable_size = [int64](Get-Item -LiteralPath $shimExe).Length
+            compile_exit = $shimCompileExit
+        })
 
+        $firstIncompletePhase = 'application-build'
+        $buildStatus = 'IN PROGRESS'
         $buildStart = (Get-Date).ToUniversalTime()
-        $buildExit = Invoke-ExternalCaptured -FilePath (Get-Command npm.cmd).Source -Arguments @('run', 'harness:build') `
+        $npm = Get-Command npm.cmd -CommandType Application | Select-Object -First 1
+        $buildExit = Invoke-ExternalCaptured -FilePath ([string]$npm.Source) -Arguments @('run', 'harness:build') `
             -WorkingDirectory $RepoRoot -StdoutPath (Join-Path $evidenceRoot 'build.stdout.log') `
             -StderrPath (Join-Path $evidenceRoot 'build.stderr.log')
         $buildEnd = (Get-Date).ToUniversalTime()
@@ -1098,6 +1876,27 @@ function Invoke-FullRuntimeHarness {
             binary_size = [int64]$binary.Length
             binary_last_write_utc = $binary.LastWriteTimeUtc.ToString('o')
             binary_sha256 = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash
+        })
+        $buildStatus = 'PASS'
+
+        $firstIncompletePhase = 'wdio-launch-plan'
+        $createLaunchPlan = New-WdioLaunchPlan -Phase 'create'
+        $restartLaunchPlan = New-WdioLaunchPlan -Phase 'restart'
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'wdio-launch-plans.json') -Value ([ordered]@{
+            create = [ordered]@{
+                file_name = Split-Path -Leaf $createLaunchPlan.FilePath
+                file_path_type = $createLaunchPlan.FilePath.GetType().FullName
+                argument_list_type = $createLaunchPlan.ArgumentList.GetType().FullName
+                phase = $createLaunchPlan.Phase
+                spec_relative_path = 'tests/e2e/import-delete-runtime.spec.ts'
+            }
+            restart = [ordered]@{
+                file_name = Split-Path -Leaf $restartLaunchPlan.FilePath
+                file_path_type = $restartLaunchPlan.FilePath.GetType().FullName
+                argument_list_type = $restartLaunchPlan.ArgumentList.GetType().FullName
+                phase = $restartLaunchPlan.Phase
+                spec_relative_path = 'tests/e2e/import-delete-runtime.spec.ts'
+            }
         })
 
         $browserArguments = '--host-resolver-rules="MAP * 127.0.0.1, EXCLUDE localhost" --disable-background-networking'
@@ -1128,9 +1927,25 @@ function Invoke-FullRuntimeHarness {
             full_environment_logged = $false
         })
 
-        $createResult = Start-WdioPhase -Phase 'create' -PhaseEvidenceRoot $createEvidence -WebViewDataDir $webViewDataDir
-        $restartResult = Start-WdioPhase -Phase 'restart' -PhaseEvidenceRoot $restartEvidence -WebViewDataDir $webViewDataDir
+        $firstIncompletePhase = 'wdio-create'
+        $applicationLaunchStatus = 'CREATE ATTEMPTED'
+        $wdioStatus = 'CREATE IN PROGRESS'
+        $createStatus = 'IN PROGRESS'
+        $createResult = Start-WdioPhase -LaunchPlan $createLaunchPlan -PhaseEvidenceRoot $createEvidence -WebViewDataDir $webViewDataDir
+        $createStatus = 'PASS'
+        $applicationLaunchStatus = 'CREATE PASS'
+        $wdioStatus = 'CREATE PASS'
 
+        $firstIncompletePhase = 'wdio-restart'
+        $applicationLaunchStatus = 'RESTART ATTEMPTED'
+        $wdioStatus = 'RESTART IN PROGRESS'
+        $restartStatus = 'IN PROGRESS'
+        $restartResult = Start-WdioPhase -LaunchPlan $restartLaunchPlan -PhaseEvidenceRoot $restartEvidence -WebViewDataDir $webViewDataDir
+        $restartStatus = 'PASS'
+        $applicationLaunchStatus = 'PASS'
+        $wdioStatus = 'PASS'
+
+        $firstIncompletePhase = 'runtime-evidence-validation'
         $createDetails = Get-Content -LiteralPath (Join-Path $createEvidence 'create-state.json') -Raw | ConvertFrom-Json
         $restartDetails = Get-Content -LiteralPath (Join-Path $restartEvidence 'restart-state.json') -Raw | ConvertFrom-Json
         $createOllamaState = Assert-OllamaStateEvidenceSchema -State $createDetails -Phase 'create'
@@ -1171,67 +1986,68 @@ function Invoke-FullRuntimeHarness {
         }
 
         Invoke-LogicalSnapshotFromHelper -DataDir $dataDir -OutputPath (Join-Path $evidenceRoot 'final-logical-snapshot.json')
-        $privacyAfter = Capture-PrivacySnapshots -Roots $personalRoots -Key $hmacKey -EvidenceRoot $evidenceRoot -Moment 'after'
-        foreach ($surface in $personalRoots.Keys) {
-            $beforeJson = $privacyBefore[$surface] | ConvertTo-Json -Depth 10 -Compress
-            $afterJson = $privacyAfter[$surface] | ConvertTo-Json -Depth 10 -Compress
-            if ($beforeJson -ne $afterJson) {
-                if ($surface -eq 'downloads' -or $surface -eq 'music') {
-                    throw 'DOWNLOAD-ISOLATION-NOT-PROVEN'
-                }
-                throw 'APPDATA-ISOLATION-NOT-PROVEN'
-            }
+        $firstIncompletePhase = 'complete'
+    }
+    catch {
+        if ($firstIncompletePhase -eq 'application-build') { $buildStatus = 'FAILED' }
+        if ($firstIncompletePhase -eq 'wdio-create') {
+            $createStatus = 'FAILED'
+            $wdioStatus = 'FAILED'
         }
-
-        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'privacy-comparison.json') -Value ([ordered]@{
-            music_unchanged = $true
-            downloads_unchanged = $true
-            roaming_appdata_unchanged = $true
-            local_appdata_unchanged = $true
-            comparison_key_persisted = $false
-        })
-
-        $inventory = @(Get-EvidenceInventory -EvidenceRoot $evidenceRoot)
-        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'manifest.json') -Value ([ordered]@{
-            result = ('PASS ' + [char]0x2014 + ' IMPORT-DELETE-RESTART-RUNTIME-PROVEN')
-            APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
-            HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
-            ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
-            HARNESS_MERGE_BASE_SHA = $preflight.git.HARNESS_MERGE_BASE_SHA
-            HARNESS_DELTA_PATHS = $preflight.git.HARNESS_DELTA_PATHS
-            HARNESS_COMMIT_COUNT = $preflight.git.HARNESS_COMMIT_COUNT
-            run_token = $runToken
-            evidence_root_identity = 'new-owned-temp-root'
-            runtime_root_cleanup_required = $true
-            appdata_unchanged = $true
-            downloads_unchanged = $true
-            hmac_key_persisted = $false
-            create_runtime_pid = $createDetails.runtime_process_id
-            restart_runtime_pid = $restartDetails.runtime_process_id
-            evidence_inventory = $inventory
-            preflight = $preflight
-        })
-        Write-Output "EVIDENCE_ROOT=$evidenceRoot"
+        if ($firstIncompletePhase -eq 'wdio-restart') {
+            $restartStatus = 'FAILED'
+            $wdioStatus = 'FAILED'
+        }
+        $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase $firstIncompletePhase
+        try {
+            Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+        }
+        catch {
+            Write-Warning 'PRIMARY-FAILURE-EVIDENCE-WRITE-FAILED'
+        }
     }
     finally {
-        if ($null -ne $environmentBefore) {
-            Restore-ProcessEnvironment -Previous $environmentBefore
+        try {
+            $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot -EvidencePrefix $evidencePrefix `
+                -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix -RunToken $runToken -HmacKey $hmacKey `
+                -PersonalRoots $personalRoots -PrivacyBefore $privacyBefore -ProtectedPaths $protectedPaths `
+                -ProtectedBefore $protectedBefore -EnvironmentBefore $environmentBefore `
+                -OwnedProcessIdentities @($Script:OwnedProcessIdentities) -PrimaryFailure $primaryFailure `
+                -Context ([ordered]@{
+                    first_incomplete_phase = $firstIncompletePhase
+                    app_baseline_sha = $preflight.git.APP_BASELINE_SHA
+                    harness_head_sha = $preflight.git.HARNESS_HEAD_SHA
+                    build_status = $buildStatus
+                    application_launch_status = $applicationLaunchStatus
+                    wdio_status = $wdioStatus
+                    create_status = $createStatus
+                    restart_status = $restartStatus
+                })
         }
-        foreach ($identity in @($Script:OwnedProcessIdentities | Sort-Object process_id -Descending -Unique)) {
-            Stop-OwnedProcessIdentity -Identity $identity
-        }
-        if (Test-Path -LiteralPath $runtimeRoot) {
-            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot `
-                -Prefix 'ytm-free-import-delete-runtime-' -Token $runToken
-            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        catch {
+            Write-Warning ('FAILURE-FINALIZATION-INCOMPLETE: ' + (ConvertTo-RedactedText -Value $_.Exception.Message))
         }
         [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+    }
+
+    Write-Output "EVIDENCE_ROOT=$evidenceRoot"
+    if ($null -ne $finalization) {
+        Write-Output "FINAL_EVIDENCE_INVENTORY_SHA256:$($finalization.inventory_sha256)"
+        Write-Output "FINAL_MANIFEST_SHA256:$($finalization.manifest_sha256)"
+        Write-Output "FINAL_EVIDENCE_INVENTORY_EXCLUDES:$($finalization.inventory_exclusions -join ',')"
+    }
+    if ($null -ne $primaryFailure) {
+        throw "$($primaryFailure.failure_code): $($primaryFailure.message_redacted)"
+    }
+    if ($null -eq $finalization -or $finalization.finalization_failures.Count -ne 0) {
+        throw 'FAILURE-FINALIZATION-INCOMPLETE'
     }
 }
 
 Set-Location $RepoRoot
-if ($ContractValidateOnly -and $PreflightOnly) {
-    throw 'ContractValidateOnly and PreflightOnly are mutually exclusive'
+$selectedModes = @(@($ContractValidateOnly, $PreflightOnly, $LaunchPlanValidateOnly) | Where-Object { $_ })
+if ($selectedModes.Count -gt 1) {
+    throw 'ContractValidateOnly, PreflightOnly, and LaunchPlanValidateOnly are mutually exclusive'
 }
 
 if ($ContractValidateOnly) {
@@ -1247,7 +2063,32 @@ if ($ContractValidateOnly) {
     Write-Output "SNAPSHOT_REPARSE_REJECTION: $($result.SNAPSHOT_REPARSE_REJECTION)"
     Write-Output "CLEANUP_REPARSE_REJECTION: $($result.CLEANUP_REPARSE_REJECTION)"
     Write-Output "EXTERNAL_REPARSE_TARGET_UNCHANGED: $($result.EXTERNAL_REPARSE_TARGET_UNCHANGED)"
+    Write-Output "SYNTHETIC_PRIMARY_FAILURE_PRESERVED:$($result.SYNTHETIC_PRIMARY_FAILURE_PRESERVED)"
+    Write-Output "SYNTHETIC_PRIVACY_AFTER_CAPTURED:$($result.SYNTHETIC_PRIVACY_AFTER_CAPTURED)"
+    Write-Output "SYNTHETIC_PRIVACY_EQUALITY:$($result.SYNTHETIC_PRIVACY_EQUALITY)"
+    Write-Output "SYNTHETIC_ENVIRONMENT_RESTORED:$($result.SYNTHETIC_ENVIRONMENT_RESTORED)"
+    Write-Output "SYNTHETIC_RUNTIME_ROOT_REMOVED:$($result.SYNTHETIC_RUNTIME_ROOT_REMOVED)"
+    Write-Output "SYNTHETIC_EVIDENCE_ROOT_PRESERVED:$($result.SYNTHETIC_EVIDENCE_ROOT_PRESERVED)"
+    Write-Output "SYNTHETIC_CLEANUP_LEDGER:$($result.SYNTHETIC_CLEANUP_LEDGER)"
+    Write-Output "SYNTHETIC_FINAL_INVENTORY:$($result.SYNTHETIC_FINAL_INVENTORY)"
+    Write-Output "SYNTHETIC_FAILED_MANIFEST:$($result.SYNTHETIC_FAILED_MANIFEST)"
+    Write-Output "SYNTHETIC_FINALIZATION_FAILURE_COUNT:$($result.SYNTHETIC_FINALIZATION_FAILURE_COUNT)"
     $result | ConvertTo-Json -Depth 20
+    Write-NonClaims
+    exit 0
+}
+
+if ($LaunchPlanValidateOnly) {
+    $result = Invoke-LaunchPlanValidation
+    Write-Output "CREATE_FILEPATH_TYPE:$($result.CREATE_FILEPATH_TYPE)"
+    Write-Output "RESTART_FILEPATH_TYPE:$($result.RESTART_FILEPATH_TYPE)"
+    Write-Output "CREATE_FILEPATH_CARDINALITY:$($result.CREATE_FILEPATH_CARDINALITY)"
+    Write-Output "RESTART_FILEPATH_CARDINALITY:$($result.RESTART_FILEPATH_CARDINALITY)"
+    Write-Output "CREATE_SPEC_PATH_MATCH:$($result.CREATE_SPEC_PATH_MATCH)"
+    Write-Output "RESTART_SPEC_PATH_MATCH:$($result.RESTART_SPEC_PATH_MATCH)"
+    Write-Output "CREATE_ARGUMENT_LIST_TYPE:$($result.CREATE_ARGUMENT_LIST_TYPE)"
+    Write-Output "RESTART_ARGUMENT_LIST_TYPE:$($result.RESTART_ARGUMENT_LIST_TYPE)"
+    Write-Output "START_PROCESS_CALLED:$($result.START_PROCESS_CALLED)"
     Write-NonClaims
     exit 0
 }
