@@ -316,8 +316,17 @@ describe("Step-6R.3B1 import/remove/restart runtime", () => {
       await createButtons[0].click();
 
       const createdPlaylist = await findExactPlaylist(playlistName);
-      assert.equal(createdPlaylist.track_count, 2, "Created playlist must initially contain two tracks");
-      const createdTracks = await invokeIpc<TrackRow[]>("get_playlist_tracks", { playlistId: createdPlaylist.id });
+      let createdTracks: TrackRow[] = [];
+      await browser.waitUntil(async () => {
+        assert.equal(await browser.getTitle(), "YTM Free", "Application window is not alive while waiting for playlist tracks");
+        const errorBanners = await $$(`//div[contains(@class, 'bg-red-500/20') and contains(@class, 'border-red-500/50')]`);
+        assert.equal(await errorBanners.length, 0, "Error UI appeared while waiting for playlist tracks");
+        createdTracks = await invokeIpc<TrackRow[]>("get_playlist_tracks", { playlistId: createdPlaylist.id });
+        return createdTracks.length === 2;
+      }, {
+        timeout: 15_000,
+        timeoutMsg: "Created playlist did not report exactly two tracks before the bounded timeout",
+      });
       assert.equal(createdTracks.length, 2, "Created playlist IPC must return two tracks");
       const alpha = trackByMarker(createdTracks, "Alpha", runToken);
       const beta = trackByMarker(createdTracks, "Beta", runToken);
