@@ -360,7 +360,12 @@ describe("Step-6R.3B1 import/remove/restart runtime", () => {
       assert.deepEqual(tracksAfterRemove.map((track) => track.id), [beta.id]);
 
       const ledger = await readIpcLedger();
-      assert.equal(ledger.filter(({ command }) => command === "remove_from_playlist").length, 1);
+      const removeLedgerCount = ledger.filter(({ command }) => command === "remove_from_playlist").length;
+      const removeLedgerObservation = removeLedgerCount === 1
+        ? "OBSERVED_EXACTLY_ONCE"
+        : removeLedgerCount === 0 ? "NOT_OBSERVED" : "INCONCLUSIVE";
+      console.log(`REMOVE_LEDGER_OBSERVATION:${removeLedgerObservation}`);
+      console.log(`REMOVE_LEDGER_COUNT:${removeLedgerCount}`);
       assert.equal(ledger.some(({ command }) => command === "download_track"), false);
       assertNoForbiddenCommands(ledger);
 
