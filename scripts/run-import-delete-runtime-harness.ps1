@@ -4,11 +4,16 @@ param(
     [switch]$PreflightOnly,
     [switch]$LaunchPlanValidateOnly,
     [switch]$MonitorAndFinalizationValidateOnly,
-    [switch]$ExternalCommandValidateOnly
+    [switch]$ExternalCommandValidateOnly,
+    [switch]$WebViewIsolationValidateOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($null -eq (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    $utilityModulePath = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'
+    Import-Module -Name $utilityModulePath -Force -ErrorAction Stop
+}
 
 $ExpectedAppBaseline = 'b3200d4f8d4187bc25cc1f1d49d55bcbcf277212'
 $ExpectedBranch = 'feat/import-delete-runtime-harness'
@@ -19,12 +24,15 @@ $Script:OwnedProcessObjects = [Collections.Generic.List[object]]::new()
 $Script:LogCaptures = [Collections.Generic.List[object]]::new()
 $Script:ActiveEvidenceRoot = $null
 $Script:ActiveRuntimeRoot = $null
+$Script:AdditionalCleanupPorts = @()
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $HarnessPath = Join-Path $RepoRoot 'scripts\run-import-delete-runtime-harness.ps1'
 $ShimSource = Join-Path $RepoRoot 'scripts\yt-dlp-import-delete-shim.rs'
 $SpecPath = Join-Path $RepoRoot 'tests\e2e\import-delete-runtime.spec.ts'
 $WdioConfig = Join-Path $RepoRoot 'wdio.conf.ts'
+$ProductionTauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+$WdioTauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.wdio.conf.json'
 $LogicalSnapshotScript = Join-Path $RepoRoot 'scripts\seed-semantic-search-query-fixture.py'
 
 $AllowedHarnessPaths = @(
@@ -108,6 +116,10 @@ $StopConditions = @(
     'EXTERNAL-COMMAND-EXITCODE-UNAVAILABLE',
     'EXTERNAL-COMMAND-EXITCODE-TYPE-MISMATCH',
     'EXTERNAL-COMMAND-FAILED',
+    'TAURI-CONFIG-OVERRIDE-UNAVAILABLE',
+    'TEMP-TAURI-CONFIG-INVALID',
+    'DENY-PROXY-OWNERSHIP-INVALID',
+    'BROWSER-ADDITIONAL-ARGS-NOT-APPLIED',
     'SYNTHETIC-WDIO-PRELAUNCH-FAILURE',
     'FAILURE-FINALIZATION-INCOMPLETE'
 )
@@ -418,8 +430,9 @@ function Assert-RequiredTools {
 }
 
 function Get-ContractPortListeners {
+    $contractPorts = @($StreamPort, $EmbeddedPort) + @($Script:AdditionalCleanupPorts | ForEach-Object { [int]$_ })
     $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
-        $_.LocalPort -in @($StreamPort, $EmbeddedPort)
+        $_.LocalPort -in $contractPorts
     } | Select-Object LocalAddress, LocalPort, OwningProcess, State)
     return $listeners
 }
@@ -525,6 +538,8 @@ function Invoke-ContractValidation {
         $ShimSource,
         $SpecPath,
         $WdioConfig,
+        $ProductionTauriConfig,
+        $WdioTauriConfig,
         $LogicalSnapshotScript,
         (Join-Path $RepoRoot 'src\components\views\ImportView.tsx'),
         (Join-Path $RepoRoot 'src\components\views\PlaylistsView.tsx'),
@@ -650,6 +665,17 @@ function Invoke-ContractValidation {
         'stdout_metadata',
         'stderr_metadata'
     )
+    Assert-ContainsAll -Text $harness -Label 'test-only WebView isolation contract' -Values @(
+        'function New-TemporaryTauriConfiguration',
+        'function Start-OwnedDenyProxy',
+        'function Publish-DenyProxyLedger',
+        'WebViewIsolationValidateOnly',
+        'additionalBrowserArgs',
+        '--proxy-server=http://127.0.0.1:',
+        '--proxy-bypass-list=localhost,127.0.0.1,[::1]',
+        'OWNED_NON_LOOPBACK_TCP_CONNECTION_COUNT',
+        'tauri_config_mode'
+    )
 
     $validationToken = 'contractvalidation-00000000'
     $alpha = '{"id":"s6R3B1A001","title":"Step6R3B1 Alpha ' + $validationToken + '","channel":"Step6R3B1 Synthetic Artist","duration":123,"thumbnail":"data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="}'
@@ -686,6 +712,7 @@ function Invoke-ContractValidation {
     }
     $safeTreeValidation = Invoke-SafeTreeContractValidation
     $syntheticFailureValidation = Invoke-SyntheticFailureFinalizationValidation
+    $temporaryConfigValidation = Invoke-TemporaryWebViewConfigValidation
     return [ordered]@{
         result = ('PASS ' + [char]0x2014 + ' CONTRACT-VALIDATED')
         APP_BASELINE_SHA = $gitIdentity.APP_BASELINE_SHA
@@ -708,6 +735,13 @@ function Invoke-ContractValidation {
         HARNESS_DELTA_SCOPE = 'PASS'
         AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT = $automaticVariableCollisions.Count
         EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT = $evidenceCompletenessFinalizedAssignmentCount
+        DEFAULT_WRY_DISABLE_FEATURES_PRESERVED = $temporaryConfigValidation.DEFAULT_WRY_DISABLE_FEATURES_PRESERVED
+        PROXY_SERVER_COUNT = $temporaryConfigValidation.PROXY_SERVER_COUNT
+        PROXY_BYPASS_COUNT = $temporaryConfigValidation.PROXY_BYPASS_COUNT
+        DISABLE_BACKGROUND_COUNT = $temporaryConfigValidation.DISABLE_BACKGROUND_COUNT
+        CONFLICTING_PROXY_FLAG_COUNT = $temporaryConfigValidation.CONFLICTING_PROXY_FLAG_COUNT
+        TEMP_CONFIG_JSON_PARSE = $temporaryConfigValidation.TEMP_CONFIG_JSON_PARSE
+        TEMP_CONFIG_UNDER_RUNTIME_ROOT = $temporaryConfigValidation.TEMP_CONFIG_UNDER_RUNTIME_ROOT
         OLLAMA_STATE_SCHEMA_CONTRACT = 'PASS'
         SAFE_TREE_NORMAL_CASE = $safeTreeValidation.SAFE_TREE_NORMAL_CASE
         SNAPSHOT_REPARSE_REJECTION = $safeTreeValidation.SNAPSHOT_REPARSE_REJECTION
@@ -1882,29 +1916,456 @@ function Invoke-OwnedProcessShutdown {
     }
 }
 
+function Get-StringSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))
+        )).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function New-WebViewIsolationAdditionalBrowserArguments {
+    param([Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ProxyPort)
+    return [string](
+        '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection ' +
+        '--disable-background-networking ' +
+        '--disable-component-update ' +
+        '--no-first-run ' +
+        '--disable-quic ' +
+        "--proxy-server=http://127.0.0.1:$ProxyPort " +
+        '--proxy-bypass-list=localhost,127.0.0.1,[::1]'
+    )
+}
+
+function New-TemporaryTauriConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ProxyPort
+    )
+    $runtimeFullPath = [IO.Path]::GetFullPath($RuntimeRoot)
+    $temporaryConfigPath = [IO.Path]::GetFullPath((Join-Path $runtimeFullPath 'tauri.webview-isolation.conf.json'))
+    $runtimePrefixPath = $runtimeFullPath.TrimEnd('\') + '\'
+    if (-not $temporaryConfigPath.StartsWith($runtimePrefixPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'TEMP-TAURI-CONFIG-INVALID'
+    }
+    if (-not (Test-Path -LiteralPath $ProductionTauriConfig -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $WdioTauriConfig -PathType Leaf)) {
+        throw 'TEMP-TAURI-CONFIG-INVALID'
+    }
+
+    $configuration = Get-Content -LiteralPath $ProductionTauriConfig -Raw | ConvertFrom-Json
+    $wdioOverlay = Get-Content -LiteralPath $WdioTauriConfig -Raw | ConvertFrom-Json
+    if ($null -eq $configuration.app -or @($configuration.app.windows).Count -lt 1 -or
+        $null -eq $configuration.build -or $null -eq $configuration.app.security) {
+        throw 'TEMP-TAURI-CONFIG-INVALID'
+    }
+    $configuration.build.beforeBuildCommand = [string]$wdioOverlay.build.beforeBuildCommand
+    $configuration.build.frontendDist = [string]$wdioOverlay.build.frontendDist
+    $configuration.app.security.capabilities = @($wdioOverlay.app.security.capabilities)
+
+    $additionalBrowserArguments = New-WebViewIsolationAdditionalBrowserArguments -ProxyPort $ProxyPort
+    $firstWindow = @($configuration.app.windows)[0]
+    $additionalArgumentsProperty = $firstWindow.PSObject.Properties['additionalBrowserArgs']
+    if ($null -eq $additionalArgumentsProperty) {
+        $firstWindow | Add-Member -NotePropertyName 'additionalBrowserArgs' -NotePropertyValue $additionalBrowserArguments
+    }
+    else {
+        $additionalArgumentsProperty.Value = $additionalBrowserArguments
+    }
+
+    $configurationText = ($configuration | ConvertTo-Json -Depth 100) + [Environment]::NewLine
+    Write-Utf8NoBom -LiteralPath $temporaryConfigPath -Value $configurationText
+    $readBack = Get-Content -LiteralPath $temporaryConfigPath -Raw | ConvertFrom-Json
+    $readBackArguments = [string]@($readBack.app.windows)[0].additionalBrowserArgs
+    if ($readBackArguments -cne $additionalBrowserArguments) {
+        throw 'TEMP-TAURI-CONFIG-INVALID'
+    }
+
+    $proxyServerCount = [regex]::Matches($readBackArguments, '--proxy-server(?:=|\s)').Count
+    $proxyBypassCount = [regex]::Matches($readBackArguments, '--proxy-bypass-list(?:=|\s)').Count
+    $disableBackgroundCount = [regex]::Matches($readBackArguments, '--disable-background-networking(?:\s|$)').Count
+    $conflictingProxyCount = [regex]::Matches(
+        $readBackArguments,
+        '--(?:no-proxy-server|proxy-pac-url)(?:=|\s|$)'
+    ).Count + [Math]::Max(0, $proxyServerCount - 1)
+    $defaultWryDisableFeaturesPreserved = $readBackArguments.Contains(
+        '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection'
+    )
+    if (-not $defaultWryDisableFeaturesPreserved -or $proxyServerCount -ne 1 -or
+        $proxyBypassCount -ne 1 -or $disableBackgroundCount -ne 1 -or $conflictingProxyCount -ne 0) {
+        throw 'TEMP-TAURI-CONFIG-INVALID'
+    }
+
+    $productionBlobOutput = @(Invoke-GitRead -Arguments @('hash-object', 'src-tauri/tauri.conf.json'))
+    if ($productionBlobOutput.Count -ne 1) { throw 'TEMP-TAURI-CONFIG-INVALID' }
+    return [pscustomobject][ordered]@{
+        config_path = [string]$temporaryConfigPath
+        production_config_blob = [string]$productionBlobOutput[0]
+        temporary_config_sha256 = (Get-FileHash -LiteralPath $temporaryConfigPath -Algorithm SHA256).Hash
+        additional_browser_args = [string]$additionalBrowserArguments
+        additional_browser_args_sha256 = Get-StringSha256 -Value $additionalBrowserArguments
+        proxy_port = [int]$ProxyPort
+        DEFAULT_WRY_DISABLE_FEATURES_PRESERVED = [bool]$defaultWryDisableFeaturesPreserved
+        PROXY_SERVER_COUNT = [int]$proxyServerCount
+        PROXY_BYPASS_COUNT = [int]$proxyBypassCount
+        DISABLE_BACKGROUND_COUNT = [int]$disableBackgroundCount
+        CONFLICTING_PROXY_FLAG_COUNT = [int]$conflictingProxyCount
+        TEMP_CONFIG_JSON_PARSE = 'PASS'
+        TEMP_CONFIG_UNDER_RUNTIME_ROOT = $true
+    }
+}
+
+function Invoke-TemporaryWebViewConfigValidation {
+    $runToken = 'synthetic-' + [guid]::NewGuid().ToString('N')
+    $runtimePrefix = 'ytm-free-webview-config-validation-'
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $created = $false
+    try {
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $created = $true
+        $result = New-TemporaryTauriConfiguration -RuntimeRoot $runtimeRoot -ProxyPort 43210
+        if ($result.PROXY_SERVER_COUNT -ne 1 -or $result.PROXY_BYPASS_COUNT -ne 1 -or
+            $result.DISABLE_BACKGROUND_COUNT -ne 1 -or $result.CONFLICTING_PROXY_FLAG_COUNT -ne 0 -or
+            -not $result.DEFAULT_WRY_DISABLE_FEATURES_PRESERVED -or
+            $result.TEMP_CONFIG_JSON_PARSE -ne 'PASS' -or -not $result.TEMP_CONFIG_UNDER_RUNTIME_ROOT) {
+            throw 'TEMP-TAURI-CONFIG-INVALID'
+        }
+        return $result
+    }
+    finally {
+        if ($created -and (Test-Path -LiteralPath $runtimeRoot)) {
+            $safeRuntime = Assert-NoReparseDescendant -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+            Remove-Item -LiteralPath $safeRuntime -Recurse -Force
+        }
+    }
+}
+
+function Start-OwnedDenyProxy {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][byte[]]$HmacKey
+    )
+    $proxyRoot = Join-Path $RuntimeRoot 'deny-proxy'
+    $rawLogRoot = Join-Path $RuntimeRoot 'raw-logs\deny-proxy'
+    $null = New-Item -ItemType Directory -Path $proxyRoot -Force
+    $null = New-Item -ItemType Directory -Path $rawLogRoot -Force
+    $planPath = Join-Path $proxyRoot 'deny-proxy-plan.json'
+    $proxyScriptPath = Join-Path $proxyRoot 'deny-proxy.ps1'
+    $readyPath = Join-Path $proxyRoot 'deny-proxy-ready.json'
+    $ledgerPath = Join-Path $proxyRoot 'deny-proxy-ledger.jsonl'
+    $captureRecord = [pscustomobject][ordered]@{
+        role = 'deny-proxy'
+        process_launched = $false
+        raw_stdout_path = Join-Path $rawLogRoot 'deny-proxy.stdout.raw.log'
+        raw_stderr_path = Join-Path $rawLogRoot 'deny-proxy.stderr.raw.log'
+        evidence_stdout_path = Join-Path $EvidenceRoot 'deny-proxy.stdout.log'
+        evidence_stderr_path = Join-Path $EvidenceRoot 'deny-proxy.stderr.log'
+        stream_publications = @()
+        sanitized_logs_created = $false
+        raw_logs_removed = $false
+    }
+    $Script:LogCaptures.Add($captureRecord) | Out-Null
+    Write-JsonFile -LiteralPath $planPath -Value ([ordered]@{
+        ready_path = $readyPath
+        ledger_path = $ledgerPath
+        hmac_key_base64 = [Convert]::ToBase64String($HmacKey)
+    })
+    $proxySource = @'
+param([Parameter(Mandatory = $true)][string]$PlanPath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
+$hmacKey = [Convert]::FromBase64String([string]$plan.hmac_key_base64)
+function Get-TargetHmac {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    $algorithm = [Security.Cryptography.HMACSHA256]::new($hmacKey)
+    try {
+        return ([BitConverter]::ToString(
+            $algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value.ToLowerInvariant()))
+        )).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+function Get-TargetDescription {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$RequestTarget)
+    $targetValue = $RequestTarget
+    if ($RequestTarget.StartsWith('[')) {
+        $closingBracket = $RequestTarget.IndexOf(']')
+        if ($closingBracket -gt 0) { $targetValue = $RequestTarget.Substring(1, $closingBracket - 1) }
+    }
+    else {
+        $parsedUri = $null
+        if ([Uri]::TryCreate($RequestTarget, [UriKind]::Absolute, [ref]$parsedUri)) {
+            $targetValue = [string]$parsedUri.Host
+        }
+        elseif ($RequestTarget -match '^(?<name>[^:]+):\d+$') {
+            $targetValue = [string]$Matches.name
+        }
+    }
+    $parsedAddress = $null
+    $targetKind = if ([Net.IPAddress]::TryParse($targetValue, [ref]$parsedAddress)) {
+        if ($parsedAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+            'IPV4_LITERAL'
+        }
+        else {
+            'IPV6_LITERAL'
+        }
+    }
+    elseif ($targetValue -match '^[A-Za-z0-9.-]+$' -and $targetValue.Contains('.')) {
+        'HOSTNAME'
+    }
+    else {
+        'UNKNOWN'
+    }
+    return [ordered]@{ kind = $targetKind; value = $targetValue }
+}
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+try {
+    $listener.Start()
+    $listenerPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    [IO.File]::WriteAllText(
+        [string]$plan.ready_path,
+        (([ordered]@{
+            process_id = $PID
+            listen_address = '127.0.0.1'
+            listen_port = $listenerPort
+            ready_utc = [DateTime]::UtcNow.ToString('o')
+        } | ConvertTo-Json -Compress) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
+    while ($true) {
+        if (-not $listener.Pending()) {
+            Start-Sleep -Milliseconds 25
+            continue
+        }
+        $client = $listener.AcceptTcpClient()
+        $connectionClosed = $false
+        $method = 'UNKNOWN'
+        $requestTarget = ''
+        try {
+            $client.ReceiveTimeout = 2000
+            $stream = $client.GetStream()
+            $requestBytes = [Collections.Generic.List[byte]]::new()
+            while ($requestBytes.Count -lt 4096) {
+                $nextByte = $stream.ReadByte()
+                if ($nextByte -lt 0 -or $nextByte -eq 10) { break }
+                if ($nextByte -ne 13) { $requestBytes.Add([byte]$nextByte) }
+            }
+            $requestLine = [Text.Encoding]::ASCII.GetString($requestBytes.ToArray())
+            if ($requestLine -match '^(?<verb>[A-Za-z]+)\s+(?<target>\S+)') {
+                $method = ([string]$Matches.verb).ToUpperInvariant()
+                $requestTarget = [string]$Matches.target
+            }
+            $responseBytes = [Text.Encoding]::ASCII.GetBytes(
+                "HTTP/1.1 502 Bad Gateway`r`nConnection: close`r`nContent-Length: 0`r`n`r`n"
+            )
+            $stream.Write($responseBytes, 0, $responseBytes.Length)
+            $stream.Flush()
+        }
+        catch { }
+        finally {
+            $client.Close()
+            $client.Dispose()
+            $connectionClosed = $true
+        }
+        $targetDescription = Get-TargetDescription -RequestTarget $requestTarget
+        $ledgerRecord = [ordered]@{
+            timestamp_utc = [DateTime]::UtcNow.ToString('o')
+            method = $method
+            target_kind = [string]$targetDescription.kind
+            target_hmac = Get-TargetHmac -Value ([string]$targetDescription.value)
+            connection_closed = $connectionClosed
+        }
+        [IO.File]::AppendAllText(
+            [string]$plan.ledger_path,
+            (($ledgerRecord | ConvertTo-Json -Compress) + [Environment]::NewLine),
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
+}
+finally {
+    $listener.Stop()
+    [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+}
+'@
+    Write-Utf8NoBom -LiteralPath $proxyScriptPath -Value $proxySource
+
+    $powershellCandidates = @(Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue)
+    if ($powershellCandidates.Count -ne 1 -or $powershellCandidates[0].Source -isnot [string]) {
+        throw 'DENY-PROXY-OWNERSHIP-INVALID'
+    }
+    $quotedProxyScriptPath = '"' + $proxyScriptPath.Replace('"', '\"') + '"'
+    $quotedPlanPath = '"' + $planPath.Replace('"', '\"') + '"'
+    $startedProcesses = @(Start-Process -FilePath ([string]$powershellCandidates[0].Source) -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedProxyScriptPath, '-PlanPath', $quotedPlanPath
+    ) -WorkingDirectory $RuntimeRoot -RedirectStandardOutput $captureRecord.raw_stdout_path `
+        -RedirectStandardError $captureRecord.raw_stderr_path -WindowStyle Hidden -PassThru)
+    if ($startedProcesses.Count -ne 1 -or
+        $startedProcesses[0].GetType().FullName -cne 'System.Diagnostics.Process') {
+        throw 'DENY-PROXY-OWNERSHIP-INVALID'
+    }
+    $proxyProcess = $startedProcesses[0]
+    $captureRecord.process_launched = $true
+    $null = Register-OwnedProcessObject -Process $proxyProcess -Role 'deny-proxy' -CaptureRecord $captureRecord
+    $proxyCim = Get-CimInstance Win32_Process -Filter "ProcessId = $($proxyProcess.Id)" -ErrorAction Stop
+    if ($null -eq $proxyCim) { throw 'DENY-PROXY-OWNERSHIP-INVALID' }
+    $proxyIdentity = Get-ProcessIdentity -CimProcess $proxyCim
+    Register-OwnedProcessIdentity -Identity $proxyIdentity
+
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf) -and [DateTime]::UtcNow -lt $readyDeadline) {
+        $proxyProcess.Refresh()
+        if ($proxyProcess.HasExited) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
+        throw 'DENY-PROXY-OWNERSHIP-INVALID'
+    }
+    $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
+    $proxyPort = [int]$ready.listen_port
+    if ([int]$ready.process_id -ne [int]$proxyProcess.Id -or
+        [string]$ready.listen_address -ne '127.0.0.1' -or $proxyPort -lt 1) {
+        throw 'DENY-PROXY-OWNERSHIP-INVALID'
+    }
+    $proxyListeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
+        $_.LocalAddress -eq '127.0.0.1' -and $_.LocalPort -eq $proxyPort -and
+        $_.OwningProcess -eq $proxyProcess.Id
+    })
+    if ($proxyListeners.Count -ne 1) { throw 'DENY-PROXY-OWNERSHIP-INVALID' }
+    $Script:AdditionalCleanupPorts = @($proxyPort)
+
+    return [pscustomobject][ordered]@{
+        process = $proxyProcess
+        identity = $proxyIdentity
+        port = $proxyPort
+        ledger_path = $ledgerPath
+        ownership_validated = $true
+        listen_address = '127.0.0.1'
+    }
+}
+
+function Publish-DenyProxyLedger {
+    param(
+        [Parameter(Mandatory = $true)]$ProxyState,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot
+    )
+    $records = @()
+    if (Test-Path -LiteralPath $ProxyState.ledger_path -PathType Leaf) {
+        $records = @(Get-Content -LiteralPath $ProxyState.ledger_path | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        } | ForEach-Object { $_ | ConvertFrom-Json })
+    }
+    foreach ($record in $records) {
+        if ([string]$record.target_kind -notin @('HOSTNAME', 'IPV4_LITERAL', 'IPV6_LITERAL', 'UNKNOWN') -or
+            [string]::IsNullOrWhiteSpace([string]$record.target_hmac)) {
+            throw 'DENY-PROXY-LEDGER-INVALID'
+        }
+    }
+    $publishedLedgerPath = Join-Path $EvidenceRoot 'deny-proxy-ledger.jsonl'
+    $ledgerText = if ($records.Count -eq 0) {
+        ''
+    }
+    else {
+        (($records | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join [Environment]::NewLine) +
+            [Environment]::NewLine
+    }
+    Write-Utf8NoBom -LiteralPath $publishedLedgerPath -Value $ledgerText
+    $summary = [ordered]@{
+        listen_address = [string]$ProxyState.listen_address
+        listen_port = [int]$ProxyState.port
+        ownership_validated = [bool]$ProxyState.ownership_validated
+        hostname_attempt_count = @($records | Where-Object { $_.target_kind -eq 'HOSTNAME' }).Count
+        ipv4_literal_attempt_count = @($records | Where-Object { $_.target_kind -eq 'IPV4_LITERAL' }).Count
+        ipv6_literal_attempt_count = @($records | Where-Object { $_.target_kind -eq 'IPV6_LITERAL' }).Count
+        unknown_attempt_count = @($records | Where-Object { $_.target_kind -eq 'UNKNOWN' }).Count
+        total_attempt_count = $records.Count
+    }
+    Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot 'deny-proxy-summary.json') -Value $summary
+    return $summary
+}
+
 function Assert-WebViewBrowserRoot {
     param(
         [Parameter(Mandatory = $true)]$OwnedProcesses,
-        [Parameter(Mandatory = $true)][string]$WebViewDataDir
+        [Parameter(Mandatory = $true)][string]$WebViewDataDir,
+        [Nullable[int]]$ExpectedProxyPort = $null
     )
     $webViews = @($OwnedProcesses | Where-Object { $_.name -ieq 'msedgewebview2.exe' })
     $browserRoots = @($webViews | Where-Object { $_.command_line -notmatch '(?:^|\s)--type=' })
     if ($browserRoots.Count -eq 0) { throw 'WEBVIEW2-BROWSER-ROOT-MISSING' }
     if ($browserRoots.Count -ne 1) { throw 'WEBVIEW2-BROWSER-ROOT-AMBIGUOUS' }
     $root = $browserRoots[0]
-    $hostFlags = @([regex]::Matches($root.command_line, '--host-resolver-rules(?:=|\s)'))
-    $backgroundFlags = @([regex]::Matches($root.command_line, '--disable-background-networking(?:\s|$)'))
-    if ($hostFlags.Count -ne 1 -or $backgroundFlags.Count -ne 1 -or
-        $root.command_line -notmatch 'MAP \* 127\.0\.0\.1, EXCLUDE localhost') {
-        throw 'WEBVIEW2-BROWSER-FLAGS-MISSING'
+    $commandLine = [string]$root.command_line
+    $hostFlags = @([regex]::Matches($commandLine, '--host-resolver-rules(?:=|\s)'))
+    $backgroundFlags = @([regex]::Matches($commandLine, '--disable-background-networking(?:\s|$)'))
+    $disableFeaturesFlags = @([regex]::Matches($commandLine, '--disable-features(?:=|\s)'))
+    $componentUpdateFlags = @([regex]::Matches($commandLine, '--disable-component-update(?:\s|$)'))
+    $noFirstRunFlags = @([regex]::Matches($commandLine, '--no-first-run(?:\s|$)'))
+    $disableQuicFlags = @([regex]::Matches($commandLine, '--disable-quic(?:\s|$)'))
+    $proxyServerFlags = @([regex]::Matches($commandLine, '--proxy-server(?:=|\s)'))
+    $proxyBypassFlags = @([regex]::Matches($commandLine, '--proxy-bypass-list(?:=|\s)'))
+    $conflictingProxyFlags = @([regex]::Matches($commandLine, '--(?:no-proxy-server|proxy-pac-url)(?:=|\s|$)'))
+
+    $flagAudit = [ordered]@{
+        disable_features_count = $disableFeaturesFlags.Count
+        disable_background_count = $backgroundFlags.Count
+        disable_component_update_count = $componentUpdateFlags.Count
+        no_first_run_count = $noFirstRunFlags.Count
+        disable_quic_count = $disableQuicFlags.Count
+        proxy_server_count = $proxyServerFlags.Count
+        proxy_bypass_count = $proxyBypassFlags.Count
+        conflicting_proxy_count = $conflictingProxyFlags.Count + [Math]::Max(0, $proxyServerFlags.Count - 1)
+        proxy_port_match = $false
+        default_wry_disable_features_preserved = $commandLine -match '--disable-features(?:=|\s)[^\s\"]*msWebOOUI,msPdfOOUI,msSmartScreenProtection'
     }
-    if (@([regex]::Matches($root.command_line, '--host-resolver-rules')).Count -ne 1) {
-        throw 'CONFLICTING-WEBVIEW2-HOST-RESOLVER-RULES'
+    if ($null -ne $ExpectedProxyPort) {
+        $expectedProxyText = "--proxy-server=http://127.0.0.1:$ExpectedProxyPort"
+        $flagAudit.proxy_port_match = $commandLine.IndexOf(
+            $expectedProxyText,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -ge 0
+        $requiredFlagsValid = $flagAudit.disable_features_count -eq 1 -and
+            $flagAudit.disable_background_count -eq 1 -and
+            $flagAudit.disable_component_update_count -eq 1 -and
+            $flagAudit.no_first_run_count -eq 1 -and
+            $flagAudit.disable_quic_count -eq 1 -and
+            $flagAudit.proxy_server_count -eq 1 -and
+            $flagAudit.proxy_bypass_count -eq 1 -and
+            $flagAudit.conflicting_proxy_count -eq 0 -and
+            $flagAudit.proxy_port_match -and
+            $flagAudit.default_wry_disable_features_preserved
+        if (-not $requiredFlagsValid) {
+            throw 'BROWSER-ADDITIONAL-ARGS-NOT-APPLIED'
+        }
+    }
+    else {
+        if ($hostFlags.Count -ne 1 -or $backgroundFlags.Count -ne 1 -or
+            $commandLine -notmatch 'MAP \* 127\.0\.0\.1, EXCLUDE localhost') {
+            throw 'WEBVIEW2-BROWSER-FLAGS-MISSING'
+        }
+        if (@([regex]::Matches($commandLine, '--host-resolver-rules')).Count -ne 1) {
+            throw 'CONFLICTING-WEBVIEW2-HOST-RESOLVER-RULES'
+        }
     }
     if ($root.command_line.IndexOf($WebViewDataDir, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw 'WEBVIEW2-USER-DATA-DIR-MISMATCH'
     }
-    return [ordered]@{ browser_root = $root; subprocess_count = $webViews.Count - 1 }
+    $networkServices = @($webViews | Where-Object {
+        $_.command_line -match '--type=utility' -and $_.command_line -match 'network\.mojom\.NetworkService'
+    })
+    return [ordered]@{
+        browser_root = $root
+        subprocess_count = $webViews.Count - 1
+        network_services = $networkServices
+        flag_audit = $flagAudit
+        additional_args_present = if ($null -ne $ExpectedProxyPort) { [bool]$requiredFlagsValid } else { $true }
+    }
 }
 
 function Monitor-WdioPhase {
@@ -1912,7 +2373,9 @@ function Monitor-WdioPhase {
         [Parameter(Mandatory = $true)]$Process,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
         [Parameter(Mandatory = $true)][string]$Phase,
-        [Parameter(Mandatory = $true)][string]$WebViewDataDir
+        [Parameter(Mandatory = $true)][string]$WebViewDataDir,
+        [Nullable[int]]$ExpectedProxyPort = $null,
+        [object[]]$AdditionalOwnedProcessIdentities = @()
     )
     $ownedByProcessId = @{}
     $connections = @()
@@ -1927,6 +2390,23 @@ function Monitor-WdioPhase {
                     $ownedByProcessId[$ownedProcessId] = $identity
                     Register-OwnedProcessIdentity -Identity $identity
                 }
+            }
+            foreach ($additionalIdentity in @($AdditionalOwnedProcessIdentities)) {
+                $additionalProcessId = [int]$additionalIdentity.process_id
+                if (-not $processTable.ContainsKey($additionalProcessId)) {
+                    throw 'DENY-PROXY-OWNERSHIP-INVALID'
+                }
+                $currentAdditionalIdentity = Get-ProcessIdentity -CimProcess $processTable[$additionalProcessId]
+                $additionalIdentityMatches = [string]::Equals(
+                    [string]$currentAdditionalIdentity.executable_path,
+                    [string]$additionalIdentity.executable_path,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and $currentAdditionalIdentity.creation_date -eq $additionalIdentity.creation_date
+                if (-not $additionalIdentityMatches) {
+                    throw 'DENY-PROXY-OWNERSHIP-INVALID'
+                }
+                $ownedByProcessId[$additionalProcessId] = $currentAdditionalIdentity
+                Register-OwnedProcessIdentity -Identity $currentAdditionalIdentity
             }
             $ownedProcessIds = @($ownedByProcessId.Keys | ForEach-Object { [int]$_ })
             if ($ownedProcessIds.Count -gt 0) {
@@ -1976,7 +2456,8 @@ function Monitor-WdioPhase {
     if ($nonLoopback.Count -ne 0) {
         throw 'UNEXPECTED-OWNED-PROCESS-NETWORK-CONNECTION'
     }
-    $webViewResult = Assert-WebViewBrowserRoot -OwnedProcesses $owned -WebViewDataDir $WebViewDataDir
+    $webViewResult = Assert-WebViewBrowserRoot -OwnedProcesses $owned -WebViewDataDir $WebViewDataDir `
+        -ExpectedProxyPort $ExpectedProxyPort
     if ($Process.ExitCode -ne 0) {
         throw "WDIO $Phase failed with exit $($Process.ExitCode)"
     }
@@ -1991,8 +2472,10 @@ function Monitor-WdioPhase {
 function New-WdioLaunchPlan {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('create', 'restart')]
-        [string]$Phase
+        [ValidateSet('create', 'restart', 'startup')]
+        [string]$Phase,
+        [AllowNull()][string]$RequestedSpecPath = $null,
+        [AllowNull()][string]$RuntimeRoot = $null
     )
 
     $wdioCandidate = Join-Path $RepoRoot 'node_modules\.bin\wdio.cmd'
@@ -2013,7 +2496,11 @@ function New-WdioLaunchPlan {
         throw 'WDIO-LAUNCH-EXECUTABLE-NOT-FOUND'
     }
 
-    $resolvedSpec = @(Resolve-Path -LiteralPath $SpecPath -ErrorAction SilentlyContinue)
+    $launchSpecPath = if ($Phase -eq 'startup') { $RequestedSpecPath } else { $SpecPath }
+    if ([string]::IsNullOrWhiteSpace($launchSpecPath)) {
+        throw 'WDIO-LAUNCH-SPEC-NOT-FOUND'
+    }
+    $resolvedSpec = @(Resolve-Path -LiteralPath $launchSpecPath -ErrorAction SilentlyContinue)
     if ($resolvedSpec.Count -eq 0) {
         throw 'WDIO-LAUNCH-SPEC-NOT-FOUND'
     }
@@ -2025,8 +2512,20 @@ function New-WdioLaunchPlan {
         throw 'WDIO-LAUNCH-SPEC-TYPE-MISMATCH'
     }
     $resolvedSpecPath = [IO.Path]::GetFullPath([string]$resolvedSpecPath)
-    if (-not $resolvedSpecPath.Equals([IO.Path]::GetFullPath($SpecPath), [StringComparison]::OrdinalIgnoreCase) -or
-        -not (Test-Path -LiteralPath $resolvedSpecPath -PathType Leaf)) {
+    $expectedResolvedSpecPath = [IO.Path]::GetFullPath($launchSpecPath)
+    $specScopeMatches = $resolvedSpecPath.Equals($expectedResolvedSpecPath, [StringComparison]::OrdinalIgnoreCase)
+    if ($Phase -eq 'startup') {
+        if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { throw 'WDIO-LAUNCH-SPEC-MISMATCH' }
+        $runtimePrefixPath = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\') + '\'
+        $specScopeMatches = $specScopeMatches -and
+            $resolvedSpecPath.StartsWith($runtimePrefixPath, [StringComparison]::OrdinalIgnoreCase) -and
+            (Split-Path -Leaf $resolvedSpecPath) -eq 'startup-probe.spec.ts'
+    }
+    else {
+        $specScopeMatches = $specScopeMatches -and
+            $resolvedSpecPath.Equals([IO.Path]::GetFullPath($SpecPath), [StringComparison]::OrdinalIgnoreCase)
+    }
+    if (-not $specScopeMatches -or -not (Test-Path -LiteralPath $resolvedSpecPath -PathType Leaf)) {
         throw 'WDIO-LAUNCH-SPEC-MISMATCH'
     }
 
@@ -2076,7 +2575,9 @@ function Start-WdioPhase {
         [Parameter(Mandatory = $true)]$LaunchPlan,
         [Parameter(Mandatory = $true)][string]$PhaseEvidenceRoot,
         [Parameter(Mandatory = $true)][string]$WebViewDataDir,
-        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Nullable[int]]$ExpectedProxyPort = $null,
+        [object[]]$AdditionalOwnedProcessIdentities = @()
     )
 
     $FilePath = $LaunchPlan.FilePath
@@ -2100,7 +2601,7 @@ function Start-WdioPhase {
             throw 'WDIO-LAUNCH-ARGUMENT-TYPE-MISMATCH'
         }
     }
-    if ($Phase -notin @('create', 'restart')) {
+    if ($Phase -notin @('create', 'restart', 'startup')) {
         throw 'WDIO-LAUNCH-PHASE-MISMATCH'
     }
     if ($WorkingDirectory -isnot [string] -or
@@ -2138,7 +2639,8 @@ function Start-WdioPhase {
     $lifecycleFailureRecord = $null
     try {
         $phaseResult = Monitor-WdioPhase -Process $process -EvidenceRoot $PhaseEvidenceRoot `
-            -Phase $Phase -WebViewDataDir $WebViewDataDir
+            -Phase $Phase -WebViewDataDir $WebViewDataDir -ExpectedProxyPort $ExpectedProxyPort `
+            -AdditionalOwnedProcessIdentities $AdditionalOwnedProcessIdentities
     }
     catch {
         $phaseFailureRecord = $_
@@ -2168,7 +2670,13 @@ function Set-ProcessEnvironment {
     $previous = @{}
     foreach ($name in $Values.Keys) {
         $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        [Environment]::SetEnvironmentVariable($name, [string]$Values[$name], 'Process')
+        $nextValue = $Values[$name]
+        if ($null -eq $nextValue) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, [string]$nextValue, 'Process')
+        }
     }
     return $previous
 }
@@ -3932,6 +4440,462 @@ function Invoke-ExternalCommandValidation {
     }
 }
 
+function New-StartupProbeSpec {
+    param([Parameter(Mandatory = $true)][string]$RuntimeRoot)
+    $specPath = Join-Path $RuntimeRoot 'startup-probe.spec.ts'
+    $specSource = @'
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+describe('WebView2 isolation startup probe', () => {
+  it('initializes the application session and renders the root', async () => {
+    const evidenceRoot = process.env.EVIDENCE_ROOT;
+    if (!evidenceRoot) throw new Error('STARTUP-PROBE-EVIDENCE-ROOT-MISSING');
+    const root = await $('#root');
+    await root.waitForExist({ timeout: 10_000 });
+    await root.waitForDisplayed({ timeout: 10_000 });
+    writeFileSync(
+      join(evidenceRoot, 'startup-probe-state.json'),
+      JSON.stringify({
+        schema_version: 1,
+        application_session_initialized: true,
+        application_root_visible: await root.isDisplayed(),
+        observed_at_utc: new Date().toISOString(),
+      }, null, 2) + '\n',
+      { encoding: 'utf8' },
+    );
+    await browser.pause(5_000);
+  });
+});
+'@
+    Write-Utf8NoBom -LiteralPath $specPath -Value $specSource
+    return [string][IO.Path]::GetFullPath($specPath)
+}
+
+function Invoke-WebViewIsolationValidation {
+    $Script:OwnedProcessIdentities = @()
+    $Script:OwnedProcessObjects.Clear()
+    $Script:LogCaptures.Clear()
+    $Script:AdditionalCleanupPorts = @()
+    $runToken = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' +
+        [guid]::NewGuid().ToString('N').Substring(0, 8).ToLowerInvariant()
+    $evidencePrefix = 'ytm-free-webview-isolation-evidence-'
+    $runtimePrefix = 'ytm-free-webview-isolation-runtime-'
+    $evidenceRoot = Join-Path $env:TEMP ($evidencePrefix + $runToken)
+    $runtimeRoot = Join-Path $env:TEMP ($runtimePrefix + $runToken)
+    $preflight = $null
+    $proxyState = $null
+    $temporaryConfig = $null
+    $phaseResult = $null
+    $environmentBefore = $null
+    $primaryFailure = $null
+    $finalization = $null
+    $firstIncompletePhase = 'preflight'
+    $buildStatus = 'NOT RUN'
+    $applicationLaunchStatus = 'NOT RUN'
+    $wdioStatus = 'NOT RUN'
+    $contextHarnessHead = 'UNKNOWN'
+    $productionConfigBlobBefore = $null
+    $productionConfigBlobAfter = $null
+    $proxySummary = $null
+    $mandatoryEvidenceRelativePaths = [Collections.Generic.List[string]]::new()
+    $phaseEvidenceCatalog = @(
+        'git-preflight.json',
+        'toolchain.json',
+        'run-metadata.json',
+        'deny-proxy-metadata.json',
+        'temporary-tauri-config-metadata.json',
+        'build-provenance.json',
+        'wdio-startup-launch-plan.json',
+        'startup/startup-probe-state.json',
+        'startup/owned-processes-startup.json',
+        'startup/owned-tcp-startup.json',
+        'startup/owned-process-lifecycle-startup.json',
+        'deny-proxy-ledger.jsonl',
+        'deny-proxy-summary.json',
+        'webview-isolation-gates.json',
+        'production-config-integrity.json'
+    )
+    [byte[]]$hmacKey = New-Object byte[] 32
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($hmacKey)
+    }
+    finally {
+        $random.Dispose()
+    }
+
+    try {
+        $preflight = Invoke-SafePreflight
+        $contextHarnessHead = [string]$preflight.git.HARNESS_HEAD_SHA
+        $productionConfigBlobBeforeOutput = @(Invoke-GitRead -Arguments @(
+            'hash-object', 'src-tauri/tauri.conf.json'
+        ))
+        if ($productionConfigBlobBeforeOutput.Count -ne 1) {
+            throw 'PRODUCTION-TAURI-CONFIG-BLOB-READ-FAILED'
+        }
+        $productionConfigBlobBefore = [string]$productionConfigBlobBeforeOutput[0]
+
+        $evidenceRoot = New-OwnedRoot -LiteralPath $evidenceRoot -Prefix $evidencePrefix -Token $runToken
+        $runtimeRoot = New-OwnedRoot -LiteralPath $runtimeRoot -Prefix $runtimePrefix -Token $runToken
+        $Script:ActiveEvidenceRoot = $evidenceRoot
+        $Script:ActiveRuntimeRoot = $runtimeRoot
+        $startupEvidenceRoot = Join-Path $evidenceRoot 'startup'
+        $dataDir = Join-Path $runtimeRoot 'data'
+        $spotifyDir = Join-Path $runtimeRoot 'spotify'
+        $webViewDataDir = Join-Path $runtimeRoot 'webview2'
+        $processTemp = Join-Path $runtimeRoot 'temp'
+        foreach ($directory in @(
+            $startupEvidenceRoot, $dataDir, $spotifyDir, $webViewDataDir, $processTemp
+        )) {
+            $null = New-Item -ItemType Directory -Path $directory -Force
+        }
+
+        foreach ($initialEvidencePath in @('git-preflight.json', 'toolchain.json', 'run-metadata.json')) {
+            $mandatoryEvidenceRelativePaths.Add($initialEvidencePath) | Out-Null
+        }
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'git-preflight.json') -Value ([ordered]@{
+            branch = $preflight.git.branch
+            APP_BASELINE_SHA = $preflight.git.APP_BASELINE_SHA
+            HARNESS_HEAD_SHA = $preflight.git.HARNESS_HEAD_SHA
+            ORIGIN_MAIN_SHA = $preflight.git.ORIGIN_MAIN_SHA
+            HARNESS_MERGE_BASE_SHA = $preflight.git.HARNESS_MERGE_BASE_SHA
+            HARNESS_DELTA_PATHS = $preflight.git.HARNESS_DELTA_PATHS
+            HARNESS_COMMIT_COUNT = $preflight.git.HARNESS_COMMIT_COUNT
+            status = $preflight.git.status
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'toolchain.json') -Value ([ordered]@{
+            tools = @(Get-ToolchainMetadata -Tools $preflight.tools)
+            full_environment_logged = $false
+        })
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'run-metadata.json') -Value ([ordered]@{
+            schema_version = 1
+            run_token = $runToken
+            mode = 'WEBVIEW-ISOLATION-STARTUP-PROBE'
+            started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+            functional_import_spec = 'NOT RUN'
+            shim_compilation = 'NOT RUN'
+        })
+
+        $firstIncompletePhase = 'deny-proxy'
+        $mandatoryEvidenceRelativePaths.Add('deny-proxy-metadata.json') | Out-Null
+        $proxyState = Start-OwnedDenyProxy -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot -HmacKey $hmacKey
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'deny-proxy-metadata.json') -Value ([ordered]@{
+            listen_address = [string]$proxyState.listen_address
+            listen_port = [int]$proxyState.port
+            ownership_validated = [bool]$proxyState.ownership_validated
+            process_id = [int]$proxyState.identity.process_id
+            process_creation_utc = [string]$proxyState.identity.creation_date
+            executable_name = Split-Path -Leaf ([string]$proxyState.identity.executable_path)
+            outbound_connection_capability = 'NONE'
+        })
+
+        $firstIncompletePhase = 'temporary-tauri-config'
+        $mandatoryEvidenceRelativePaths.Add('temporary-tauri-config-metadata.json') | Out-Null
+        $temporaryConfig = New-TemporaryTauriConfiguration -RuntimeRoot $runtimeRoot -ProxyPort $proxyState.port
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'temporary-tauri-config-metadata.json') -Value ([ordered]@{
+            production_config_blob = $temporaryConfig.production_config_blob
+            temporary_config_sha256 = $temporaryConfig.temporary_config_sha256
+            additional_browser_args_sha256 = $temporaryConfig.additional_browser_args_sha256
+            proxy_port = $temporaryConfig.proxy_port
+            DEFAULT_WRY_DISABLE_FEATURES_PRESERVED = $temporaryConfig.DEFAULT_WRY_DISABLE_FEATURES_PRESERVED
+            PROXY_SERVER_COUNT = $temporaryConfig.PROXY_SERVER_COUNT
+            PROXY_BYPASS_COUNT = $temporaryConfig.PROXY_BYPASS_COUNT
+            DISABLE_BACKGROUND_COUNT = $temporaryConfig.DISABLE_BACKGROUND_COUNT
+            CONFLICTING_PROXY_FLAG_COUNT = $temporaryConfig.CONFLICTING_PROXY_FLAG_COUNT
+            TEMP_CONFIG_JSON_PARSE = $temporaryConfig.TEMP_CONFIG_JSON_PARSE
+            TEMP_CONFIG_UNDER_RUNTIME_ROOT = $temporaryConfig.TEMP_CONFIG_UNDER_RUNTIME_ROOT
+        })
+
+        $firstIncompletePhase = 'application-build'
+        $mandatoryEvidenceRelativePaths.Add('build-provenance.json') | Out-Null
+        $buildStatus = 'IN PROGRESS'
+        $buildStart = [DateTime]::UtcNow
+        $tauriExecutablePath = Join-Path $RepoRoot 'node_modules\.bin\tauri.cmd'
+        if (-not (Test-Path -LiteralPath $tauriExecutablePath -PathType Leaf)) {
+            throw 'TAURI-CONFIG-OVERRIDE-UNAVAILABLE'
+        }
+        $buildResult = Invoke-ExternalCaptured -FilePath $tauriExecutablePath -Arguments @(
+            'build', '--debug', '--no-bundle', '--features', 'wdio', '--config', $temporaryConfig.config_path
+        ) -WorkingDirectory $RepoRoot -RuntimeRoot $runtimeRoot -EvidenceRoot $evidenceRoot `
+            -LogName 'webview-isolation-build'
+        $buildEnd = [DateTime]::UtcNow
+        $binaryPath = Join-Path $RepoRoot 'src-tauri\target\debug\ytm-free.exe'
+        $binaryPresent = Test-Path -LiteralPath $binaryPath -PathType Leaf
+        $binaryItem = if ($binaryPresent) { Get-Item -LiteralPath $binaryPath } else { $null }
+        $binaryFresh = $binaryPresent -and $binaryItem.LastWriteTimeUtc -ge $buildStart
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'build-provenance.json') -Value ([ordered]@{
+            tauri_config_mode = 'TEMPORARY_OVERRIDE'
+            production_config_blob = $productionConfigBlobBefore
+            temporary_config_sha256 = $temporaryConfig.temporary_config_sha256
+            additional_browser_args_sha256 = $temporaryConfig.additional_browser_args_sha256
+            proxy_port = $temporaryConfig.proxy_port
+            build_start_utc = $buildStart.ToString('o')
+            build_end_utc = $buildEnd.ToString('o')
+            build_exit_status = $buildResult.exit_code_status
+            build_exit = $buildResult.exit_code
+            binary_present = [bool]$binaryPresent
+            binary_fresh = [bool]$binaryFresh
+            binary_size = if ($binaryPresent) { [int64]$binaryItem.Length } else { $null }
+            binary_sha256 = if ($binaryPresent) {
+                (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash
+            }
+            else { $null }
+        })
+        Assert-ExternalCommandSucceeded -Result $buildResult -CommandLabel 'test-only WebView isolation build'
+        if (-not $binaryFresh -or $binaryItem.Length -le 0) {
+            throw 'UI-AUTOMATION-PATH-NOT-AVAILABLE'
+        }
+        $buildStatus = 'PASS'
+
+        $firstIncompletePhase = 'startup-launch-plan'
+        $startupSpecPath = New-StartupProbeSpec -RuntimeRoot $runtimeRoot
+        $startupLaunchPlan = New-WdioLaunchPlan -Phase 'startup' -RequestedSpecPath $startupSpecPath `
+            -RuntimeRoot $runtimeRoot
+        $mandatoryEvidenceRelativePaths.Add('wdio-startup-launch-plan.json') | Out-Null
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'wdio-startup-launch-plan.json') -Value ([ordered]@{
+            phase = $startupLaunchPlan.Phase
+            executable_name = Split-Path -Leaf $startupLaunchPlan.FilePath
+            file_path_type = $startupLaunchPlan.FilePath.GetType().FullName
+            argument_list_type = $startupLaunchPlan.ArgumentList.GetType().FullName
+            spec_location = '%RUNTIME_ROOT%\startup-probe.spec.ts'
+            functional_spec_used = $false
+        })
+
+        $environmentBefore = Set-ProcessEnvironment -Values ([ordered]@{
+            TEMP = $processTemp
+            TMP = $processTemp
+            YTM_FREE_DATA_DIR = $dataDir
+            YTM_FREE_SPOTIFY_DIR = $spotifyDir
+            WEBVIEW2_USER_DATA_FOLDER = $webViewDataDir
+            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $null
+            EVIDENCE_ROOT = $startupEvidenceRoot
+            WDIO_EMBEDDED_PORT = [string]$EmbeddedPort
+            TAURI_WEBDRIVER_PORT = [string]$EmbeddedPort
+            IMPORT_DELETE_PHASE = 'startup'
+            RUN_TOKEN = $runToken
+        })
+        if ($null -ne [Environment]::GetEnvironmentVariable(
+            'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
+            'Process'
+        )) {
+            throw 'BROWSER-ADDITIONAL-ARGS-NOT-APPLIED'
+        }
+
+        $firstIncompletePhase = 'wdio-startup'
+        foreach ($runtimeEvidencePath in @(
+            'startup/startup-probe-state.json',
+            'startup/owned-processes-startup.json',
+            'startup/owned-tcp-startup.json',
+            'startup/owned-process-lifecycle-startup.json',
+            'webview-isolation-gates.json'
+        )) {
+            $mandatoryEvidenceRelativePaths.Add($runtimeEvidencePath) | Out-Null
+        }
+        $applicationLaunchStatus = 'STARTUP ATTEMPTED'
+        $wdioStatus = 'STARTUP IN PROGRESS'
+        $phaseResult = Start-WdioPhase -LaunchPlan $startupLaunchPlan `
+            -PhaseEvidenceRoot $startupEvidenceRoot -WebViewDataDir $webViewDataDir `
+            -RuntimeRoot $runtimeRoot -ExpectedProxyPort $proxyState.port `
+            -AdditionalOwnedProcessIdentities @($proxyState.identity)
+        $startupStatePath = Join-Path $startupEvidenceRoot 'startup-probe-state.json'
+        if (-not (Test-Path -LiteralPath $startupStatePath -PathType Leaf)) {
+            throw 'APPLICATION-SESSION-NOT-INITIALIZED'
+        }
+        $startupState = Get-Content -LiteralPath $startupStatePath -Raw | ConvertFrom-Json
+        $nonLoopbackConnections = @($phaseResult.connections | Where-Object {
+            $_.remote_address -notin @('127.0.0.1', '::1', '0.0.0.0', '::')
+        })
+        $flagAudit = $phaseResult.webview.flag_audit
+        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'webview-isolation-gates.json') -Value ([ordered]@{
+            application_session_initialized = [bool]$startupState.application_session_initialized
+            application_root_visible = [bool]$startupState.application_root_visible
+            browser_root_additional_args_present = [bool]$phaseResult.webview.additional_args_present
+            browser_root_flag_audit = $flagAudit
+            owned_non_loopback_tcp_connection_count = $nonLoopbackConnections.Count
+            network_service_command_lines = @($phaseResult.webview.network_services | ForEach-Object {
+                ConvertTo-RedactedText -Value ([string]$_.command_line) `
+                    -EvidenceRoot $evidenceRoot -RuntimeRoot $runtimeRoot
+            })
+        })
+        if (-not $startupState.application_session_initialized -or -not $startupState.application_root_visible -or
+            -not $phaseResult.webview.additional_args_present -or $nonLoopbackConnections.Count -ne 0) {
+            throw 'WEBVIEW2-NETWORK-ISOLATION-NOT-AVAILABLE'
+        }
+        $applicationLaunchStatus = 'PASS'
+        $wdioStatus = 'PASS'
+        $firstIncompletePhase = 'complete'
+    }
+    catch {
+        if ($firstIncompletePhase -eq 'application-build') { $buildStatus = 'FAILED' }
+        if ($firstIncompletePhase -eq 'wdio-startup') {
+            $applicationLaunchStatus = 'FAILED'
+            $wdioStatus = 'FAILED'
+        }
+        $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase $firstIncompletePhase
+        if (Test-Path -LiteralPath $evidenceRoot -PathType Container) {
+            Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+        }
+    }
+    finally {
+        if ((Test-Path -LiteralPath $evidenceRoot -PathType Container) -and
+            (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+            try {
+                $preFinalizerLifecycle = Invoke-OwnedProcessShutdown `
+                    -ProcessIdentities @($Script:OwnedProcessIdentities) `
+                    -ProcessObjectRecords @($Script:OwnedProcessObjects) `
+                    -LogCaptures @($Script:LogCaptures) -EvidenceRoot $evidenceRoot `
+                    -RuntimeRoot $runtimeRoot -Stage 'startup-pre-finalizer' -StopRunning $true
+                Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'startup-pre-finalizer-lifecycle.json') `
+                    -Value $preFinalizerLifecycle
+            }
+            catch {
+                if ($null -eq $primaryFailure) {
+                    $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'startup-pre-finalizer'
+                    Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+                }
+            }
+            if ($null -ne $proxyState) {
+                try {
+                    $proxySummary = Publish-DenyProxyLedger -ProxyState $proxyState -EvidenceRoot $evidenceRoot
+                    foreach ($proxyEvidencePath in @('deny-proxy-ledger.jsonl', 'deny-proxy-summary.json')) {
+                        $mandatoryEvidenceRelativePaths.Add($proxyEvidencePath) | Out-Null
+                    }
+                }
+                catch {
+                    if ($null -eq $primaryFailure) {
+                        $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'deny-proxy-ledger'
+                        Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+                    }
+                }
+            }
+            try {
+                $productionConfigBlobAfterOutput = @(Invoke-GitRead -Arguments @(
+                    'hash-object', 'src-tauri/tauri.conf.json'
+                ))
+                if ($productionConfigBlobAfterOutput.Count -ne 1) {
+                    throw 'PRODUCTION-TAURI-CONFIG-BLOB-READ-FAILED'
+                }
+                $productionConfigBlobAfter = [string]$productionConfigBlobAfterOutput[0]
+                Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'production-config-integrity.json') -Value ([ordered]@{
+                    blob_before = $productionConfigBlobBefore
+                    blob_after = $productionConfigBlobAfter
+                    blob_match = $productionConfigBlobBefore -ceq $productionConfigBlobAfter
+                })
+                $mandatoryEvidenceRelativePaths.Add('production-config-integrity.json') | Out-Null
+                if ($productionConfigBlobBefore -cne $productionConfigBlobAfter -and $null -eq $primaryFailure) {
+                    throw 'PRODUCTION-TAURI-CONFIG-BLOB-CHANGED'
+                }
+            }
+            catch {
+                if ($null -eq $primaryFailure) {
+                    $primaryFailure = New-PrimaryFailureRecord -ErrorRecord $_ -Phase 'production-config-integrity'
+                    Write-JsonFile -LiteralPath (Join-Path $evidenceRoot 'primary-failure.json') -Value $primaryFailure
+                }
+            }
+
+            try {
+                $finalization = Invoke-HarnessFinalization -EvidenceRoot $evidenceRoot `
+                    -EvidencePrefix $evidencePrefix -RuntimeRoot $runtimeRoot -RuntimePrefix $runtimePrefix `
+                    -RunToken $runToken -HmacKey $hmacKey -PersonalRoots ([ordered]@{}) `
+                    -PrivacyBefore $null -ProtectedPaths ([ordered]@{}) -ProtectedBefore $null `
+                    -EnvironmentBefore $environmentBefore `
+                    -OwnedProcessIdentities @($Script:OwnedProcessIdentities) `
+                    -OwnedProcessObjects @($Script:OwnedProcessObjects) `
+                    -LogCaptures @($Script:LogCaptures) -PrimaryFailure $primaryFailure `
+                    -Context ([ordered]@{
+                        first_incomplete_phase = $firstIncompletePhase
+                        app_baseline_sha = if ($null -ne $preflight) {
+                            [string]$preflight.git.APP_BASELINE_SHA
+                        }
+                        else { $ExpectedAppBaseline }
+                        harness_head_sha = $contextHarnessHead
+                        build_status = $buildStatus
+                        application_launch_status = $applicationLaunchStatus
+                        wdio_status = $wdioStatus
+                        create_status = 'NOT_APPLICABLE'
+                        restart_status = 'NOT_APPLICABLE'
+                        mandatory_evidence_relative_paths = @($mandatoryEvidenceRelativePaths)
+                        not_applicable_evidence_relative_paths = @($phaseEvidenceCatalog | Where-Object {
+                            $_ -notin @($mandatoryEvidenceRelativePaths)
+                        })
+                    })
+            }
+            catch {
+                Write-Warning ('FAILURE-FINALIZATION-INCOMPLETE: ' +
+                    (ConvertTo-RedactedText -Value $_.Exception.Message))
+            }
+        }
+        [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+        $Script:AdditionalCleanupPorts = @()
+        $Script:ActiveEvidenceRoot = $null
+        $Script:ActiveRuntimeRoot = $null
+    }
+
+    $evidenceFiles = if (Test-Path -LiteralPath $evidenceRoot -PathType Container) {
+        @(Get-ChildItem -LiteralPath $evidenceRoot -Recurse -File -Force)
+    }
+    else { @() }
+    $manifestReadBack = if (Test-Path -LiteralPath (Join-Path $evidenceRoot 'final-manifest.json') -PathType Leaf) {
+        Get-Content -LiteralPath (Join-Path $evidenceRoot 'final-manifest.json') -Raw | ConvertFrom-Json
+    }
+    else { $null }
+    $result = [ordered]@{
+        RUN_TOKEN = $runToken
+        EVIDENCE_ROOT = '%TEMP%\' + (Split-Path -Leaf $evidenceRoot)
+        EVIDENCE_FILE_COUNT = $evidenceFiles.Count
+        EVIDENCE_TOTAL_BYTES = [int64](($evidenceFiles | Measure-Object Length -Sum).Sum)
+        PRODUCTION_TAURI_CONFIG_BLOB_BEFORE = $productionConfigBlobBefore
+        PRODUCTION_TAURI_CONFIG_BLOB_AFTER = $productionConfigBlobAfter
+        APPLICATION_SESSION_INITIALIZED = if ($null -ne $phaseResult) { $true } else { $false }
+        BROWSER_ROOT_ADDITIONAL_ARGS_PRESENT = if ($null -ne $phaseResult) {
+            [bool]$phaseResult.webview.additional_args_present
+        }
+        else { $false }
+        OWNED_NON_LOOPBACK_TCP_CONNECTION_COUNT = if ($null -ne $phaseResult) {
+            @($phaseResult.connections | Where-Object {
+                $_.remote_address -notin @('127.0.0.1', '::1', '0.0.0.0', '::')
+            }).Count
+        }
+        else { $null }
+        DENY_PROXY_LISTEN_ADDRESS = if ($null -ne $proxyState) { $proxyState.listen_address } else { $null }
+        DENY_PROXY_PORT = if ($null -ne $proxyState) { $proxyState.port } else { $null }
+        DENY_PROXY_OWNERSHIP_VALIDATED = if ($null -ne $proxyState) {
+            [bool]$proxyState.ownership_validated
+        }
+        else { $false }
+        PROXY_HOSTNAME_ATTEMPT_COUNT = if ($null -ne $proxySummary) { $proxySummary.hostname_attempt_count } else { $null }
+        PROXY_IPV4_LITERAL_ATTEMPT_COUNT = if ($null -ne $proxySummary) { $proxySummary.ipv4_literal_attempt_count } else { $null }
+        PROXY_IPV6_LITERAL_ATTEMPT_COUNT = if ($null -ne $proxySummary) { $proxySummary.ipv6_literal_attempt_count } else { $null }
+        PROXY_UNKNOWN_ATTEMPT_COUNT = if ($null -ne $proxySummary) { $proxySummary.unknown_attempt_count } else { $null }
+        BROWSER_FLAG_AUDIT = if ($null -ne $phaseResult) { $phaseResult.webview.flag_audit } else { $null }
+        FINAL_EVIDENCE_INVENTORY_SHA256 = if ($null -ne $finalization) { $finalization.inventory_sha256 } else { $null }
+        FINAL_MANIFEST_SHA256 = if ($null -ne $finalization) { $finalization.manifest_sha256 } else { $null }
+        CLEAR_PERSONAL_PATH_MATCH_COUNT = if ($null -ne $finalization) {
+            $finalization.clear_personal_path_match_count
+        }
+        else { $null }
+        cleanup_status = if ($null -ne $finalization) { $finalization.cleanup_status } else { $null }
+        finalization_status = if ($null -ne $finalization) { $finalization.finalization_status } else { $null }
+        evidence_completeness = if ($null -ne $finalization) { $finalization.evidence_completeness } else { $null }
+        RUNTIME_ROOT_REMOVED = -not (Test-Path -LiteralPath $runtimeRoot)
+        EVIDENCE_ROOT_PRESERVED = Test-Path -LiteralPath $evidenceRoot -PathType Container
+        PRIMARY_FAILURE = $primaryFailure
+        FINALIZATION_FAILURES = if ($null -ne $finalization) { @($finalization.finalization_failures) } else { @() }
+        MANIFEST_RUN_STATUS = if ($null -ne $manifestReadBack) { $manifestReadBack.run_status } else { $null }
+    }
+    if ($null -ne $primaryFailure) {
+        throw "$($primaryFailure.failure_code): $($primaryFailure.message_redacted)"
+    }
+    if ($null -eq $finalization -or $finalization.cleanup_status -ne 'PASS' -or
+        $finalization.finalization_status -ne 'FINALIZED' -or
+        $finalization.evidence_completeness -ne 'COMPLETE' -or
+        $finalization.finalization_failures.Count -ne 0) {
+        throw 'FAILURE-FINALIZATION-INCOMPLETE'
+    }
+    return $result
+}
+
 function Invoke-FullRuntimeHarness {
     $Script:OwnedProcessIdentities = @()
     $Script:OwnedProcessObjects.Clear()
@@ -4336,10 +5300,11 @@ $selectedModes = @(@(
     $PreflightOnly,
     $LaunchPlanValidateOnly,
     $MonitorAndFinalizationValidateOnly,
-    $ExternalCommandValidateOnly
+    $ExternalCommandValidateOnly,
+    $WebViewIsolationValidateOnly
 ) | Where-Object { $_ })
 if ($selectedModes.Count -gt 1) {
-    throw 'ContractValidateOnly, PreflightOnly, LaunchPlanValidateOnly, MonitorAndFinalizationValidateOnly, and ExternalCommandValidateOnly are mutually exclusive'
+    throw 'ContractValidateOnly, PreflightOnly, LaunchPlanValidateOnly, MonitorAndFinalizationValidateOnly, ExternalCommandValidateOnly, and WebViewIsolationValidateOnly are mutually exclusive'
 }
 
 if ($ContractValidateOnly) {
@@ -4357,6 +5322,13 @@ if ($ContractValidateOnly) {
     Write-Output "EXTERNAL_REPARSE_TARGET_UNCHANGED: $($result.EXTERNAL_REPARSE_TARGET_UNCHANGED)"
     Write-Output "AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT:$($result.AUTOMATIC_VARIABLE_WRITE_COLLISION_COUNT)"
     Write-Output "EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT:$($result.EVIDENCE_COMPLETENESS_FINALIZED_ASSIGNMENT_COUNT)"
+    Write-Output "DEFAULT_WRY_DISABLE_FEATURES_PRESERVED:$($result.DEFAULT_WRY_DISABLE_FEATURES_PRESERVED)"
+    Write-Output "PROXY_SERVER_COUNT:$($result.PROXY_SERVER_COUNT)"
+    Write-Output "PROXY_BYPASS_COUNT:$($result.PROXY_BYPASS_COUNT)"
+    Write-Output "DISABLE_BACKGROUND_COUNT:$($result.DISABLE_BACKGROUND_COUNT)"
+    Write-Output "CONFLICTING_PROXY_FLAG_COUNT:$($result.CONFLICTING_PROXY_FLAG_COUNT)"
+    Write-Output "TEMP_CONFIG_JSON_PARSE:$($result.TEMP_CONFIG_JSON_PARSE)"
+    Write-Output "TEMP_CONFIG_UNDER_RUNTIME_ROOT:$($result.TEMP_CONFIG_UNDER_RUNTIME_ROOT)"
     Write-Output "SYNTHETIC_PRIMARY_FAILURE_PRESERVED:$($result.SYNTHETIC_PRIMARY_FAILURE_PRESERVED)"
     Write-Output "SYNTHETIC_PRIVACY_AFTER_CAPTURED:$($result.SYNTHETIC_PRIVACY_AFTER_CAPTURED)"
     Write-Output "SYNTHETIC_PRIVACY_EQUALITY:$($result.SYNTHETIC_PRIVACY_EQUALITY)"
@@ -4467,6 +5439,46 @@ if ($ExternalCommandValidateOnly) {
     Write-Output "RUSTC_EXECUTABLE_PRESENT:$($result.RUSTC_EXECUTABLE_PRESENT)"
     Write-Output "RUSTC_EXECUTABLE_SHA256:$($result.RUSTC_EXECUTABLE_SHA256)"
     Write-NonClaims
+    exit 0
+}
+
+if ($WebViewIsolationValidateOnly) {
+    $result = Invoke-WebViewIsolationValidation
+    Write-Output "RUN_TOKEN:$($result.RUN_TOKEN)"
+    Write-Output "EVIDENCE_ROOT:$($result.EVIDENCE_ROOT)"
+    Write-Output "EVIDENCE_FILE_COUNT:$($result.EVIDENCE_FILE_COUNT)"
+    Write-Output "EVIDENCE_TOTAL_BYTES:$($result.EVIDENCE_TOTAL_BYTES)"
+    Write-Output "PRODUCTION_TAURI_CONFIG_BLOB_BEFORE:$($result.PRODUCTION_TAURI_CONFIG_BLOB_BEFORE)"
+    Write-Output "PRODUCTION_TAURI_CONFIG_BLOB_AFTER:$($result.PRODUCTION_TAURI_CONFIG_BLOB_AFTER)"
+    Write-Output "APPLICATION_SESSION_INITIALIZED:$($result.APPLICATION_SESSION_INITIALIZED)"
+    Write-Output "BROWSER_ROOT_ADDITIONAL_ARGS_PRESENT:$($result.BROWSER_ROOT_ADDITIONAL_ARGS_PRESENT)"
+    Write-Output "OWNED_NON_LOOPBACK_TCP_CONNECTION_COUNT:$($result.OWNED_NON_LOOPBACK_TCP_CONNECTION_COUNT)"
+    Write-Output "DENY_PROXY_LISTEN_ADDRESS:$($result.DENY_PROXY_LISTEN_ADDRESS)"
+    Write-Output "DENY_PROXY_PORT:$($result.DENY_PROXY_PORT)"
+    Write-Output "DENY_PROXY_OWNERSHIP_VALIDATED:$($result.DENY_PROXY_OWNERSHIP_VALIDATED)"
+    Write-Output "PROXY_HOSTNAME_ATTEMPT_COUNT:$($result.PROXY_HOSTNAME_ATTEMPT_COUNT)"
+    Write-Output "PROXY_IPV4_LITERAL_ATTEMPT_COUNT:$($result.PROXY_IPV4_LITERAL_ATTEMPT_COUNT)"
+    Write-Output "PROXY_IPV6_LITERAL_ATTEMPT_COUNT:$($result.PROXY_IPV6_LITERAL_ATTEMPT_COUNT)"
+    Write-Output "PROXY_UNKNOWN_ATTEMPT_COUNT:$($result.PROXY_UNKNOWN_ATTEMPT_COUNT)"
+    if ($null -ne $result.BROWSER_FLAG_AUDIT) {
+        Write-Output "BROWSER_ROOT_DISABLE_FEATURES_COUNT:$($result.BROWSER_FLAG_AUDIT.disable_features_count)"
+        Write-Output "BROWSER_ROOT_DISABLE_BACKGROUND_COUNT:$($result.BROWSER_FLAG_AUDIT.disable_background_count)"
+        Write-Output "BROWSER_ROOT_DISABLE_COMPONENT_UPDATE_COUNT:$($result.BROWSER_FLAG_AUDIT.disable_component_update_count)"
+        Write-Output "BROWSER_ROOT_NO_FIRST_RUN_COUNT:$($result.BROWSER_FLAG_AUDIT.no_first_run_count)"
+        Write-Output "BROWSER_ROOT_DISABLE_QUIC_COUNT:$($result.BROWSER_FLAG_AUDIT.disable_quic_count)"
+        Write-Output "BROWSER_ROOT_PROXY_SERVER_COUNT:$($result.BROWSER_FLAG_AUDIT.proxy_server_count)"
+        Write-Output "BROWSER_ROOT_PROXY_BYPASS_COUNT:$($result.BROWSER_FLAG_AUDIT.proxy_bypass_count)"
+        Write-Output "BROWSER_ROOT_CONFLICTING_PROXY_COUNT:$($result.BROWSER_FLAG_AUDIT.conflicting_proxy_count)"
+        Write-Output "BROWSER_ROOT_PROXY_PORT_MATCH:$($result.BROWSER_FLAG_AUDIT.proxy_port_match)"
+    }
+    Write-Output "CLEAR_PERSONAL_PATH_MATCH_COUNT:$($result.CLEAR_PERSONAL_PATH_MATCH_COUNT)"
+    Write-Output "cleanup_status:$($result.cleanup_status)"
+    Write-Output "finalization_status:$($result.finalization_status)"
+    Write-Output "evidence_completeness:$($result.evidence_completeness)"
+    Write-Output "FINAL_EVIDENCE_INVENTORY_SHA256:$($result.FINAL_EVIDENCE_INVENTORY_SHA256)"
+    Write-Output "FINAL_MANIFEST_SHA256:$($result.FINAL_MANIFEST_SHA256)"
+    Write-Output "RUNTIME_ROOT_REMOVED:$($result.RUNTIME_ROOT_REMOVED)"
+    Write-Output "EVIDENCE_ROOT_PRESERVED:$($result.EVIDENCE_ROOT_PRESERVED)"
     exit 0
 }
 
