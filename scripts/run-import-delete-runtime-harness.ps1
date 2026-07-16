@@ -2442,6 +2442,9 @@ function Monitor-WdioPhase {
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
         [Parameter(Mandatory = $true)][string]$Phase,
         [Parameter(Mandatory = $true)][string]$WebViewDataDir,
+        [Parameter(Mandatory = $true)][Threading.Tasks.Task[string]]$StdoutTask,
+        [Parameter(Mandatory = $true)][Threading.Tasks.Task[string]]$StderrTask,
+        [Parameter(Mandatory = $true)]$CaptureRecord,
         [Nullable[int]]$ExpectedProxyPort = $null,
         [object[]]$AdditionalOwnedProcessIdentities = @()
     )
@@ -2514,6 +2517,15 @@ function Monitor-WdioPhase {
         throw "WDIO-MONITOR-FAILURE: $monitorMessage"
     }
     $Process.WaitForExit()
+    $StdoutTask.Wait()
+    $StderrTask.Wait()
+    [IO.File]::WriteAllText([string]$CaptureRecord.raw_stdout_path, $StdoutTask.Result, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText([string]$CaptureRecord.raw_stderr_path, $StderrTask.Result, [Text.UTF8Encoding]::new($false))
+    $capturedExitCode = $Process.ExitCode
+    if ($null -eq $capturedExitCode -or $capturedExitCode -isnot [int]) {
+        throw 'WDIO-EXIT-CODE-CAPTURE-FAILED'
+    }
+    [int]$exitCode = $capturedExitCode
     $owned = @($ownedByProcessId.Values | Sort-Object process_id)
     Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "owned-processes-$Phase.json") -Value $owned
     Write-JsonFile -LiteralPath (Join-Path $EvidenceRoot "owned-tcp-$Phase.json") -Value $connections
@@ -2583,11 +2595,11 @@ function Monitor-WdioPhase {
         }
     }
     Write-JsonFile -LiteralPath $networkGatePath -Value $networkGateRecord
-    if ($Process.ExitCode -ne 0) {
-        throw "WDIO $Phase failed with exit $($Process.ExitCode)"
+    if ($exitCode -ne 0) {
+        throw "WDIO $Phase failed with exit $exitCode"
     }
     return [ordered]@{
-        exit_code = $Process.ExitCode
+        exit_code = $exitCode
         owned_processes = $owned
         connections = $connections
         webview = $webViewResult
@@ -2750,9 +2762,23 @@ function Start-WdioPhase {
         raw_logs_removed = $false
     }
     $Script:LogCaptures.Add($captureRecord) | Out-Null
-    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $captureRecord.raw_stdout_path -RedirectStandardError $captureRecord.raw_stderr_path `
-        -WindowStyle Hidden -PassThru
+    $commandParts = @('"' + $FilePath.Replace('"', '""') + '"')
+    foreach ($argument in $ArgumentList) {
+        $commandParts += '"' + $argument.Replace('"', '""') + '"'
+    }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $env:ComSpec
+    $startInfo.Arguments = '/d /s /c "' + ($commandParts -join ' ') + '"'
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'WDIO-MONITOR-FAILURE: process start returned false' }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $captureRecord.process_launched = $true
     $null = Register-OwnedProcessObject -Process $process -Role "wdio-$Phase" -CaptureRecord $captureRecord
     $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
@@ -2765,6 +2791,7 @@ function Start-WdioPhase {
     try {
         $phaseResult = Monitor-WdioPhase -Process $process -EvidenceRoot $PhaseEvidenceRoot `
             -Phase $Phase -WebViewDataDir $WebViewDataDir -ExpectedProxyPort $ExpectedProxyPort `
+            -StdoutTask $stdoutTask -StderrTask $stderrTask -CaptureRecord $captureRecord `
             -AdditionalOwnedProcessIdentities $AdditionalOwnedProcessIdentities
     }
     catch {
