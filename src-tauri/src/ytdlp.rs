@@ -2,6 +2,7 @@ use crate::models::{AudioFormat, SearchResult, TrackInfo};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -450,15 +451,39 @@ pub async fn get_video_urls(video_id: &str) -> Result<(String, String), YtdlpErr
     }
 }
 
+fn resolve_download_dir(
+    override_value: Option<&OsStr>,
+    audio_dir: Option<PathBuf>,
+    download_dir: Option<PathBuf>,
+) -> Result<PathBuf, YtdlpError> {
+    if let Some(value) = override_value {
+        if !value.to_string_lossy().trim().is_empty() {
+            let override_path = PathBuf::from(value);
+            if !override_path.is_absolute() {
+                return Err(YtdlpError::DownloadError(
+                    "YTM_FREE_DOWNLOAD_DIR must be an absolute path".to_string(),
+                ));
+            }
+            return Ok(override_path);
+        }
+    }
+
+    Ok(audio_dir
+        .or(download_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("YTM-Free"))
+}
+
 /// Download audio to local file
 pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
     // Get download directory
-    let download_dir = dirs::audio_dir()
-        .or_else(|| dirs::download_dir())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("YTM-Free");
+    let download_dir = resolve_download_dir(
+        std::env::var_os("YTM_FREE_DOWNLOAD_DIR").as_deref(),
+        dirs::audio_dir(),
+        dirs::download_dir(),
+    )?;
 
     // Create directory if not exists
     std::fs::create_dir_all(&download_dir)?;
@@ -504,4 +529,95 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     }
 
     Ok(filepath)
+}
+
+#[cfg(test)]
+mod download_dir_tests {
+    use super::*;
+
+    fn absolute_path(name: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!(r"C:\synthetic\{name}"))
+        } else {
+            PathBuf::from(format!("/synthetic/{name}"))
+        }
+    }
+
+    #[test]
+    fn absolute_override_is_returned_exactly() {
+        let override_path = absolute_path("override");
+        let resolved = resolve_download_dir(
+            Some(override_path.as_os_str()),
+            Some(absolute_path("audio")),
+            Some(absolute_path("downloads")),
+        )
+        .unwrap();
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn absent_override_uses_audio_dir() {
+        let audio_dir = absolute_path("audio");
+        assert_eq!(
+            resolve_download_dir(None, Some(audio_dir.clone()), None).unwrap(),
+            audio_dir.join("YTM-Free")
+        );
+    }
+
+    #[test]
+    fn absent_audio_dir_uses_download_dir() {
+        let download_dir = absolute_path("downloads");
+        assert_eq!(
+            resolve_download_dir(None, None, Some(download_dir.clone())).unwrap(),
+            download_dir.join("YTM-Free")
+        );
+    }
+
+    #[test]
+    fn absent_platform_dirs_uses_current_directory() {
+        assert_eq!(
+            resolve_download_dir(None, None, None).unwrap(),
+            PathBuf::from(".").join("YTM-Free")
+        );
+    }
+
+    #[test]
+    fn empty_override_preserves_default() {
+        let audio_dir = absolute_path("audio");
+        assert_eq!(
+            resolve_download_dir(Some(OsStr::new("")), Some(audio_dir.clone()), None).unwrap(),
+            audio_dir.join("YTM-Free")
+        );
+    }
+
+    #[test]
+    fn whitespace_override_preserves_default() {
+        let download_dir = absolute_path("downloads");
+        assert_eq!(
+            resolve_download_dir(Some(OsStr::new("  \t ")), None, Some(download_dir.clone()))
+                .unwrap(),
+            download_dir.join("YTM-Free")
+        );
+    }
+
+    #[test]
+    fn relative_override_is_rejected() {
+        let error = resolve_download_dir(
+            Some(OsStr::new("relative-downloads")),
+            Some(absolute_path("audio")),
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("YTM_FREE_DOWNLOAD_DIR must be an absolute path"));
+    }
+
+    #[test]
+    fn override_does_not_receive_default_suffix() {
+        let override_path = absolute_path("exact-root");
+        let resolved = resolve_download_dir(Some(override_path.as_os_str()), None, None).unwrap();
+        assert_eq!(resolved, override_path);
+        assert_ne!(resolved, override_path.join("YTM-Free"));
+    }
 }
