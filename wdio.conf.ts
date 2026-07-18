@@ -99,6 +99,7 @@ function assertPortFree(port: number): void {
 }
 
 const dataDir = requireEnvironment("YTM_FREE_DATA_DIR");
+const downloadDir = process.env.YTM_FREE_DOWNLOAD_DIR?.trim();
 const evidenceRoot = requireEnvironment("EVIDENCE_ROOT");
 const embeddedPort = parsePort(process.env.WDIO_EMBEDDED_PORT?.trim() || "4445", "WDIO_EMBEDDED_PORT");
 const appBinaryPath = path.resolve("src-tauri", "target", "debug", "ytm-free.exe");
@@ -130,6 +131,7 @@ const serviceOptions: TauriServiceOptions = {
   statusPollTimeout: 5_000,
   env: {
     YTM_FREE_DATA_DIR: dataDir,
+    ...(downloadDir ? { YTM_FREE_DOWNLOAD_DIR: downloadDir } : {}),
     EVIDENCE_ROOT: evidenceRoot,
     WDIO_EMBEDDED_PORT: String(embeddedPort),
     TAURI_WEBDRIVER_PORT: String(embeddedPort),
