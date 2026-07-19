@@ -3,7 +3,7 @@
 **Date of record:** 2026-07-16
 **Status of the harness:** FROZEN on branch `feat/import-delete-runtime-harness` @ `69277dcca96f5c940b685b3d970beee4197401c2` (tag: `forensic/import-delete-harness-proof`). By owner decision (option O4), the harness does **not** merge into `main`.
 **Application source modified by this work:** NO — the entire series added exactly three net-new files (harness, shim, spec) and touched nothing else.
-**Application shown to be defective:** NO — every defect the series found was in the measuring instrument, not in the application.
+**Application shown to be defective by this harness series against baseline `b3200d4f8d4187bc25cc1f1d49d55bcbcf277212`:** NO — every demonstrated defect in this series was in the measuring instrument, not in the product under test.
 
 All `file:line` citations below refer to the pinned commit `69277dc` on `feat/import-delete-runtime-harness` unless stated otherwise. The cited files do not exist on `main`; read them with `git show 69277dc:<path>`.
 
@@ -11,7 +11,12 @@ All `file:line` citations below refer to the pinned commit `69277dc` on `feat/im
 
 ## 1. What was proven, and where
 
-**The functional flow — CSV import → playlist creation → UI track removal → application restart → persistence — was demonstrated end-to-end against the real application** (Tauri 2.x release-style build, real WebView2, real SQLite), driven by WebdriverIO, with a deterministic `yt-dlp` shim standing in for the network.
+**Proof-scope labels:**
+
+- `FAMILY-SPECIFIC E2E`: import → playlist creation → remove from playlist → restart → persistence — **PROVEN**
+- `FULL PRODUCT E2E`: **NOT PROVEN**
+
+**The functional flow — CSV import → playlist creation → UI track removal → application restart → persistence — was demonstrated as a family-specific end-to-end proof against the real application** (Tauri 2.x release-style build, real WebView2, real SQLite), driven by WebdriverIO, with a deterministic `yt-dlp` shim standing in for the network. This is **not** a full-product end-to-end claim and **not** a release-SHA certification.
 
 **Proof run token:** `20260716-032504-7bb64827`
 **EvidenceRoot:** `%TEMP%\ytm-free-import-delete-evidence-b3200d4f8d41-20260716-032504-7bb64827` (61 files; see §6 for integrity hashes and expiry).
@@ -19,7 +24,7 @@ All `file:line` citations below refer to the pinned commit `69277dc` on `feat/im
 Facts, each re-verified against the evidence files on 2026-07-16:
 
 | Fact | Value | Evidence |
-|---|---|---|
+| --- | --- | --- |
 | Playlist ID (stable across restart) | `2edf0f3a-8827-4dc1-8ef0-83ab47b82086` | `create/create-state.json`, `restart/restart-state.json` |
 | Alpha track UUID (removed via UI) | `569b3689-e4a4-4ce3-96df-b6cc6cd86ace` | `create/create-contract-state.json` |
 | Beta track UUID (persists) | `98385ac2-111f-45e4-b390-3c5407495dd5` | both phase states; sole member after remove and after restart |
@@ -40,26 +45,34 @@ The proof run executed with `-NetworkGateMode Observe` (recorded in `create/netw
 
 ## 2. How to get the instrument back
 
-The instrument is **not on `main` and never was**. It lives, complete and runnable, at a frozen reference:
+The instrument is **not on `main` and never was**. What survives here is a **historical frozen source reference**, not a promise that the harness can be rerun directly on today's repository state:
 
-```
+```text
 Branch:  feat/import-delete-runtime-harness
 Commit:  69277dcca96f5c940b685b3d970beee4197401c2
 Tag:     forensic/import-delete-harness-proof  (annotated, points at the commit above)
 Parent baseline (origin/main at freeze time): b3200d4f8d4187bc25cc1f1d49d55bcbcf277212
 ```
 
-Recovery commands:
+Current classification:
+
+- `FROZEN_SOURCE_RECOVERABLE: YES`
+- `DIRECTLY_RERUNNABLE_TODAY: NO`
+
+A direct checkout/replay on the current repository state is intentionally blocked by the harness contract. Checking out the tag produces a detached `HEAD`, which fails the branch-identity gate. Checking out the historical branch in today's repository still fails the baseline gate because current `origin/main` is no longer the pinned baseline `b3200d4...`.
+
+Read-only recovery commands (inspection only):
 
 ```powershell
-git fetch origin
-git checkout feat/import-delete-runtime-harness        # or detached:
-git checkout forensic/import-delete-harness-proof
+git fetch origin --tags
+git show 69277dc:scripts/run-import-delete-runtime-harness.ps1
+git show 69277dc:scripts/yt-dlp-import-delete-shim.rs
+git show 69277dc:tests/e2e/import-delete-runtime.spec.ts
 ```
 
-That restores exactly three files (net-new relative to the baseline; nothing else differs):
+Those are the exactly three frozen files that matter here (net-new relative to the baseline; nothing else differs):
 
-```
+```text
 scripts/run-import-delete-runtime-harness.ps1   (5645 lines — the orchestrator)
 scripts/yt-dlp-import-delete-shim.rs            (227 lines — deterministic yt-dlp test double)
 tests/e2e/import-delete-runtime.spec.ts         (447 lines — the WDIO functional-proof spec)
@@ -68,11 +81,15 @@ tests/e2e/import-delete-runtime.spec.ts         (447 lines — the WDIO function
 ### 2.1 Nature of the instrument — know this before planning anything around it
 
 - **Windows-only.** PowerShell 5.1 with `Set-StrictMode -Version Latest`; uses `Get-CimInstance Win32_Process`, `Get-NetTCPConnection`, `msedgewebview2.exe` process inspection, and a Win32 `kernel32` snapshot inside the Rust shim.
-- **Manually invoked.** No tracked file references it; no `package.json` script runs it; the repository has no CI at all (no `.github/workflows`). Discoverability is exactly this document plus the branch and tag.
-- **Self-gating.** It refuses to run unless: branch is `feat/import-delete-runtime-harness`, `origin/main` equals the pinned baseline, the tracked worktree is clean, staging is empty, and the only untracked files are the four allow-listed governance files (`Assert-GitContext`, harness:403-425; expected identity constants at harness:20-21, 46-56). To run it from any other branch/baseline you must consciously edit those constants — that is by design.
+- **Manually invoked.** No tracked execution path, package script, or CI workflow invokes the harness. This document is its tracked documentation pointer.
+- **Self-gating.** It refuses to run unless: branch is `feat/import-delete-runtime-harness`, `origin/main` equals the pinned baseline, the tracked worktree is clean, staging is empty, and the only untracked files are the four allow-listed governance files (`Assert-GitContext`, harness:403-425; expected identity constants at harness:20-21, 46-56). This is why the frozen source is recoverable but not directly replayable today.
 - **External dependencies not carried by the three files:** `wdio.conf.ts`, `src-tauri/tauri.wdio.conf.json`, `scripts/seed-semantic-search-query-fixture.py` (logical DB snapshot helper, harness:44), the `harness:build` npm script, `node_modules/.bin/wdio`, `rustc`, `py`, and the UI selectors in `src/components/**` that the contract validation asserts.
+- **Self-sufficiency, classified honestly.** `SELF_SUFFICIENT_AS_HISTORICAL_INDEX: YES` · `SELF_SUFFICIENT_FOR_INDEPENDENT_REVALIDATION: NO` · `SELF_SUFFICIENT_FOR_DIRECT_REPLAY: NO`.
+- **Replay is a separate mission.** If replay is ever required, do it in an isolated worktree rooted for that purpose, with explicit adaptation of the identity/preflight contract for that environment, and without rewriting the frozen branch or tag.
 
-### 2.2 Entry points (harness:1-11 parameter block)
+### 2.2 Historical entry points (harness:1-11 parameter block)
+
+These were the invocation surfaces at the frozen commit. Treat them as source documentation for a separate replay mission, **not** as commands guaranteed to run on the current repository checkout.
 
 ```powershell
 # The demonstrated functional flow (preflight → fixture → shim compile → app build →
@@ -97,11 +114,11 @@ Modes are mutually exclusive (dispatch guard, harness:5450-5462). `-NetworkGateM
 
 ## 3. Do not rebuild this
 
-**~6319 lines of working, self-validating orchestration already exist on that branch** (5645 harness + 227 shim + 447 spec). If you are tempted to write a new runtime harness for this application — or "a small script, just for this one check" — read this section first.
+**~6319 lines of historically demonstrated, self-validating orchestration already exist on that branch** (5645 harness + 227 shim + 447 spec). If you are tempted to write a new runtime harness for this application — or "a small script, just for this one check" — read this section first.
 
-The failure mode of this series has a name: **the instrument grew larger than the code it measured.** Eleven commits were spent between the first version of the harness and the first completed end-to-end run — ten of them repairing or hardening the instrument itself (exit-code capture twice, finalization four times, monitor cleanup, redaction, empty-log semantics), zero of them fixing the application, because the application was never broken. Every one of those repairs is already embodied in the frozen code and distilled in §5.
+The failure mode of this series has a name: **the instrument grew larger than the code it measured.** Eleven commits were spent between the first version of the harness and the first completed family-specific end-to-end run — ten of them repairing or hardening the instrument itself (exit-code capture twice, finalization four times, monitor cleanup, redaction, empty-log semantics), zero of them fixing the product under test, because **no product defect was demonstrated by this harness series against baseline `b3200d4...`**. Every one of those repairs is already embodied in the frozen code and distilled in §5.
 
-If you need the proof again: check out the tag and run the harness (§2). If you need a different proof: start from the frozen harness's K-region primitives (preflight, `Invoke-ExternalCaptured`, `Start-WdioPhase`/`Monitor-WdioPhase`, the finalization machinery) rather than rewriting them — they encode a long list of Windows/PowerShell 5.1 failure modes that will otherwise be relearned one flaky run at a time.
+If you need to inspect the proof inputs again: recover the frozen files read-only (§2). If you need to replay the proof: treat that as a separate isolated-worktree mission with an explicit contract-adaptation step, and do **not** mutate the frozen reference. If you need a different proof: start from the frozen harness's K-region primitives (preflight, `Invoke-ExternalCaptured`, `Start-WdioPhase`/`Monitor-WdioPhase`, the finalization machinery) rather than rewriting them — they encode a long list of Windows/PowerShell 5.1 failure modes that will otherwise be relearned one flaky run at a time.
 
 ---
 
@@ -164,9 +181,13 @@ Register totals: **11 carried · 10 fully PROVEN · 1 with an INFERRED component
 
 ## 6. The evidence pointer and its expiry
 
-The proof EvidenceRoot lives under `%TEMP%` and **Windows will eventually delete it** (temp cleanup, disk cleanup, OS reinstall). Nothing in the repository depends on it — this record and the frozen branch are self-sufficient — but if the evidence is archived, verify the copy against these hashes:
+The proof EvidenceRoot lives under `%TEMP%` and **may be deleted by cleanup, disk maintenance, or system replacement**. Nothing in the product build depends on it. This record plus the frozen source reference are sufficient as a historical index, but **not** for independent revalidation or direct replay.
 
-```
+`DURABLE_ARCHIVE_STATUS: NOT REVERIFIED FOR THIS RECORD`
+
+If an owner-maintained durable archive copy exists or is created outside the repository, verify that copy against these hashes before relying on it:
+
+```text
 EvidenceRoot:  %TEMP%\ytm-free-import-delete-evidence-b3200d4f8d41-20260716-032504-7bb64827
 Files:         61
 Inventory SHA-256 (final-evidence-inventory.json):  CC94346CE3EBD8668118B6038174B10BBE2A5152ED11AC0A0E85B11719638C51
@@ -177,8 +198,8 @@ Redaction: PASS (0 clear-path matches, all variants; 2 screenshots visually clea
 
 Archive it to a durable location **outside the repository**; the destination is owner-selected. Never commit evidence into the repo.
 
-**RESTRICTED:** the earlier isolation-run EvidenceRoot `20260715-225227-93754cce` (`%TEMP%\ytm-free-webview-isolation-evidence-20260715-225227-93754cce`) contains clear personal-path occurrences (a redaction false-negative, since fixed by the username-level redaction added in `77e361d`). It must **never** be archived, published, or copied into the repository. It stays read-only in `%TEMP%` until Windows removes it.
+**RESTRICTED:** the earlier isolation-run EvidenceRoot `20260715-225227-93754cce` (`%TEMP%\ytm-free-webview-isolation-evidence-20260715-225227-93754cce`) contains clear personal-path occurrences (a redaction false-negative, since fixed by the username-level redaction added in `77e361d`). It must **never** be archived, published, or copied into the repository. It stays read-only in `%TEMP%` unless removed by cleanup or system replacement.
 
 ---
 
-*End of record. The application was never modified and never shown to be defective; the instrument that proved it is frozen at `forensic/import-delete-harness-proof`; and the eleven lessons above are the durable yield of the series.*
+*End of record. The application source was not modified by this series; no product defect was demonstrated by this harness series against baseline `b3200d4f8d4187bc25cc1f1d49d55bcbcf277212`; the instrument that produced the proof is frozen at `forensic/import-delete-harness-proof`; and the eleven lessons above are the durable yield of the series.*
