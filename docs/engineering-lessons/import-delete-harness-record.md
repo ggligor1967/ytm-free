@@ -1,7 +1,7 @@
 # Engineering record — import/remove/restart runtime proof and the frozen harness
 
 **Date of record:** 2026-07-16
-**Status of the harness:** FROZEN on branch `feat/import-delete-runtime-harness` @ `69277dcca96f5c940b685b3d970beee4197401c2` (tag: `forensic/import-delete-harness-proof`). By owner decision (option O4), the harness does **not** merge into `main`.
+**Status of the harness:** FROZEN on branch `feat/import-delete-runtime-harness` @ `69277dcca96f5c940b685b3d970beee4197401c2` (tag: `forensic/import-delete-harness-proof`). By explicit owner decision, the harness does **not** merge into `main`.
 **Application source modified by this work:** NO — the entire series added exactly three net-new files (harness, shim, spec) and touched nothing else.
 **Application shown to be defective by this harness series against baseline `b3200d4f8d4187bc25cc1f1d49d55bcbcf277212`:** NO — every demonstrated defect in this series was in the measuring instrument, not in the product under test.
 
@@ -61,10 +61,15 @@ Current classification:
 
 A direct checkout/replay on the current repository state is intentionally blocked by the harness contract. Checking out the tag produces a detached `HEAD`, which fails the branch-identity gate. Checking out the historical branch in today's repository still fails the baseline gate because current `origin/main` is no longer the pinned baseline `b3200d4...`.
 
-Read-only recovery commands (inspection only):
+Non-destructive recovery commands:
+
+The fetch command updates local Git metadata; the following `git show` commands only inspect the fetched objects.
 
 ```powershell
-git fetch origin --tags
+git fetch origin `
+  refs/heads/feat/import-delete-runtime-harness:refs/remotes/origin/feat/import-delete-runtime-harness `
+  refs/tags/forensic/import-delete-harness-proof:refs/tags/forensic/import-delete-harness-proof
+git cat-file -t 69277dcca96f5c940b685b3d970beee4197401c2
 git show 69277dc:scripts/run-import-delete-runtime-harness.ps1
 git show 69277dc:scripts/yt-dlp-import-delete-shim.rs
 git show 69277dc:tests/e2e/import-delete-runtime.spec.ts
@@ -100,12 +105,12 @@ powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harne
 powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -NetworkGateMode Observe
 
 # Self-validation modes (no app run; each exercises one subsystem against synthetic state):
-...\run-import-delete-runtime-harness.ps1 -ContractValidateOnly
-...\run-import-delete-runtime-harness.ps1 -PreflightOnly
-...\run-import-delete-runtime-harness.ps1 -LaunchPlanValidateOnly
-...\run-import-delete-runtime-harness.ps1 -MonitorAndFinalizationValidateOnly
-...\run-import-delete-runtime-harness.ps1 -ExternalCommandValidateOnly
-...\run-import-delete-runtime-harness.ps1 -WebViewIsolationValidateOnly   # the BLOCKED network track (§4.1)
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -ContractValidateOnly
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -PreflightOnly
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -LaunchPlanValidateOnly
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -MonitorAndFinalizationValidateOnly
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -ExternalCommandValidateOnly
+powershell -ExecutionPolicy Bypass -File scripts\run-import-delete-runtime-harness.ps1 -WebViewIsolationValidateOnly   # the BLOCKED network track (§4.1)
 ```
 
 Modes are mutually exclusive (dispatch guard, harness:5450-5462). `-NetworkGateMode` accepts `Enforce` (abort on non-loopback traffic) or `Observe` (record and continue).
