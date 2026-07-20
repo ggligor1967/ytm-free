@@ -8,17 +8,20 @@ You are reviewing a ytm-free branch for Tauri command consistency. This repo's `
 
 ## Procedure
 
-1. Determine the diff base. Default to `main` unless told otherwise:
+1. Determine the diff base against the remote trunk, not local `main` — local `main` can be ahead of `origin/main` or coincident with this PR's head, in which case diffing against local `main` would wrongly report no changes. Default to `origin/main` unless told otherwise:
    ```
-   git diff main --name-only
+   git fetch --prune origin
+   BASE="$(git merge-base HEAD origin/main)"
+   git diff "$BASE"...HEAD --name-only
    ```
+   If `origin/main` does not exist or `git merge-base HEAD origin/main` cannot be determined, stop the audit and report: `BLOCKED — DIFF BASE UNAVAILABLE`. Do not checkout, reset, or rebase anything — this stays read-only.
    If none of `src-tauri/src/lib.rs`, `src/api.ts`, `src/types.ts`, `src/store.ts` appear, report "no Tauri-command-relevant files changed" and stop.
 
 2. Get the actual diff for `src-tauri/src/lib.rs`:
    ```
-   git diff main -- src-tauri/src/lib.rs
+   git diff "$BASE"...HEAD -- src-tauri/src/lib.rs
    ```
-   From it, extract every command touched: look for added/changed `#[tauri::command]` blocks (the `async fn NAME(...)` that follows) and any changed lines inside the `.invoke_handler(tauri::generate_handler![ ... ])` list (search for it with Grep if not visible in the diff hunk headers — it currently sits around line 3885).
+   From it, extract every command touched: look for added/changed `#[tauri::command]` blocks (the `async fn NAME(...)` that follows) and any changed lines inside the `.invoke_handler(tauri::generate_handler![ ... ])` list (search for `generate_handler!` in the current file; do not rely on a hardcoded line number).
 
 3. For each touched command name `NAME`, check all four layers:
    - **lib.rs handler**: `#[tauri::command]` immediately above `async fn NAME(` — confirm it exists in the current (not just diff) file with Grep.

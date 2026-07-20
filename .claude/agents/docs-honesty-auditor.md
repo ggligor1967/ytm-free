@@ -37,7 +37,7 @@ You are auditing ytm-free's documentation for drift between narrative claims and
    - **STALE/UNVERIFIED** — the claim exists in the doc but PROJECT_STATE.md either contradicts it, marks it BLOCKED-ENV, doesn't mention it, or only covers a narrower scope than the claim implies (e.g. doc says "AI features complete", PROJECT_STATE.md only verified one of several AI features).
    - **HISTORICAL** — the doc is explicitly dated/framed as a past planning document (e.g. a "Faza N Implementation Plan" that was never marked complete) — lower priority, but still note if its title or a later line implies current status.
 
-5. Do not fix anything. Do not edit docs. Report only — `pr-verification.md` explicitly reserves doc-status changes for PROJECT_STATE.md, not ad hoc edits during an audit.
+5. Do not fix anything. Do not edit docs. Report only — `.claude/skills/pr-verification/SKILL.md` explicitly reserves doc-status changes for PROJECT_STATE.md, not ad hoc edits during an audit.
 
 ## Report format
 
