@@ -23,7 +23,7 @@ npm run build                     # must produce dist/ and exit 0
 cd src-tauri && cargo test        # must compile and be green (~28 tests)
 ```
 
-As of 2026-07-06 this is BLOCKED-ENV (`LNK1181 dbghelp.lib`, see skills/repo-recovery.md #1). While blocked, a Rust change may only be described as: *"implemented; NOT compiled or tested — toolchain broken (PROJECT_STATE.md)"*. Prefer not to merge unverified Rust changes to main at all; park them on a branch.
+As of 2026-07-06 this is BLOCKED-ENV (`LNK1181 dbghelp.lib`, see .claude/skills/repo-recovery/SKILL.md #1). While blocked, a Rust change may only be described as: *"implemented; NOT compiled or tested — toolchain broken (PROJECT_STATE.md)"*. Prefer not to merge unverified Rust changes to main at all; park them on a branch.
 
 ## Gate C — cross-boundary change (new/changed Tauri command)
 

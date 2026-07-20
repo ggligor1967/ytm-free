@@ -1,4 +1,4 @@
-# CLAUDE.md — ytm-free
+# AGENTS.md — ytm-free
 
 Desktop music player (personal use): Tauri 2.x + React 18/TypeScript frontend, Rust backend. npm only (package-lock.json committed). SQLite (rusqlite bundled), Axum stream server on port 3456, yt-dlp for YouTube, Ollama for local-AI features.
 

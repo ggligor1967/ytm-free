@@ -9,7 +9,7 @@ description: Use when creating, updating, or reviewing a pull request in ytm-fre
 
 1. **Base branch = `main`. Always.** GitHub's default branch is the stale `phase-2-frontend-bugs`; `gh pr create` and the web UI will preselect it. Pass `--base main` explicitly. A PR against the wrong base silently diffs against 9-commits-old code.
 2. Branch naming follows existing convention: `faza-N/short-description` or `fix/…`, `debt/…`.
-3. Run the applicable gates from skills/quality-gate.md **on the final commit** (not an earlier state of the branch).
+3. Run the applicable gates from .claude/skills/quality-gate/SKILL.md **on the final commit** (not an earlier state of the branch).
 4. `git status --short` — nothing unintended staged; never include `.omx/`, `dist/`, `*.log`, personal CSVs.
 
 ## PR description must contain
@@ -29,4 +29,4 @@ description: Use when creating, updating, or reviewing a pull request in ytm-fre
 ## After merge
 
 1. If the merge changed what works/what's broken, update PROJECT_STATE.md on main (dated).
-2. If you hit a new failure signature along the way, add it to skills/repo-recovery.md.
+2. If you hit a new failure signature along the way, add it to .claude/skills/repo-recovery/SKILL.md.

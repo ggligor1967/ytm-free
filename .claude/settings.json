@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-doc-claims.cjs\"",
+            "timeout": 15,
+            "statusMessage": "Checking doc edit for unproven success claims..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-tsc.cjs\"",
+            "timeout": 60,
+            "statusMessage": "Running npx tsc --noEmit..."
+          }
+        ]
+      }
+    ]
+  }
+}

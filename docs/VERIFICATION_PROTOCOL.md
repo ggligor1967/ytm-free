@@ -4,7 +4,7 @@ Run this whenever you (a) start significant work, (b) are about to claim somethi
 
 Rules:
 - A check "passes" only if you ran it in this session and saw the output. Cached knowledge, doc claims, and previous sessions don't count.
-- On failure: first check PROJECT_STATE.md and skills/repo-recovery.md — the failure may be a known environment issue, not your change. Distinguish "my diff broke it" from "it was already broken" by stashing/checking out main and re-running.
+- On failure: first check PROJECT_STATE.md and .claude/skills/repo-recovery/SKILL.md — the failure may be a known environment issue, not your change. Distinguish "my diff broke it" from "it was already broken" by stashing/checking out main and re-running.
 - Never weaken a check to make it pass (raising timeouts, skipping tests, `|| true`).
 
 ## Level 0 — Environment sanity (~10 s)
