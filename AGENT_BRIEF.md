@@ -57,7 +57,7 @@ If a shell bypasses the PowerShell bootstrap and the persisted user env fix, `ca
 | Global state | `src/store.ts` (Zustand) |
 | Views (14) | `src/components/views/` |
 | Frontend tests | `src/__tests__/` |
-| Playbooks for common situations | `skills/` (repo-recovery, quality-gate, pr-verification) |
+| Playbooks for common situations | `.claude/skills/{repo-recovery,quality-gate,pr-verification}/SKILL.md` |
 
 ## Session-end duty
 
