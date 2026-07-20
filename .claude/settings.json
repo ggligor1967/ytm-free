@@ -6,7 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-doc-claims.cjs\"",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/check-doc-claims.cjs"
+            ],
             "timeout": 15,
             "statusMessage": "Checking doc edit for unproven success claims..."
           }
@@ -19,7 +22,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-tsc.cjs\"",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/check-tsc.cjs"
+            ],
             "timeout": 60,
             "statusMessage": "Running npx tsc --noEmit..."
           }

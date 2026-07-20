@@ -3,7 +3,7 @@
 
 // PostToolUse (Edit|Write) — after editing src/**/*.ts(x), runs
 // `npx tsc --noEmit` and surfaces failures as a warning. Non-blocking:
-// implements quality-gate.md Gate A's first check eagerly, without gating
+// implements .claude/skills/quality-gate/SKILL.md Gate A's first check eagerly, without gating
 // the tool call on it.
 
 const { execSync } = require("child_process");

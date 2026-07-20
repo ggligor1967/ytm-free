@@ -44,7 +44,7 @@ export interface CommandNameResult {
 
 ## 3. `src/api.ts` — invoke binding
 
-Add a thin wrapper under the matching section comment, importing any new types from `./types`. Rust arg names are snake_case; the JS wrapper takes camelCase params and `invoke()` handles the conversion — pass an object literal with the camelCase keys matching the Rust fn signature by position/name:
+Add a thin wrapper under the matching section comment, importing any new types from `./types`. Rust arg names are snake_case; the JS wrapper takes camelCase params and `invoke()` handles the conversion — pass a JSON object whose keys are the camelCase equivalents of the Rust command parameter names; object property order is irrelevant. Use snake_case keys only when the command explicitly sets `#[tauri::command(rename_all = "snake_case")]`.
 
 ```typescript
 export async function commandNameCamel(argName: ArgType, optionalArg?: ArgType): Promise<ReturnType> {
