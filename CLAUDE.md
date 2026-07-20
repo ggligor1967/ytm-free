@@ -28,9 +28,9 @@ cargo test            # in src-tauri/ — works in normal PowerShell shells afte
 
 ## Workflow requirements
 
-- Before claiming any work complete: run the quality gate in `skills/quality-gate.md` and paste actual output. No evidence → no success claim.
-- Before opening a PR: `skills/pr-verification.md`.
-- If the environment itself seems broken: `skills/repo-recovery.md` — diagnose before "fixing" code that isn't the problem.
+- Before claiming any work complete: run the quality gate in `.claude/skills/quality-gate/SKILL.md` and paste actual output. No evidence → no success claim.
+- Before opening a PR: `.claude/skills/pr-verification/SKILL.md`.
+- If the environment itself seems broken: `.claude/skills/repo-recovery/SKILL.md` — diagnose before "fixing" code that isn't the problem.
 - If you changed what works/what's broken: update `PROJECT_STATE.md` (dated, with the command you ran).
 
 ## Style

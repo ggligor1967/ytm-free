@@ -11,19 +11,23 @@ Run the gate that matches what you touched. Paste real output into your report u
 
 ```
 npx tsc --noEmit                  # must exit 0
-npm test                          # must be 32/32, OR 31/32 with ONLY the known
-                                  # LibraryView 1000-tracks timeout (then run it
-                                  # in isolation and record PASS-WITH-KNOWN-FLAKE)
+npm test                          # must be N/N (all discovered tests green — record
+                                  # the exact count from this session's output; PASS
+                                  # is also acceptable with ONLY the known LibraryView
+                                  # 1000-tracks timeout, run in isolation and recorded
+                                  # as PASS-WITH-KNOWN-FLAKE)
 npm run build                     # must produce dist/ and exit 0
 ```
 
 ## Gate B — any Rust (src-tauri) change
 
 ```
-cd src-tauri && cargo test        # must compile and be green (~28 tests)
+cd src-tauri && cargo test        # must compile and be green (N/N — record the
+                                  # exact count from this session's output; see
+                                  # PROJECT_STATE.md for the last-known count)
 ```
 
-As of 2026-07-06 this is BLOCKED-ENV (`LNK1181 dbghelp.lib`, see skills/repo-recovery.md #1). While blocked, a Rust change may only be described as: *"implemented; NOT compiled or tested — toolchain broken (PROJECT_STATE.md)"*. Prefer not to merge unverified Rust changes to main at all; park them on a branch.
+Normal PowerShell shells on this machine auto-bootstrap MSVC + Windows SDK `10.0.26100.0` (see CLAUDE.md/AGENT_BRIEF.md), so `cargo test` is not blocked by default. If a shell bypasses that bootstrap it can still hit `LNK1181 dbghelp.lib` — see .claude/skills/repo-recovery/SKILL.md #1. Only in that failure case may a Rust change be described as: *"implemented; NOT compiled or tested — toolchain broken (PROJECT_STATE.md)"*. Prefer not to merge unverified Rust changes to main at all; park them on a branch.
 
 ## Gate C — cross-boundary change (new/changed Tauri command)
 

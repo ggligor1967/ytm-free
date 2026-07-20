@@ -28,7 +28,7 @@ Audience: any AI agent (Claude Code, Codex, Copilot, etc.) or human maintainer s
 ## Commands that work (verified 2026-07-06)
 
 ```
-npm test              # vitest run — expect 31–32/32 (see flaky note above)
+npm test              # vitest run — all currently discovered tests must pass; record the exact count from this session's output and compare it with PROJECT_STATE.md. If only the known LibraryView 1000-tracks timeout fails, rerun that test in isolation as described above.
 npx tsc --noEmit      # expect 0 errors
 npm run build         # tsc + vite build → dist/
 npm run dev           # vite only (frontend in browser, Tauri APIs unavailable)
@@ -57,7 +57,7 @@ If a shell bypasses the PowerShell bootstrap and the persisted user env fix, `ca
 | Global state | `src/store.ts` (Zustand) |
 | Views (14) | `src/components/views/` |
 | Frontend tests | `src/__tests__/` |
-| Playbooks for common situations | `skills/` (repo-recovery, quality-gate, pr-verification) |
+| Playbooks for common situations | `.claude/skills/{repo-recovery,quality-gate,pr-verification}/SKILL.md` |
 
 ## Session-end duty
 
