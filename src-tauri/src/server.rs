@@ -933,7 +933,7 @@ mod proxy_tests {
     #[tokio::test]
     async fn upstream_connect_timeout_is_classified_as_gateway_timeout_not_bad_gateway() {
         let marker = "SECRET_SIGNED_MARKER_CONNECTTIMEOUT";
-        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        let (outcome, elapsed) = tokio::time::timeout(Duration::from_secs(5), async {
             let (port, server) = spawn_tls_handshake_stall_upstream().await;
             let url = format!("https://127.0.0.1:{port}/audio?sig={marker}");
             let timeouts = ProxyTimeouts {
@@ -943,12 +943,31 @@ mod proxy_tests {
             };
             let client = build_http_client(timeouts);
 
+            let started = std::time::Instant::now();
             let result = fetch_and_stream_upstream(&client, &url, None, timeouts.response).await;
+            let elapsed = started.elapsed();
             server.abort();
-            result
+            (result, elapsed)
         })
         .await
         .expect("test exceeded its own outer safety bound (5s)");
+
+        println!("connect_timeout_test_elapsed_ms={}", elapsed.as_millis());
+
+        // Both the reqwest-native connect/TLS timeout (fires at the 300ms
+        // connect_timeout configured above) and the outer response-header
+        // timeout (fires at 2s) currently classify to the same
+        // ProxyError::UpstreamTimeout / 504. Without this bound, a regression
+        // that fell through to the *outer* wrapper -- instead of reqwest's own
+        // `error.is_timeout()` classification -- would still satisfy every
+        // assertion below. Requiring completion well under the 2s response
+        // timeout keeps this test tied specifically to the connect-timeout
+        // code path it was written to cover.
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "connect-timeout path must complete well before the 2s response timeout; \
+             elapsed: {elapsed:?}"
+        );
 
         let err = outcome.expect_err(
             "a stalled TLS handshake must fail via reqwest's own connect_timeout, \
