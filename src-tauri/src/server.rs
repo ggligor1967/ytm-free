@@ -351,6 +351,9 @@ async fn fetch_and_stream_upstream(
 
     let upstream_response = match tokio::time::timeout(response_timeout, request.send()).await {
         Ok(Ok(response)) => response,
+        Ok(Err(error)) if error.is_timeout() => {
+            return Err(ProxyError::UpstreamTimeout);
+        }
         Ok(Err(_)) => return Err(ProxyError::UpstreamRequestFailed),
         Err(_) => return Err(ProxyError::UpstreamTimeout),
     };
@@ -892,6 +895,75 @@ mod proxy_tests {
         })
         .await
         .expect("test exceeded its own outer safety bound");
+    }
+
+    // ---- Test A2: reqwest's own connect/TLS-establishment timeout is
+    // classified as UpstreamTimeout (504), not UpstreamRequestFailed (502) ----
+    //
+    // Unlike Test A (which relies on the outer `tokio::time::timeout` wrapper
+    // elapsing because the upstream never sends HTTP response bytes), this
+    // spawns a listener that accepts the TCP connection and then withholds
+    // TLS handshake bytes entirely, so the stall happens inside `send()`
+    // itself, before it ever returns. This exercises the reqwest-native
+    // `connect_timeout` path and its `error.is_timeout()` classification --
+    // the exact case the `Ok(Err(error)) if error.is_timeout()` arm exists
+    // for.
+
+    async fn spawn_tls_handshake_stall_upstream() -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind TLS-stall upstream listener");
+        let port = listener
+            .local_addr()
+            .expect("TLS-stall upstream addr")
+            .port();
+        let join = tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                // Accept the TCP connection but never write a single TLS
+                // handshake byte back. The client's ClientHello is left
+                // unanswered, so the TLS establishment step stalls forever
+                // (until the client's own connect_timeout fires).
+                let _keep_open = socket;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        (port, join)
+    }
+
+    #[tokio::test]
+    async fn upstream_connect_timeout_is_classified_as_gateway_timeout_not_bad_gateway() {
+        let marker = "SECRET_SIGNED_MARKER_CONNECTTIMEOUT";
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let (port, server) = spawn_tls_handshake_stall_upstream().await;
+            let url = format!("https://127.0.0.1:{port}/audio?sig={marker}");
+            let timeouts = ProxyTimeouts {
+                connect: Duration::from_millis(300),
+                response: Duration::from_secs(2),
+                read_idle: Duration::from_secs(2),
+            };
+            let client = build_http_client(timeouts);
+
+            let result = fetch_and_stream_upstream(&client, &url, None, timeouts.response).await;
+            server.abort();
+            result
+        })
+        .await
+        .expect("test exceeded its own outer safety bound (5s)");
+
+        let err = outcome.expect_err(
+            "a stalled TLS handshake must fail via reqwest's own connect_timeout, \
+             classified as a timeout",
+        );
+        assert_eq!(
+            err,
+            ProxyError::UpstreamTimeout,
+            "reqwest connect/TLS-establishment timeouts must classify as UpstreamTimeout \
+             (504), not UpstreamRequestFailed (502)"
+        );
+        assert_no_signed_markers("connect-timeout error", &format!("{err:?}"));
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 
     // ---- Test B: upstream stalls mid-body ----
