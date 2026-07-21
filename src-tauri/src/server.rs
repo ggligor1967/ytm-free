@@ -379,9 +379,13 @@ async fn fetch_and_stream_upstream(
     // Every error the upstream body stream can yield is a `reqwest::Error`,
     // which may retain the request URL (a signed CDN URL). Strip it before
     // the error ever crosses into the Axum response body -- see
-    // `sanitized_mid_body_error_never_contains_the_signed_request_url` and
-    // `raw_mid_body_reqwest_error_retains_the_url_before_sanitization` for the
-    // proof that this mapping is both necessary and effective on this stack.
+    // `sanitized_mid_body_error_never_contains_the_signed_request_url` for the
+    // no-leak proof, and
+    // `observes_raw_mid_body_error_url_attachment_before_sanitization` for
+    // defensive coverage: on the validated Windows/reqwest stack the raw
+    // error attached no URL at all (ABSENT_ON_THIS_STACK), so this mapping
+    // guards stacks/versions where one is attached, rather than closing a
+    // leak demonstrated on this one.
     let sanitized_stream = upstream_response
         .bytes_stream()
         .map_err(reqwest::Error::without_url);
@@ -1188,14 +1192,17 @@ mod proxy_tests {
         .expect("test exceeded its own outer safety bound");
     }
 
-    // ---- Test B3: prove the raw (pre-sanitization) reqwest::Error from this
-    // exact mid-body-stall scenario actually retains the request URL on this
-    // platform/stack, so Test B2's assertions are proven meaningful rather
-    // than vacuously passing against an error type that never carried a URL
-    // to begin with ----
+    // ---- Test B3: observe whether the raw (pre-sanitization) reqwest::Error
+    // from this exact mid-body-stall scenario attaches the request URL on
+    // this platform/stack, recording PRESENT or ABSENT_ON_THIS_STACK rather
+    // than asserting either outcome -- this is a meaningfulness check for
+    // Test B2, not a security assertion in its own right. On the validated
+    // Windows/reqwest/native-tls stack this reported ABSENT_ON_THIS_STACK:
+    // the raw error carried no URL at all, so Test B2 verifies no-leak
+    // behavior without a leak having existed on this specific path. ----
 
     #[tokio::test]
-    async fn raw_mid_body_reqwest_error_retains_the_url_before_sanitization() {
+    async fn observes_raw_mid_body_error_url_attachment_before_sanitization() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (url, _released, _second_request_seen, _server) =
                 spawn_mid_body_stall_signed_url_upstream().await;
