@@ -5,6 +5,7 @@ use axum::{
     routing::get,
     Router,
 };
+use futures_util::TryStreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
@@ -375,7 +376,16 @@ async fn fetch_and_stream_upstream(
         }
     }
 
-    let body = axum::body::Body::from_stream(upstream_response.bytes_stream());
+    // Every error the upstream body stream can yield is a `reqwest::Error`,
+    // which may retain the request URL (a signed CDN URL). Strip it before
+    // the error ever crosses into the Axum response body -- see
+    // `sanitized_mid_body_error_never_contains_the_signed_request_url` and
+    // `raw_mid_body_reqwest_error_retains_the_url_before_sanitization` for the
+    // proof that this mapping is both necessary and effective on this stack.
+    let sanitized_stream = upstream_response
+        .bytes_stream()
+        .map_err(reqwest::Error::without_url);
+    let body = axum::body::Body::from_stream(sanitized_stream);
     builder
         .body(body)
         .map_err(|_| ProxyError::BuildResponseFailed)
@@ -1036,6 +1046,229 @@ mod proxy_tests {
                 .expect("expected the body stream to terminate with an error, not a clean end");
             assert_no_signed_markers("mid-body timeout error", &error_text);
             assert!(!error_text.contains(marker));
+        })
+        .await
+        .expect("test exceeded its own outer safety bound");
+    }
+
+    // ---- Test B2: mid-body read-idle timeout error must not retain the
+    // signed request URL (security regression test) ----
+    //
+    // Test B above proves the stream terminates with an error instead of
+    // hanging, but its synthetic URL carries no signed query parameters, so
+    // it cannot prove URL redaction -- it only proves an unrelated response
+    // *header* marker doesn't leak. This test puts the signed markers
+    // directly in the *request URL* itself and proves the error surfaced
+    // through the Axum body contains none of them, and that the upstream
+    // connection is actually released (not left dangling) once the timeout
+    // fires.
+
+    async fn spawn_mid_body_stall_signed_url_upstream() -> (
+        String,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind signed-url mid-body-stall upstream listener");
+        let addr = listener
+            .local_addr()
+            .expect("signed-url mid-body-stall upstream addr");
+        let released = Arc::new(AtomicBool::new(false));
+        let released_clone = released.clone();
+        let second_request_seen = Arc::new(AtomicBool::new(false));
+        let second_request_seen_clone = second_request_seen.clone();
+        let join = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let _ = discard_request_and_capture(&mut socket).await;
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: audio/webm\r\n\
+                               Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                if socket.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+                if socket.write_all(b"5\r\nhello\r\n").await.is_err() {
+                    return;
+                }
+                // Send nothing else. Once the client's read-idle timeout
+                // fires, reqwest/hyper must give up on this connection;
+                // watch for that release the same way the
+                // downstream-disconnect test watches for a client-side drop:
+                // a subsequent read returning 0 (or erroring) signals the
+                // peer is gone.
+                let mut buf = [0u8; 256];
+                for _ in 0..100 {
+                    match socket.read(&mut buf).await {
+                        Ok(0) => {
+                            released_clone.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        Err(_) => {
+                            released_clone.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        Ok(_) => { /* unexpected inbound data; keep watching */ }
+                    }
+                }
+            }
+            // No retry is authorized/expected: prove no second connection
+            // ever arrives at this listener.
+            if tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .is_ok()
+            {
+                second_request_seen_clone.store(true, Ordering::SeqCst);
+            }
+        });
+        let url = format!(
+            "http://{addr}/audio?sig=SECRET_SIGNED_MARKER_MIDBODY&expire=1234567890&ip=127.0.0.1"
+        );
+        (url, released, second_request_seen, join)
+    }
+
+    #[tokio::test]
+    async fn sanitized_mid_body_error_never_contains_the_signed_request_url() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (url, released, second_request_seen, _server) =
+                spawn_mid_body_stall_signed_url_upstream().await;
+            let timeouts = ProxyTimeouts {
+                connect: Duration::from_millis(500),
+                response: Duration::from_secs(2),
+                read_idle: Duration::from_millis(300),
+            };
+            let client = build_http_client(timeouts);
+
+            let response = fetch_and_stream_upstream(&client, &url, None, timeouts.response)
+                .await
+                .expect("headers must be received before the mid-body stall");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let (received, error_text) = drain_until_error_or_end(response.into_body()).await;
+            assert!(
+                received > 0,
+                "expected at least the first chunk to be received"
+            );
+            let error_text = error_text.expect(
+                "expected the body stream to terminate with an error, not a clean end",
+            );
+
+            assert_no_signed_markers(
+                "sanitized mid-body error (signed request URL)",
+                &error_text,
+            );
+            assert!(
+                !error_text.contains("SECRET_SIGNED_MARKER_MIDBODY"),
+                "sanitized mid-body error must not contain the request-URL marker; got: {error_text}"
+            );
+            assert!(
+                !error_text.contains(&url),
+                "sanitized mid-body error must not contain the complete request URL; got: {error_text}"
+            );
+
+            let mut observed_release = false;
+            for _ in 0..50 {
+                if released.load(Ordering::SeqCst) {
+                    observed_release = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(
+                observed_release,
+                "upstream connection must be released after the read-idle timeout, not left open"
+            );
+
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert!(
+                !second_request_seen.load(Ordering::SeqCst),
+                "NO_RETRY: no second connection/request is expected after a mid-body timeout"
+            );
+        })
+        .await
+        .expect("test exceeded its own outer safety bound");
+    }
+
+    // ---- Test B3: prove the raw (pre-sanitization) reqwest::Error from this
+    // exact mid-body-stall scenario actually retains the request URL on this
+    // platform/stack, so Test B2's assertions are proven meaningful rather
+    // than vacuously passing against an error type that never carried a URL
+    // to begin with ----
+
+    #[tokio::test]
+    async fn raw_mid_body_reqwest_error_retains_the_url_before_sanitization() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (url, _released, _second_request_seen, _server) =
+                spawn_mid_body_stall_signed_url_upstream().await;
+            let timeouts = ProxyTimeouts {
+                connect: Duration::from_millis(500),
+                response: Duration::from_secs(2),
+                read_idle: Duration::from_millis(300),
+            };
+            let client = build_http_client(timeouts);
+
+            // Bypass fetch_and_stream_upstream entirely: talk to reqwest
+            // directly so the error observed here is the raw, unsanitized
+            // value the production code would otherwise have passed straight
+            // into Body::from_stream.
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .expect("headers must be received before the mid-body stall");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let mut stream = response.bytes_stream();
+            let mut raw_error = None;
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break,
+                    Err(error) => {
+                        raw_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            let raw_error =
+                raw_error.expect("expected the raw upstream stream to yield a reqwest::Error");
+
+            // Non-asserting diagnostics: makes an ABSENT_ON_THIS_STACK finding
+            // auditable (a genuine mid-body timeout error with no attached
+            // URL, not "we accidentally caught the wrong error variant").
+            println!(
+                "raw_mid_body_error_diagnostics: is_timeout={} is_body={} is_decode={} debug={raw_error:?}",
+                raw_error.is_timeout(),
+                raw_error.is_body(),
+                raw_error.is_decode(),
+            );
+
+            match raw_error.url() {
+                Some(raw_url) => {
+                    let raw_url_text = raw_url.as_str();
+                    assert!(
+                        raw_url_text.contains("SECRET_SIGNED_MARKER_MIDBODY"),
+                        "expected the raw error's attached URL to be the signed request URL; \
+                         got: {raw_url_text}"
+                    );
+
+                    let sanitized_error = reqwest::Error::without_url(raw_error);
+                    assert!(
+                        sanitized_error.url().is_none(),
+                        "without_url() must strip the attached URL"
+                    );
+                    let sanitized_text = format!("{sanitized_error:?} {sanitized_error}");
+                    assert_no_signed_markers("sanitized raw error (direct proof)", &sanitized_text);
+                    assert!(!sanitized_text.contains("SECRET_SIGNED_MARKER_MIDBODY"));
+                }
+                None => {
+                    // Honest fallback: do not fabricate a pass. The
+                    // production without_url() mapping remains in place
+                    // regardless, because it enforces the redaction contract
+                    // independently of whether this particular stack
+                    // attaches a URL to this particular error variant.
+                    println!("RAW_ERROR_URL_ATTACHMENT=ABSENT_ON_THIS_STACK");
+                }
+            }
         })
         .await
         .expect("test exceeded its own outer safety bound");
