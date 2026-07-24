@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { showToast } from "../components/Toast";
+import { showToast } from "../lib/toast";
 
 interface UseOllamaCallState<T> {
   loading: boolean;

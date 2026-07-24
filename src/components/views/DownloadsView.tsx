@@ -3,7 +3,7 @@ import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { TrackCard } from "../TrackCard";
 import { Download, Loader2 } from "lucide-react";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 
 export function DownloadsView() {
   const { downloads, setDownloads } = useAppStore();

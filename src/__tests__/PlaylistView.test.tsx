@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { PlaylistView } from "../components/views/PlaylistView";
 import type { Playlist, Track } from "../types";
 import * as api from "../api";
-import { showToast } from "../components/Toast";
+import { showToast } from "../lib/toast";
 
 vi.mock("../api", () => ({
   getPlaylistTracks: vi.fn(),
@@ -14,7 +14,7 @@ vi.mock("../api", () => ({
   shareGenerateMessage: vi.fn().mockResolvedValue({ message: "" }),
 }));
 
-vi.mock("../components/Toast", () => ({
+vi.mock("../lib/toast", () => ({
   showToast: vi.fn(),
 }));
 

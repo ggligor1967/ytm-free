@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Brain, Loader2, RefreshCw, Zap } from "lucide-react";
 import clsx from "clsx";
 import * as api from "../../api";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import type { Settings as SettingsType, SemanticIndexStatus } from "../../types";
 
 interface Props {

@@ -6,7 +6,7 @@ import { Library, Loader2, Filter, X, Sparkles } from "lucide-react";
 import type { TrackMetadataDB } from "../../types";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 
 interface Filters {
   genre: string;

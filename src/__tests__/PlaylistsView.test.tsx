@@ -16,7 +16,7 @@ vi.mock("../api", () => ({
   createSemanticPlaylist: vi.fn(),
 }));
 
-vi.mock("../components/Toast", () => ({
+vi.mock("../lib/toast", () => ({
   showToast: vi.fn(),
 }));
 

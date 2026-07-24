@@ -4,7 +4,7 @@ import {
   RefreshCw, Sparkles, TrendingUp, User, Disc, Globe, Zap, Calendar, Gift
 } from "lucide-react";
 import * as api from "../../api";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import { useState, useEffect, useCallback } from "react";
 import type {
   ListeningProfileResponse,

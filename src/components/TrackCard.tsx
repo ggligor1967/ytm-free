@@ -4,7 +4,7 @@ import { Play, Pause, MoreVertical, ListPlus, Heart, Download, Tag, Loader2, Sha
 import clsx from "clsx";
 import { useState, useEffect } from "react";
 import * as api from "../api";
-import { showToast } from "./Toast";
+import { showToast } from "../lib/toast";
 
 interface TrackCardProps {
   track: Track | SearchResult;

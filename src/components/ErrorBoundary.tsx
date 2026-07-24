@@ -1,6 +1,6 @@
 import { Component, type ReactNode } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { showToast } from "./Toast";
+import { showToast } from "../lib/toast";
 
 interface Props {
   children: ReactNode;

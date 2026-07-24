@@ -3,7 +3,7 @@ import { useAppStore } from "../../store";
 import * as api from "../../api";
 import { Plus, ListMusic, MoreVertical, Trash2, Loader2, Sparkles } from "lucide-react";
 import clsx from "clsx";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 
 export function PlaylistsView() {
   const {

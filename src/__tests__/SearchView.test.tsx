@@ -16,7 +16,7 @@ vi.mock("../api", () => ({
   ollamaEnhanceSearch: vi.fn(),
 }));
 
-vi.mock("../components/Toast", () => ({
+vi.mock("../lib/toast", () => ({
   showToast: vi.fn(),
 }));
 

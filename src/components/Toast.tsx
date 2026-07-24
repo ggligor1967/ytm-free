@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { CheckCircle2, XCircle, Info, X } from "lucide-react";
 import clsx from "clsx";
-
-export type ToastType = "success" | "error" | "info";
+import { setToastHandler, type ToastType } from "../lib/toast";
 
 interface Toast {
   id: number;
@@ -11,12 +10,6 @@ interface Toast {
 }
 
 let toastId = 0;
-let addToastFn: ((message: string, type?: ToastType) => void) | null = null;
-
-/** Global toast function — call from anywhere */
-export function showToast(message: string, type: ToastType = "info") {
-  addToastFn?.(message, type);
-}
 
 export function ToastContainer() {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -30,8 +23,8 @@ export function ToastContainer() {
   }, []);
 
   useEffect(() => {
-    addToastFn = addToast;
-    return () => { addToastFn = null; };
+    setToastHandler(addToast);
+    return () => { setToastHandler(null); };
   }, [addToast]);
 
   const dismiss = (id: number) => {

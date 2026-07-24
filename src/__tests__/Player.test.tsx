@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getTrackId } from "../components/Player";
+import { getTrackId } from "../lib/trackId";
 import type { Track, SearchResult } from "../types";
 
 describe("getTrackId", () => {

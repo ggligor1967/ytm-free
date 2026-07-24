@@ -4,7 +4,7 @@ import { TrackCard } from "../TrackCard";
 import { Search, Loader2, Sparkles, Zap, Clock, Brain } from "lucide-react";
 import * as api from "../../api";
 import clsx from "clsx";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import type { Track } from "../../types";
 
 interface SemanticResult {

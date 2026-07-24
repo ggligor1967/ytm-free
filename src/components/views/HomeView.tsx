@@ -1,5 +1,5 @@
 ﻿import { useAppStore } from "../../store";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import { TrackCard } from "../TrackCard";
 import { Clock, TrendingUp, Brain, Loader2, RefreshCw, Play, AlertCircle, Sparkles } from "lucide-react";
 import * as api from "../../api";
