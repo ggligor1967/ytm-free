@@ -365,7 +365,7 @@ export function SmartPlaylistView() {
       (r) => setMoodAiResult(r),
       (e) => setError(e)
     );
-  }, [moodAi]);
+  }, [moodAi, moodAiCall]);
 
   /** C3: Generate duration-based playlist */
   const handleDurationGenerate = useCallback(() => {
@@ -375,7 +375,7 @@ export function SmartPlaylistView() {
       (r) => setDurationResult(r),
       (e) => setError(e)
     );
-  }, [durationMin, durationTheme]);
+  }, [durationMin, durationTheme, durationCall]);
 
   /** C4: Generate mood journey */
   const handleJourneyGenerate = useCallback(() => {
@@ -385,7 +385,7 @@ export function SmartPlaylistView() {
       (r) => setJourneyResult(r),
       (e) => setError(e)
     );
-  }, [journeyStart, journeyEnd]);
+  }, [journeyStart, journeyEnd, journeyCall]);
 
   /** C7: Discovery mix */
   const handleDiscoveryGenerate = useCallback(() => {
@@ -395,7 +395,7 @@ export function SmartPlaylistView() {
       (r) => setDiscoveryResult(r),
       (e) => setError(e)
     );
-  }, []);
+  }, [discoveryCall]);
 
   /** C8: AI Name the current playlist */
   const handleAiName = useCallback(async () => {

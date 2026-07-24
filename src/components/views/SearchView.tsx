@@ -165,7 +165,7 @@ export function SearchView() {
     if (!isSearching && searchResults.length > 0) {
       void enhanceSearch();
     }
-  }, [searchQuery, isSearching, searchResults.length, settings, ollamaAvailable]);
+  }, [searchQuery, isSearching, searchResults.length, settings, ollamaAvailable, setAISearchResults, setIsAISearching]);
 
   const currentResults = searchMode === 'semantic' ? semanticResults : searchResults;
   const hasResults = currentResults.length > 0;

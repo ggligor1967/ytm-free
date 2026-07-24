@@ -426,7 +426,7 @@ describe("semantic playlist runtime", () => {
       await navigateToPlaylists();
 
       // Confirm the playlist appears exactly once.
-      const bodyText = await $("body").getText();
+      const _bodyText = await $("body").getText();
       const playlistCardCount = (await $$(`//div[contains(@class, 'group') and .//h3[normalize-space(.)='${PLAYLIST_NAME}']]`)).length;
       assert.equal(playlistCardCount, 1, `Expected exactly 1 playlist card named "${PLAYLIST_NAME}"`);
 

@@ -97,7 +97,7 @@ export function Player() {
   // Load audio URL when track changes
   useEffect(() => {
     async function loadAudio() {
-      console.log("[Player] loadAudio called!", { videoId, trackTitle: currentTrack?.title });
+      console.log("[Player] loadAudio called!", { videoId });
       if (!videoId) {
         console.log("[Player] No videoId, cannot load audio");
         setAudioUrl(null);

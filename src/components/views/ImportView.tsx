@@ -149,7 +149,7 @@ export function ImportView() {
         const result = await api.searchTrackOnYoutube(spotifyTracks[i]);
         results.push(result);
         setImportResults([...results]);
-      } catch (err) {
+      } catch {
         results.push({
           spotify_track: spotifyTracks[i],
           youtube_id: undefined,
@@ -175,7 +175,7 @@ export function ImportView() {
         const result = await api.smartSearchTrackWithFallback(spotifyTracks[i]);
         results.push(result);
         setSmartResults([...results]);
-      } catch (err) {
+      } catch {
         // Fallback to standard search on error
         try {
           const stdResult = await api.searchTrackOnYoutube(spotifyTracks[i]);

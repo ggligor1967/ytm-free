@@ -306,7 +306,7 @@ export function TrackCard({ track, index, showIndex, onPlay, onRemoveFromPlaylis
                       const text = `${result.message} ${result.hashtags.map((t: string) => `#${t}`).join(' ')}`;
                       await navigator.clipboard.writeText(text);
                       showToast('Share message copied!', 'success');
-                    } catch (err) {
+                    } catch {
                       // Fallback: copy basic text
                       await navigator.clipboard.writeText(`🎵 Listening to ${track.title} by ${track.artist}`);
                       showToast('Basic share text copied', 'info');

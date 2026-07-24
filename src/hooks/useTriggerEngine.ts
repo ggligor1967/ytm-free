@@ -325,7 +325,7 @@ export function useTriggerEngine(enabled: boolean) {
       console.log('[TriggerEngine] Disabled, resetting session');
       resetDjSession();
     }
-  }, [enabled]);
+  }, [enabled, resetDjSession]);
 
   // Return nothing - this hook only manages side effects
   return null;

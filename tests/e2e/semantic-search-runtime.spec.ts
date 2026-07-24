@@ -285,13 +285,11 @@ describe("semantic search runtime", () => {
         async () => {
           const text = await $("body").getText();
           const youtubeLoading = /Searching for\s+"/i.test(text);
-          let reindexGone = false;
+          let reindexGone = true;
           try {
             const reindexBtn = await $("//button[contains(normalize-space(.), 'Re-index All')]");
             reindexGone = !(await reindexBtn.isDisplayed());
-          } catch {
-            reindexGone = true;
-          }
+          } catch { /* element not present yet: reindexGone stays true */ }
           enterTriggered = youtubeLoading || reindexGone;
           return enterTriggered;
         },
@@ -322,9 +320,7 @@ describe("semantic search runtime", () => {
         try {
           const btn = await $(semanticButtonSelector);
           semanticClickable = await btn.isClickable();
-        } catch {
-          semanticClickable = false;
-        }
+        } catch { /* element not present yet: semanticClickable stays false */ }
         preflightSamples.push({
           timestamp: Date.now(),
           youtube_loading: youtubeLoading,
