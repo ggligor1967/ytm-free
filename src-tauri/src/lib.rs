@@ -4,6 +4,8 @@ mod ollama;
 mod semantic;
 mod server;
 mod spotify_import;
+#[cfg(test)]
+mod test_support;
 mod ytdlp;
 
 use chrono::{Datelike, Timelike};
@@ -4050,11 +4052,6 @@ mod tests {
         }
     }
 
-    fn ytm_free_data_dir_test_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[tokio::test]
     async fn test_controlled_runtime_ipc_safe_csv_wrappers_with_synthetic_temp_files() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4144,7 +4141,7 @@ mod tests {
 
     #[test]
     fn test_controlled_stateful_ipc_db_playlist_wrappers_with_temp_database() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4290,7 +4287,7 @@ mod tests {
 
     #[test]
     fn test_controlled_ai_semantic_db_cache_helpers_with_temp_database() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4440,7 +4437,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_search_stub_uses_temp_db_embeddings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4575,7 +4572,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_search_prepare_embedding_input_uses_temp_db_settings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4654,7 +4651,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_filtered_search_prepare_embedding_input_uses_temp_db_settings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4774,7 +4771,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_filtered_search_stub_uses_temp_db_embeddings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -4998,7 +4995,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_filtered_search_stub_respects_activities_and_min_similarity() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5191,7 +5188,7 @@ mod tests {
 
     #[test]
     fn test_semantic_filtered_ann_db_parity_excludes_missing_metadata() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5451,7 +5448,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_playlist_save_stub_uses_temp_db_results() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5576,7 +5573,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_playlist_prepare_embedding_input_uses_temp_db_settings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5649,7 +5646,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_playlist_scored_from_embedding_uses_temp_db_embeddings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5807,7 +5804,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_index_track_prepare_embedding_input_uses_temp_db_metadata() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5928,7 +5925,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_index_track_stub_saves_temp_db_embedding() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6031,7 +6028,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_index_all_prepare_batch_uses_temp_db_metadata() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6212,7 +6209,7 @@ mod tests {
 
     #[test]
     fn test_controlled_semantic_index_all_save_batch_uses_temp_db_embeddings() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6374,7 +6371,7 @@ mod tests {
                 .any(|result| result.track.video_id == video_id)
         }
 
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6647,7 +6644,7 @@ mod tests {
     /// Test A — zero results: helper returns Err, no playlist/playlist_tracks rows.
     #[test]
     fn test_semantic_playlist_zero_results_creates_no_playlist() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6698,7 +6695,7 @@ mod tests {
     /// Test B — success and order: track_count=3, exact order, persists across reopen.
     #[test]
     fn test_semantic_playlist_success_preserves_order_and_persists() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6807,7 +6804,7 @@ mod tests {
     /// Test C — rollback: invalid/duplicate track ID aborts the transaction.
     #[test]
     fn test_semantic_playlist_rollback_on_invalid_track_id() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6897,7 +6894,7 @@ mod tests {
     /// Test D — empty query validation: prepare helper rejects empty/whitespace query.
     #[test]
     fn test_semantic_playlist_empty_query_rejected_before_ollama() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_dir = std::env::temp_dir().join(format!(

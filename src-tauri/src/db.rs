@@ -1441,13 +1441,6 @@ mod tests {
         parse_exportify_csv, scan_folder_for_csv, ImportResult, ImportStatus,
     };
     use sha2::{Digest, Sha256};
-    use std::sync::{Mutex, OnceLock};
-
-    fn ytm_free_data_dir_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn count_rows(conn: &Connection, table: &str) -> i64 {
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
             row.get(0)
@@ -1840,7 +1833,7 @@ mod tests {
 
     #[test]
     fn test_get_db_path_override_behavior() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         // 1) Unset -> default layout: <data_dir>/ytm-free/ytm-free.db
@@ -1895,7 +1888,7 @@ mod tests {
 
     #[test]
     fn test_controlled_spotify_import_harness_with_temp_db_and_synthetic_csv() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_root = std::env::temp_dir();
@@ -2098,7 +2091,7 @@ mod tests {
 
     #[test]
     fn test_controlled_persistence_state_survives_reopen() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_data_dir = std::env::temp_dir().join(format!(
@@ -2256,7 +2249,7 @@ mod tests {
 
     #[test]
     fn test_controlled_delete_state_persists_after_reopen() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_data_dir = std::env::temp_dir().join(format!(
@@ -2507,7 +2500,7 @@ mod tests {
 
     #[test]
     fn test_controlled_search_state_filters_persist_after_reopen() {
-        let _lock = ytm_free_data_dir_test_lock().lock().unwrap();
+        let _lock = crate::test_support::lock_ytm_free_data_dir();
         let _guard = EnvVarGuard::new("YTM_FREE_DATA_DIR");
 
         let temp_data_dir = std::env::temp_dir().join(format!(
