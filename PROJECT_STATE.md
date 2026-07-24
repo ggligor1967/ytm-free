@@ -166,6 +166,12 @@ PR #12 feature head `78cfe2878f5a452f1e0d4b0bf886c164b026b238` was squash-merged
 
 Full application E2E remains unverified; production-ready remains **NO**.
 
+### Step-R15A.1 Cargo-test isolation fix (2026-07-24)
+
+PR #23 (`fix/r15a1-cargo-test-isolation`, head `7cf0b80a40fe0e1707291ba7f6b37cd4fa4f60e8`) was squash-merged to `main` as `74ea522094fddaaa4a795716e08f06d8d4cdd898` (parent `4f4437d806a0dafebf29cb9f372931d48f33f7b3`). Scope: **test-only**. Root cause was two independent `#[cfg(test)]` mutexes (one in `lib.rs`, one in `db.rs`) each guarding the process-global `YTM_FREE_DATA_DIR` env var only within their own module, letting the two test groups race across modules and cascade into `PoisonError` failures. Fix consolidated both into a single crate-wide `#[cfg(test)]` lock in a new `src-tauri/src/test_support.rs`; no production code path changed (`lib.rs` +22/-25, `db.rs` +5/-12, `test_support.rs` new file, all changes inside `#[cfg(test)]`). Post-merge `cargo test` on final `main`: **87 passed, 0 failed** (exit 0); `cargo fmt --check` and `cargo clippy --all-targets` both PASS. This is a test-harness reliability fix only — it does not touch, extend, or supersede any runtime/E2E proof above.
+
+`FULL_PRODUCT_E2E_ON_CURRENT_MAIN` remains **NOT PROVEN**; `PRODUCTION_READY` remains **NO**.
+
 ## Verification status and remaining gaps
 
 - Unfiltered semantic search runtime through real UI/Tauri/Ollama is verified by Step-6R.2A; filtered semantic search runtime through real UI/Tauri/Ollama is verified by Step-6R.2B.
