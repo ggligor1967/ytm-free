@@ -83,7 +83,13 @@ function createStoreOverrides(overrides: Partial<ReturnType<typeof buildStore>> 
 describe("SearchView semantic filtered consumer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockUseAppStore.mockImplementation(() => createStoreOverrides());
+    // Build the store object once per test and return the SAME reference on
+    // every render, matching real Zustand's stable-action-identity guarantee.
+    // (mockImplementation(() => createStoreOverrides()) would rebuild fresh
+    // vi.fn() setters on every render, which masks any bug that depends on
+    // setter/callback identity being stable across renders.)
+    const store = createStoreOverrides();
+    mockUseAppStore.mockImplementation(() => store);
     vi.mocked(api.semanticSearch).mockResolvedValue([createSemanticResult("semantic-track-1", 1)]);
     vi.mocked(api.semanticSearchFiltered).mockResolvedValue([createSemanticResult("semantic-track-2", 2)]);
     vi.mocked(api.ollamaEnhanceSearch).mockResolvedValue([]);
@@ -190,5 +196,35 @@ describe("SearchView semantic filtered consumer", () => {
         ["coding", "driving"]
       );
     });
+  });
+
+  it("apelează semanticSearchFiltered o singură dată la apply filters (F007 regresie)", async () => {
+    render(<SearchView />);
+
+    fireEvent.click(screen.getByRole("button", { name: /semantic/i }));
+
+    await waitFor(() => {
+      expect(api.semanticSearch).toHaveBeenCalledTimes(1);
+    });
+
+    vi.mocked(api.semanticSearch).mockClear();
+    vi.mocked(api.semanticSearchFiltered).mockClear();
+
+    fireEvent.change(screen.getByLabelText("Semantic genres filter"), {
+      target: { value: "rock" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /apply filters/i }));
+
+    await waitFor(() => {
+      expect(api.semanticSearchFiltered).toHaveBeenCalled();
+    });
+
+    // Regression guard: a naive exhaustive-deps fix that adds an unmemoized
+    // performSemanticSearch (and appliedSemanticFilters directly) to the
+    // effect's dependency array causes a second, concurrent search — one
+    // fire-and-forget from the effect, one awaited from the Apply handler.
+    expect(api.semanticSearchFiltered).toHaveBeenCalledTimes(1);
+    expect(api.semanticSearch).not.toHaveBeenCalled();
   });
 });
