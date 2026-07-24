@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SemanticSettings } from "../components/settings/SemanticSettings";
 import * as api from "../api";
-import { showToast } from "../components/Toast";
+import { showToast } from "../lib/toast";
 import type { SemanticIndexStatus, Settings } from "../types";
 
 type SemanticProgressPayload = {
@@ -30,7 +30,7 @@ vi.mock("../api", () => ({
   semanticClearIndex: vi.fn(),
 }));
 
-vi.mock("../components/Toast", () => ({
+vi.mock("../lib/toast", () => ({
   showToast: vi.fn(),
 }));
 

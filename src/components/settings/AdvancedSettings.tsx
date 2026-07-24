@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Brain, HardDrive, Loader2, Sparkles } from "lucide-react";
 import clsx from "clsx";
 import * as api from "../../api";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import type { Settings as SettingsType, SettingsAdviceResponse, StorageAnalysisResponse } from "../../types";
 
 interface Props {

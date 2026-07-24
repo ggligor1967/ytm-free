@@ -4,7 +4,7 @@ import { Play, Pause, MoreVertical, ListPlus, Heart, Download, Tag, Loader2, Sha
 import clsx from "clsx";
 import { useState, useEffect } from "react";
 import * as api from "../api";
-import { showToast } from "./Toast";
+import { showToast } from "../lib/toast";
 
 interface TrackCardProps {
   track: Track | SearchResult;
@@ -306,7 +306,7 @@ export function TrackCard({ track, index, showIndex, onPlay, onRemoveFromPlaylis
                       const text = `${result.message} ${result.hashtags.map((t: string) => `#${t}`).join(' ')}`;
                       await navigator.clipboard.writeText(text);
                       showToast('Share message copied!', 'success');
-                    } catch (err) {
+                    } catch {
                       // Fallback: copy basic text
                       await navigator.clipboard.writeText(`🎵 Listening to ${track.title} by ${track.artist}`);
                       showToast('Basic share text copied', 'info');

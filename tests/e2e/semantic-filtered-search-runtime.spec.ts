@@ -158,9 +158,7 @@ async function enterQueryThroughHeader(): Promise<void> {
       let settingsVisible = false;
       try {
         settingsVisible = await $("//button[contains(normalize-space(.), 'Re-index All')]").isDisplayed();
-      } catch {
-        settingsVisible = false;
-      }
+      } catch { /* element not present yet: settingsVisible stays false */ }
       triggered = /Searching for\s+"/i.test(text) || !settingsVisible;
       return triggered;
     }, { timeout: 12_000, interval: 200, timeoutMsg: "Header Enter did not start the YouTube preflight" });

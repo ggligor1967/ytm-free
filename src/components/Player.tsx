@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useAppStore } from "../store";
 import * as api from "../api";
 import { useTriggerEngine } from "../hooks/useTriggerEngine";
-import type { Track, SearchResult } from "../types";
+import { getTrackId } from "../lib/trackId";
 import {
   Play,
   Pause,
@@ -23,10 +23,6 @@ import {
   MonitorPlay,
 } from "lucide-react";
 import clsx from "clsx";
-
-export function getTrackId(track: Track | SearchResult): string {
-  return track.id;
-}
 
 export function Player() {
   const {
@@ -97,7 +93,7 @@ export function Player() {
   // Load audio URL when track changes
   useEffect(() => {
     async function loadAudio() {
-      console.log("[Player] loadAudio called!", { videoId, trackTitle: currentTrack?.title });
+      console.log("[Player] loadAudio called!", { videoId });
       if (!videoId) {
         console.log("[Player] No videoId, cannot load audio");
         setAudioUrl(null);

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
 import { getTotalPlayCount } from '../api';
 import type { DjEventContext, DjTriggerType, Track, SearchResult } from '../types';
@@ -30,15 +30,10 @@ export function useTriggerEngine(enabled: boolean) {
     queue,
     settings,
     djSessionStart,
-    djLastInterventionAt,
     djSessionTracksPlayed,
-    djInterventionCount,
     djLastTrackStartAt,
     setDjSessionStart,
-    setDjLastInterventionAt,
     incrementDjSessionTracks,
-    setDjPendingEvent,
-    incrementDjInterventionCount,
     setDjLastTrackStartAt,
     resetDjSession,
     trackMetadata,
@@ -64,31 +59,30 @@ export function useTriggerEngine(enabled: boolean) {
   };
 
   /**
-   * Check if we're within cooldown period
+   * Emit a trigger event to the store if conditions allow.
+   *
+   * Reads cooldown/count/action references via useAppStore.getState() at
+   * call time rather than as reactive hook dependencies, so this callback's
+   * identity only changes when `enabled` or `settings` change. Effects that
+   * depend on emitTrigger (several of which own a setInterval) would
+   * otherwise get their interval reset on every unrelated trigger firing,
+   * starving longer-period checks (e.g. the 30-minute LongSession check).
    */
-  const isInCooldown = (): boolean => {
-    if (!djLastInterventionAt) return false;
-    const elapsed = Date.now() - djLastInterventionAt;
-    return elapsed < GLOBAL_COOLDOWN_MS;
-  };
+  const emitTrigger = useCallback((triggerType: DjTriggerType, context: Partial<DjEventContext>) => {
+    const {
+      djLastInterventionAt,
+      djInterventionCount,
+      setDjPendingEvent,
+      setDjLastInterventionAt,
+      incrementDjInterventionCount,
+    } = useAppStore.getState();
 
-  /**
-   * Check if we've hit max interventions
-   */
-  const hasReachedMaxInterventions = (): boolean => {
-    return djInterventionCount >= MAX_INTERVENTIONS_PER_SESSION;
-  };
-
-  /**
-   * Emit a trigger event to the store if conditions allow
-   */
-  const emitTrigger = (triggerType: DjTriggerType, context: Partial<DjEventContext>) => {
     if (!enabled || !settings?.dj_mode_enabled) return;
-    if (isInCooldown()) {
+    if (djLastInterventionAt && Date.now() - djLastInterventionAt < GLOBAL_COOLDOWN_MS) {
       console.log(`[TriggerEngine] ${triggerType} blocked by cooldown`);
       return;
     }
-    if (hasReachedMaxInterventions()) {
+    if (djInterventionCount >= MAX_INTERVENTIONS_PER_SESSION) {
       console.log(`[TriggerEngine] ${triggerType} blocked by max interventions`);
       return;
     }
@@ -105,7 +99,7 @@ export function useTriggerEngine(enabled: boolean) {
     setDjPendingEvent(fullContext);
     setDjLastInterventionAt(Date.now());
     incrementDjInterventionCount();
-  };
+  }, [enabled, settings]);
 
   /**
    * Get time of day category
@@ -136,11 +130,11 @@ export function useTriggerEngine(enabled: boolean) {
   /**
    * Get track mood from metadata
    */
-  const getTrackMood = (track: Track | SearchResult | null): string | undefined => {
+  const getTrackMood = useCallback((track: Track | SearchResult | null): string | undefined => {
     if (!track || !('id' in track)) return undefined;
     const meta = trackMetadata.get(track.id);
     return meta?.mood;
-  };
+  }, [trackMetadata]);
 
   // ============================================================================
   // Effect 1: Initialize session on first track
@@ -159,7 +153,7 @@ export function useTriggerEngine(enabled: boolean) {
         time_of_day: getTimeOfDay(),
       });
     }
-  }, [enabled, currentTrack, djSessionStart]);
+  }, [enabled, currentTrack, djSessionStart, emitTrigger, setDjSessionStart, triggers.first_track_of_day]);
 
   // ============================================================================
   // Effect 2: Track change detection (TrackStart + MoodShift)
@@ -206,7 +200,7 @@ export function useTriggerEngine(enabled: boolean) {
     }
     
     prevTrackRef.current = currentTrack;
-  }, [enabled, currentTrack, djSessionTracksPlayed]);
+  }, [enabled, currentTrack, djSessionTracksPlayed, djLastTrackStartAt, emitTrigger, getTrackMood, incrementDjSessionTracks, setDjLastTrackStartAt, triggers.mood_shift, triggers.track_start]);
 
   // ============================================================================
   // Effect 3: Queue empty detection
@@ -223,7 +217,7 @@ export function useTriggerEngine(enabled: boolean) {
     }
     
     prevQueueLengthRef.current = currentLength;
-  }, [enabled, queue.length, triggers.queue_empty]);
+  }, [enabled, queue.length, triggers.queue_empty, emitTrigger]);
 
   // ============================================================================
   // Effect 4: Long session check (every 30 minutes)
@@ -250,7 +244,7 @@ export function useTriggerEngine(enabled: boolean) {
         clearInterval(sessionCheckIntervalRef.current);
       }
     };
-  }, [enabled, triggers.long_session, djSessionStart]);
+  }, [enabled, triggers.long_session, djSessionStart, emitTrigger]);
 
   // ============================================================================
   // Effect 5: Milestone tracking
@@ -287,7 +281,7 @@ export function useTriggerEngine(enabled: boolean) {
     if (currentTrack) {
       checkMilestone();
     }
-  }, [enabled, triggers.milestone, currentTrack]);
+  }, [enabled, triggers.milestone, currentTrack, emitTrigger]);
 
   // ============================================================================
   // Effect 6: Time announcement (every 30s at specific hours)
@@ -315,7 +309,7 @@ export function useTriggerEngine(enabled: boolean) {
     }, 30_000); // Check every 30 seconds
     
     return () => clearInterval(checkInterval);
-  }, [enabled, triggers.time_announcement]);
+  }, [enabled, triggers.time_announcement, emitTrigger]);
 
   // ============================================================================
   // Effect 7: Session reset on disable
@@ -325,7 +319,7 @@ export function useTriggerEngine(enabled: boolean) {
       console.log('[TriggerEngine] Disabled, resetting session');
       resetDjSession();
     }
-  }, [enabled]);
+  }, [enabled, resetDjSession]);
 
   // Return nothing - this hook only manages side effects
   return null;

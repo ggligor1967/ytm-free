@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../../store";
 import { TrackCard } from "../TrackCard";
 import { Search, Loader2, Sparkles, Zap, Clock, Brain } from "lucide-react";
 import * as api from "../../api";
 import clsx from "clsx";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import type { Track } from "../../types";
 
 interface SemanticResult {
@@ -102,7 +102,7 @@ export function SearchView() {
     }
   };
 
-  const performSemanticSearch = async (
+  const performSemanticSearch = useCallback(async (
     query: string,
     filters?: AppliedSemanticFilters
   ) => {
@@ -135,13 +135,19 @@ export function SearchView() {
       setIsSemanticSearching(false);
       setActivePill(null);
     }
-  };
+  }, [setSearchQuery, setIsSemanticSearching, setSearchResults, setSemanticResults, setActivePill]);
+
+  // Read via ref inside the effect below so applying/clearing filters (which
+  // already trigger their own direct, awaited performSemanticSearch call)
+  // does not ALSO retrigger this effect and fire a second, concurrent search.
+  const appliedSemanticFiltersRef = useRef(appliedSemanticFilters);
+  appliedSemanticFiltersRef.current = appliedSemanticFilters;
 
   useEffect(() => {
     if (searchMode === 'semantic' && searchQuery) {
-      void performSemanticSearch(searchQuery, appliedSemanticFilters);
+      void performSemanticSearch(searchQuery, appliedSemanticFiltersRef.current);
     }
-  }, [searchMode, searchQuery]);
+  }, [searchMode, searchQuery, performSemanticSearch]);
 
   useEffect(() => {
     const enhanceSearch = async () => {
@@ -165,7 +171,7 @@ export function SearchView() {
     if (!isSearching && searchResults.length > 0) {
       void enhanceSearch();
     }
-  }, [searchQuery, isSearching, searchResults.length, settings, ollamaAvailable]);
+  }, [searchQuery, isSearching, searchResults.length, settings, ollamaAvailable, setAISearchResults, setIsAISearching]);
 
   const currentResults = searchMode === 'semantic' ? semanticResults : searchResults;
   const hasResults = currentResults.length > 0;

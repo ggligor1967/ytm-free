@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Loader2, Volume2, Sparkles } from "lucide-react";
 import clsx from "clsx";
 import * as api from "../../api";
-import { showToast } from "../Toast";
+import { showToast } from "../../lib/toast";
 import { VoiceSelector } from "../VoiceSelector";
 import type { Settings as SettingsType } from "../../types";
 

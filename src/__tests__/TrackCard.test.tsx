@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TrackCard } from "../components/TrackCard";
 import type { Track, SearchResult } from "../types";
 import * as api from "../api";
-import { showToast } from "../components/Toast";
+import { showToast } from "../lib/toast";
 
 // Mock the api module
 vi.mock("../api", () => ({
@@ -14,7 +14,7 @@ vi.mock("../api", () => ({
 }));
 
 // Mock the Toast module
-vi.mock("../components/Toast", () => ({
+vi.mock("../lib/toast", () => ({
   showToast: vi.fn(),
 }));
 

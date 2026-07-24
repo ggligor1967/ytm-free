@@ -25,7 +25,6 @@ export function useCommandExecutor() {
     setSearchResults,
     setIsSearching,
     currentTrack,
-    isPlaying,
     playNext,
     playPrevious,
     addToQueue,
@@ -196,7 +195,7 @@ export function useCommandExecutor() {
   }, [
     setIsPlaying, setVolume, toggleShuffle, toggleRepeat,
     setView, setSearchQuery, setSearchResults, setIsSearching,
-    currentTrack, isPlaying, playNext, playPrevious, addToQueue, settings,
+    currentTrack, playNext, playPrevious, addToQueue, settings,
   ]);
 
   return { executeCommand };
