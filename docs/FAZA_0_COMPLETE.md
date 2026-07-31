@@ -1,5 +1,10 @@
 # 🎉 FAZA 0 - INFRASTRUCTURE COMPLETE
 
+> Historical implementation snapshot.
+> This document records implementation intent and historical status.
+> Current verified release status is maintained in `PROJECT_STATE.md`
+> and in the evidence associated with tag `v1.0.0`.
+
 **Data:** 6 Februarie 2026  
 **Status:** ✅ ALL TESTS PASSED (5/5)
 

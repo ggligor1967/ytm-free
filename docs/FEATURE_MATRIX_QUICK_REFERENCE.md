@@ -1,5 +1,10 @@
 # YTM-Free: Complete Feature Matrix & Quick Reference
 
+> Historical implementation snapshot.
+> This document records implementation intent and historical status.
+> Current verified release status is maintained in `PROJECT_STATE.md`
+> and in the evidence associated with tag `v1.0.0`.
+
 **Last Updated**: February 14, 2026  
 **Total Implementation**: 97 Smart Ollama + 5 Semantic Search + 9 DJ Triggers = **111 Total Features**  
 **Code Status**: ✅ Production-Ready (0 errors, Rust 1.77s, TypeScript clean)  

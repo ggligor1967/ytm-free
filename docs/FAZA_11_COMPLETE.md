@@ -1,5 +1,10 @@
 # FAZA 11 — AI Radio Host with Trigger Engine ✅ COMPLETE
 
+> Historical implementation snapshot.
+> This document records implementation intent and historical status.
+> Current verified release status is maintained in `PROJECT_STATE.md`
+> and in the evidence associated with tag `v1.0.0`.
+
 **Date Completed**: February 14, 2026  
 **Build Status**: ✅ Cargo check: 0 errors  
 **TypeScript Status**: ✅ NPX tsc: 0 errors  

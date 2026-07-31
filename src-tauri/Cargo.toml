@@ -1,6 +1,6 @@
 [package]
 name = "ytm-free"
-version = "0.1.0"
+version = "1.0.0"
 description = "Personal YouTube Music - Free streaming with yt-dlp"
 authors = ["Gabor"]
 edition = "2021"

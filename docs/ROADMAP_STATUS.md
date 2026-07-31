@@ -1,5 +1,30 @@
 ﻿# ROADMAP YTM Free - Stare actualizata (30 Apr 2026)
 
+## Stare lansare v1.0.0 (31 Iul 2026)
+
+Versiunea aplicatiei a fost aliniata la `1.0.0` (`package.json`, `package-lock.json`,
+`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`). Distinctie pe
+niveluri de dovada, per `PROJECT_STATE.md`:
+
+- **Implementat**: toate feature-urile Core si familiile AI (~110 functii) exista in cod si
+  sunt legate in UI (`src/api.ts` -> comenzi Tauri -> `src-tauri/src/lib.rs`).
+- **Verificat prin quality gates**: `npx tsc --noEmit`, `npm run lint`, `npm test`,
+  `npm run build`, `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test` — rulate pe
+  commit-ul exact de release (vezi `PROJECT_STATE.md` pentru output-ul datat).
+- **Verificat prin runtime pe artefactul exact de release**: se limiteaza la ce este consemnat
+  explicit in `PROJECT_STATE.md` pentru SHA-ul de release si tag-ul `v1.0.0`; nu se extinde
+  automat la commit-uri anterioare sau ulterioare.
+- **Familii AI optionale — acoperire reprezentativa, nu exhaustiva**: cautare semantica,
+  playlist semantic, DJ Radio Host, chat/insights/cleanup au fost verificate runtime prin
+  fluxuri reprezentative (Tauri IPC + Ollama real) pe SHA-uri istorice specifice, nu functie cu
+  functie pe fiecare din cele ~110 comenzi.
+- **Limitari acceptate / amanate**: nicio rulare unica nu a demonstrat fluxul complet
+  cautare -> redare -> descarcare reala -> organizare in playlist -> restart -> persistenta pe
+  build-ul final `v1.0.0`; instalatoarele NSIS/MSI au fost verificate install/run/uninstall pe
+  commit-uri istorice, nu neaparat re-rulate pe exact acest build.
+
+---
+
 ## Progres faze
 
 | Faza | Status | Descriere |

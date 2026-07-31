@@ -2,7 +2,17 @@
 
 A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **Rust**. Stream music for free using yt-dlp as the backend - no subscriptions needed!
 
-![YTM Free](https://img.shields.io/badge/version-0.1.0-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-orange) ![License](https://img.shields.io/badge/license-Personal%20Use-green)
+![YTM Free](https://img.shields.io/badge/version-1.0.0-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-orange) ![License](https://img.shields.io/badge/license-Personal%20Use-green)
+
+## 📌 Status
+
+This is a personal-use v1.0.0 release. Core playback (search, stream, download, playlists,
+favorites, import) and the AI features below are implemented and covered by unit/integration
+tests and quality gates on every commit. Full end-to-end runtime proof (a single continuous
+search → play → download → organize → restart pass on the exact shipped build) and exhaustive
+per-feature runtime verification of every one of the ~110 AI functions are **not** claimed by
+this document — see **Known Limitations** below and `PROJECT_STATE.md` in the repository for
+the dated, evidence-backed status of individual subsystems.
 
 ## ✨ Features
 
@@ -17,7 +27,12 @@ A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **
 - 🎨 **Modern UI** - Clean, YouTube Music-inspired dark interface
 - 🪶 **Lightweight** - Native desktop performance with Tauri
 
-### AI-Powered (Ollama)
+### AI-Powered (Ollama) — optional
+
+Everything in **Core** above works fully without Ollama installed or running. The features
+below require a local Ollama instance (see Prerequisites); if Ollama is not installed or not
+running, the app still starts and functions normally, and these sections show as unavailable
+instead of failing the app.
 - 🧠 **Smart Search** - Mood, activity, era, lyric & cross-language search pills (A1-A10)
 - 🏷️ **Auto-Tagging** - Automatic genre, mood, energy, tempo, decade tagging via LLM (B1-B13)
 - ✨ **Smart Autocomplete** - AI-enhanced search suggestions with type badges
@@ -71,6 +86,12 @@ brew install yt-dlp
 sudo apt install yt-dlp
 # or
 pip install yt-dlp
+```
+
+**Verify the install** (required before search/stream/download will work):
+
+```bash
+yt-dlp --version
 ```
 
 ### 2. Install Development Tools
@@ -257,12 +278,40 @@ ytm-free/
 | macOS | `~/Library/Application Support/ytm-free/` | `~/Music/YTM-Free/` |
 | Linux | `~/.local/share/ytm-free/` | `~/Music/YTM-Free/` |
 
+### Environment Variable Overrides (isolation / testing)
+
+Two environment variables let you redirect the app's data away from the default locations
+above, useful for running an isolated instance without touching your real library:
+
+| Variable | Overrides |
+|----------|-----------|
+| `YTM_FREE_DATA_DIR` | SQLite database directory (the `Database`/AppData path). Unset or empty falls back to the default platform data directory. |
+| `YTM_FREE_DOWNLOAD_DIR` | Directory downloaded audio files are written to. Unset or empty falls back to the default platform downloads/audio directory. |
+
+Both must be set in the environment of the process that launches the app (they are read once
+at startup, not from a config file).
+
 ## 🔒 Privacy & Legal
 
 - **Personal Use Only**: This app is for personal, non-commercial use
 - **No Data Collection**: All data stays on your device
 - **Respects ToS**: Uses official yt-dlp tool within fair use guidelines
 - **No API Keys**: No YouTube API keys required
+
+## ⚠️ Known Limitations
+
+- No single continuous run has proven the full user flow (search → play → real download →
+  organize into a playlist → restart → persistence) against the final v1.0.0 build. Individual
+  subsystems (import/delete, download, semantic search/playlist, installers) each have their
+  own dated runtime evidence on their own commits — see `PROJECT_STATE.md`.
+- The AI-Powered feature set is broad (~110 functions across search, tagging, playlists, DJ
+  commentary, insights, chat, cleanup, and sharing). Representative flows in each family have
+  been runtime-verified through real Tauri/Ollama IPC; the full set has not been individually
+  runtime-exercised end-to-end.
+- NSIS and MSI installer install → run → uninstall behavior was verified on prior historical
+  commits, not necessarily rerun against this exact `v1.0.0` build.
+- There is no CI. Quality gates (typecheck, lint, unit/integration tests, `cargo fmt`/`clippy`)
+  are run manually before each release; nothing enforces them automatically on every commit.
 
 ## 🐛 Troubleshooting
 

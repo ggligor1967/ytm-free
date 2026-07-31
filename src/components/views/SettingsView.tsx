@@ -127,7 +127,7 @@ export function SettingsView() {
       <section className="bg-ytm-surface rounded-xl p-6">
         <h2 className="text-lg font-semibold mb-4">About</h2>
         <div className="space-y-2 text-sm text-ytm-text-secondary">
-          <p><strong className="text-white">YTM Free</strong> v0.1.0</p>
+          <p><strong className="text-white">YTM Free</strong> v1.0.0</p>
           <p>A personal music streaming app powered by yt-dlp.</p>
           <p>For personal use only. Respects YouTube's Terms of Service.</p>
           <p className="pt-2">Built with Tauri, React, and Rust.</p>

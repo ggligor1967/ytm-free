@@ -1,5 +1,10 @@
 # YTM-Free: Complete Implementation Summary
 
+> Historical implementation snapshot.
+> This document records implementation intent and historical status.
+> Current verified release status is maintained in `PROJECT_STATE.md`
+> and in the evidence associated with tag `v1.0.0`.
+
 **Project**: YTM-Free (Personal YouTube Music Alternative)  
 **Framework**: Tauri 2.x + React + Rust  
 **AI Integration**: Ollama (DeepSeek-V3.1, LLaMA, Mistral) + Web Speech API (Text-to-Speech)  

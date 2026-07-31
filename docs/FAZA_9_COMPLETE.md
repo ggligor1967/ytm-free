@@ -1,5 +1,10 @@
 # FAZA 9 — Advanced Semantic Search with Vector Indexing ✅ COMPLETE
 
+> Historical implementation snapshot.
+> This document records implementation intent and historical status.
+> Current verified release status is maintained in `PROJECT_STATE.md`
+> and in the evidence associated with tag `v1.0.0`.
+
 **Date Completed**: February 12, 2026  
 **Build Status**: ✅ Cargo check: 0 errors (1.77s)  
 **TypeScript Status**: ✅ NPX tsc: 0 errors  

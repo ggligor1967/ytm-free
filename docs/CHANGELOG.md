@@ -1,12 +1,34 @@
 # YTM-Free Changelog & Version History
 
-**Current Version**: 0.1.0 + FAZA 11 (AI Radio Host Complete)  
-**Last Updated**: February 14, 2026  
-**Status**: Production-Ready ✅  
+**Current Version**: 1.0.0
+**Last Updated**: July 31, 2026
+**Status**: See `PROJECT_STATE.md` for the dated, evidence-backed status of individual
+subsystems — this file is a changelog, not a status claim.
 
 ---
 
-## Version 0.1.0 + FAZA 11 (Current)
+## Version 1.0.0 (Current)
+
+First tagged release. Aligns the tracked application version (`package.json`,
+`package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`)
+from `0.1.0` to `1.0.0`; no application logic, dependencies, or runtime behavior changed as part
+of this release commit.
+
+- Version bump only: five manifest files, no source, test, or dependency changes.
+- README rewritten to be release-facing: adds a Status section, an explicit core-vs-optional-Ollama
+  distinction, documents the `YTM_FREE_DATA_DIR` / `YTM_FREE_DOWNLOAD_DIR` isolation overrides, and
+  adds a Known Limitations section.
+- Historical `docs/*COMPLETE*.md` and `docs/FEATURE_MATRIX_QUICK_REFERENCE.md` documents are marked
+  with a banner pointing to `PROJECT_STATE.md` as the current authoritative status source; their
+  historical content is otherwise unchanged.
+- All quality gates (TypeScript, lint, frontend tests, Rust `cargo fmt`/`clippy`/`cargo test`,
+  production build) were run against the exact release commit; see `PROJECT_STATE.md` for the
+  dated gate output and the release-artifact hashes recorded for tag `v1.0.0`.
+- Full continuous end-to-end runtime proof (search → play → download → organize → restart) against
+  this exact build, and exhaustive runtime verification of every AI function, remain unproven — see
+  README's Known Limitations and `PROJECT_STATE.md`.
+
+## Version 0.1.0 + FAZA 11 (Previous)
 
 ### New Features (FAZA 11: AI Radio Host with Trigger Engine)
 
