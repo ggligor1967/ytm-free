@@ -246,6 +246,28 @@ MSI built/hashed but not runtime-tested, and `REAL_USER_DATA_INCIDENT: DETECTED_
 carried into all three docs unchanged. This note does not alter or hide the incident record
 above — it only fixes now-stale statements in the public-facing docs.
 
+### R17.2 — final docs correction and evidence sanitization (2026-08-01)
+
+The remaining contradictions in `README.md` and `docs/ROADMAP_STATUS.md` were corrected: README's
+"quality gates on every commit" claim was narrowed to "quality gates passed on the exact v1.0.0
+release commit" (the existing "no CI enforces gates automatically" statement was left unchanged),
+and ROADMAP_STATUS's CORE table rows for "Build productie" and "Documentatie README" were updated
+from their stale `BLOCAT`/`NEFACUT` states to `DONE`, matching the already-proven v1.0.0 release
+evidence.
+
+The R17/R17.1 evidence package v2 (`R17-v1.0.0-final-evidence-v2.zip`) was audited and found:
+`R17_V2_INTEGRITY: PASS` (all entries hash-match their manifest), but `R17_V2_PRIVACY: FAIL` — it
+contained two complete real-database copies (`G1-real-appdata-backup/ytm-free.db.bak` and
+`G1-real-data-incident/ytm-free.db.modified-*.bak`). v2 is therefore classified
+`PRIVATE_SENSITIVE_SUPERSEDED` and is retained on disk only for provenance, not for distribution.
+Neither database file was opened, queried, or inspected during this sanitization — both were
+classified by filename, size, and SHA-256 only. A new sanitized package, v3, is the authoritative
+distribution-safe evidence package: it excludes both real-database binaries (replaced by a
+metadata-only incident record: role, filename, size, SHA-256, classification, restoration result
+— no contents) and redacts local-account paths/emails from the packaged text evidence.
+`REAL_USER_DATA_INCIDENT` remains `DETECTED_AND_RECOVERED` in every document and evidence copy —
+this sanitization pass did not alter that record.
+
 ## How to update this file
 
 Run `docs/VERIFICATION_PROTOCOL.md`, record results in an evidence ledger (`docs/EVIDENCE_LEDGER_TEMPLATE.md`), then update the tables above with new dates. Never mark something working without the command output in hand.

@@ -1,4 +1,4 @@
-﻿# ROADMAP YTM Free - Stare actualizata (30 Apr 2026)
+﻿# ROADMAP YTM Free - Stare actualizata (30 Apr 2026; sectiunile de release si tabelul CORE reconciliate pe 1 Aug 2026)
 
 ## Stare lansare v1.0.0 (31 Iul 2026)
 
@@ -56,8 +56,8 @@ niveluri de dovada, per `PROJECT_STATE.md`:
 | # | Sarcina | Stare | Detalii |
 |---|---------|-------|---------|
 | 1 | Testare end-to-end | DONE | E2E complet PASS pe build-ul exact `v1.0.0` (vezi sectiunea de mai sus si `PROJECT_STATE.md`) |
-| 2 | Build productie | BLOCAT | dbghelp.lib lipseste din VS toolchain |
-| 3 | Documentatie README | NEFACUT | Instalare yt-dlp, troubleshooting, Ollama |
+| 2 | Build productie | DONE | EXE, NSIS si MSI exacte pentru `v1.0.0` construite; NSIS testat runtime, MSI construit si hash-uit dar netestat runtime |
+| 3 | Documentatie README | DONE | Preconditii de instalare, verificare yt-dlp, distinctie Ollama, troubleshooting, locatii date, limitari cunoscute si status exact-release documentate |
 
 ---
 

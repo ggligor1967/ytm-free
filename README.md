@@ -8,7 +8,7 @@ A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **
 
 This is a personal-use v1.0.0 release. Core playback (search, stream, download, playlists,
 favorites, import) and the AI features below are implemented and covered by unit/integration
-tests and quality gates on every commit. Full end-to-end runtime proof — a single continuous
+tests and quality gates passed on the exact v1.0.0 release commit. Full end-to-end runtime proof — a single continuous
 search → playback → real download → organize into a playlist → close → restart → persistence
 pass, plus NSIS install/uninstall and application-config deletion — has been demonstrated
 against the exact tagged `v1.0.0` build. Exhaustive per-feature runtime verification of every
