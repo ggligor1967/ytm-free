@@ -8,11 +8,13 @@ A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **
 
 This is a personal-use v1.0.0 release. Core playback (search, stream, download, playlists,
 favorites, import) and the AI features below are implemented and covered by unit/integration
-tests and quality gates on every commit. Full end-to-end runtime proof (a single continuous
-search → play → download → organize → restart pass on the exact shipped build) and exhaustive
-per-feature runtime verification of every one of the ~110 AI functions are **not** claimed by
-this document — see **Known Limitations** below and `PROJECT_STATE.md` in the repository for
-the dated, evidence-backed status of individual subsystems.
+tests and quality gates on every commit. Full end-to-end runtime proof — a single continuous
+search → playback → real download → organize into a playlist → close → restart → persistence
+pass, plus NSIS install/uninstall and application-config deletion — has been demonstrated
+against the exact tagged `v1.0.0` build. Exhaustive per-feature runtime verification of every
+one of the ~110 AI functions is still **not** claimed by this document — see **Known
+Limitations** below and `PROJECT_STATE.md` in the repository for the dated, evidence-backed
+status of individual subsystems.
 
 ## ✨ Features
 
@@ -300,16 +302,23 @@ at startup, not from a config file).
 
 ## ⚠️ Known Limitations
 
-- No single continuous run has proven the full user flow (search → play → real download →
-  organize into a playlist → restart → persistence) against the final v1.0.0 build. Individual
-  subsystems (import/delete, download, semantic search/playlist, installers) each have their
-  own dated runtime evidence on their own commits — see `PROJECT_STATE.md`.
+- The full user flow (search → playback → real download → organize into a playlist → close →
+  restart → persistence) has been runtime-verified against the exact tagged `v1.0.0` release
+  build: NSIS install and installed-runtime validation **PASS**, the complete flow **PASS**,
+  NSIS uninstall and application-config deletion **PASS**, download preservation **PASS**. The
+  source EXE and the installed EXE are not claimed to be byte-identical. During this validation
+  a real-user-data incident occurred and was recovered — see `REAL_USER_DATA_INCIDENT` below.
+- MSI was built and SHA-256 hashed for this release but was **not runtime-tested** against the
+  exact `v1.0.0` build (NSIS was the installer exercised end-to-end).
 - The AI-Powered feature set is broad (~110 functions across search, tagging, playlists, DJ
   commentary, insights, chat, cleanup, and sharing). Representative flows in each family have
-  been runtime-verified through real Tauri/Ollama IPC; the full set has not been individually
-  runtime-exercised end-to-end.
-- NSIS and MSI installer install → run → uninstall behavior was verified on prior historical
-  commits, not necessarily rerun against this exact `v1.0.0` build.
+  been runtime-verified through real Tauri/Ollama IPC; the full set remains representative
+  coverage only, not exhaustively runtime-exercised end-to-end.
+- **REAL_USER_DATA_INCIDENT: DETECTED_AND_RECOVERED.** During exact-release runtime validation,
+  the real AppData database was briefly opened and its content altered outside the isolated test
+  environment; this was detected, the modified file preserved as evidence, and the real database
+  restored from a SHA-256-verified backup. See `PROJECT_STATE.md` for the full record — this is
+  not to be read as "no incident occurred."
 - There is no CI. Quality gates (typecheck, lint, unit/integration tests, `cargo fmt`/`clippy`)
   are run manually before each release; nothing enforces them automatically on every commit.
 

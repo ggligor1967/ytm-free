@@ -234,6 +234,18 @@ Tag `v1.0.0` pushed to `origin`, peeled to `RELEASE_SHA` on both the local repo 
 
 Full end-to-end app flow on prior `main` SHAs, broader AI/Ollama surfaces beyond the representative flows already recorded, and production-readiness beyond this release's own validated scope remain governed by the existing entries above; this section documents only the v1.0.0 release-closure scope itself.
 
+### Documentation reconciliation (2026-08-01, R17.1)
+
+After R17 Phase K closed the `v1.0.0` release, `README.md`, `docs/CHANGELOG.md`, and
+`docs/ROADMAP_STATUS.md` still carried pre-runtime language written before the exact-release
+validation ran ("no complete flow demonstrated on the final build", "installers not rerun on
+this exact build", roadmap E2E status `NEFACUT`). That language was corrected to match the
+proven Phase G.1–K results recorded above: exact-release NSIS install/runtime/uninstall/config-
+deletion **PASS**, the full search→playback→download→playlist→restart→persistence flow **PASS**,
+MSI built/hashed but not runtime-tested, and `REAL_USER_DATA_INCIDENT: DETECTED_AND_RECOVERED`
+carried into all three docs unchanged. This note does not alter or hide the incident record
+above — it only fixes now-stale statements in the public-facing docs.
+
 ## How to update this file
 
 Run `docs/VERIFICATION_PROTOCOL.md`, record results in an evidence ledger (`docs/EVIDENCE_LEDGER_TEMPLATE.md`), then update the tables above with new dates. Never mark something working without the command output in hand.

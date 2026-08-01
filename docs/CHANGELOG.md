@@ -9,12 +9,20 @@ subsystems — this file is a changelog, not a status claim.
 
 ## Version 1.0.0 (Current)
 
-First tagged release. Aligns the tracked application version (`package.json`,
-`package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`)
-from `0.1.0` to `1.0.0`; no application logic, dependencies, or runtime behavior changed as part
-of this release commit.
+First tagged release, `v1.0.0` (`RELEASE_SHA` `830dce6e7c6846327ead6b5f5c9e75a2a0ac8b01`). The
+release commit touches 16 files — a version-manifest bump plus a real bugfix and a display
+correction, not a version bump alone:
 
-- Version bump only: five manifest files, no source, test, or dependency changes.
+- Aligns the tracked application version (`package.json`, `package-lock.json`,
+  `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`) from `0.1.0` to
+  `1.0.0`.
+- Fixes the NSIS uninstaller's "Delete application data" checkbox: it previously targeted
+  `%APPDATA%\com.gabor.ytm-free` (the Tauri bundle identifier folder, never used by the app) and
+  deleted nothing useful. `src-tauri/tauri.conf.json` now wires `bundle.windows.nsis.installerHooks`
+  to a new `src-tauri/windows/installer-hooks.nsh`, which resolves the app's real data directory
+  (honoring the `YTM_FREE_DATA_DIR` override the app itself uses, else `%APPDATA%\ytm-free`) and
+  deletes only `ytm-free.db`/`-wal`/`-shm` by exact name — never a recursive or wildcard delete.
+- Corrects the version string visible in `src/components/views/SettingsView.tsx` to match `1.0.0`.
 - README rewritten to be release-facing: adds a Status section, an explicit core-vs-optional-Ollama
   distinction, documents the `YTM_FREE_DATA_DIR` / `YTM_FREE_DOWNLOAD_DIR` isolation overrides, and
   adds a Known Limitations section.
@@ -24,9 +32,16 @@ of this release commit.
 - All quality gates (TypeScript, lint, frontend tests, Rust `cargo fmt`/`clippy`/`cargo test`,
   production build) were run against the exact release commit; see `PROJECT_STATE.md` for the
   dated gate output and the release-artifact hashes recorded for tag `v1.0.0`.
-- Full continuous end-to-end runtime proof (search → play → download → organize → restart) against
-  this exact build, and exhaustive runtime verification of every AI function, remain unproven — see
-  README's Known Limitations and `PROJECT_STATE.md`.
+- Full continuous end-to-end runtime proof against this exact tagged build — search → playback →
+  real download → organize into a playlist → close → restart → persistence, plus NSIS
+  install/uninstall and application-config deletion — is **PASS**, exercised against the exact
+  `v1.0.0` build (NSIS only; MSI was built and hashed but not runtime-tested). During this
+  validation a real-user-data incident occurred and was recovered: the real AppData database was
+  briefly opened and altered outside the isolated test environment, detected, preserved as
+  evidence, and restored from a SHA-256-verified backup — see `PROJECT_STATE.md` for the full
+  record. Exhaustive runtime verification of every one of the ~110 AI functions remains
+  representative coverage only, not exhaustive — see README's Known Limitations and
+  `PROJECT_STATE.md`.
 
 ## Version 0.1.0 + FAZA 11 (Previous)
 

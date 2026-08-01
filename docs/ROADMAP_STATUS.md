@@ -18,10 +18,23 @@ niveluri de dovada, per `PROJECT_STATE.md`:
   playlist semantic, DJ Radio Host, chat/insights/cleanup au fost verificate runtime prin
   fluxuri reprezentative (Tauri IPC + Ollama real) pe SHA-uri istorice specifice, nu functie cu
   functie pe fiecare din cele ~110 comenzi.
-- **Limitari acceptate / amanate**: nicio rulare unica nu a demonstrat fluxul complet
-  cautare -> redare -> descarcare reala -> organizare in playlist -> restart -> persistenta pe
-  build-ul final `v1.0.0`; instalatoarele NSIS/MSI au fost verificate install/run/uninstall pe
-  commit-uri istorice, nu neaparat re-rulate pe exact acest build.
+- **E2E exact-release**: PASS. Fluxul complet cautare -> redare -> descarcare reala -> organizare
+  in playlist -> inchidere -> restart -> persistenta a fost demonstrat pe build-ul exact taguit
+  `v1.0.0`.
+- **NSIS install/uninstall/stergere configuratie**: PASS. Dezinstalarea cu bifa "Delete
+  application data" selectata sterge corect baza de date/configuratia proprie a aplicatiei
+  (`ytm-free.db` + `-wal`/`-shm`) si pastreaza descarcarile si datele nelegate — PASS.
+- **Persistenta la restart**: PASS. **Pastrarea descarcarilor**: PASS.
+- **MSI**: construit si hash-uit pentru acest release, dar **NEVERIFICAT runtime** pe build-ul
+  exact `v1.0.0` (doar NSIS a fost rulat end-to-end).
+- **Acoperire AI optionala**: ramane reprezentativa, nu exhaustiva (nemodificat fata de mai sus).
+- **Propagare variabila de mediu in scenarii exotice** (cai UNC, instalare elevata/reinstalare):
+  NEDOVEDIT.
+- **REAL_USER_DATA_INCIDENT: DETECTED_AND_RECOVERED** — in timpul validarii pe build-ul exact de
+  release, baza de date reala din AppData a fost deschisa si alterata accidental in afara
+  mediului izolat de test; a fost detectata, pastrata ca dovada, si restaurata dintr-un backup
+  verificat prin SHA-256. Vezi `PROJECT_STATE.md` pentru inregistrarea completa — nu se
+  interpreteaza drept "niciun incident".
 
 ---
 
@@ -42,7 +55,7 @@ niveluri de dovada, per `PROJECT_STATE.md`:
 
 | # | Sarcina | Stare | Detalii |
 |---|---------|-------|---------|
-| 1 | Testare end-to-end | NEFACUT | Necesita Tauri runtime + yt-dlp |
+| 1 | Testare end-to-end | DONE | E2E complet PASS pe build-ul exact `v1.0.0` (vezi sectiunea de mai sus si `PROJECT_STATE.md`) |
 | 2 | Build productie | BLOCAT | dbghelp.lib lipseste din VS toolchain |
 | 3 | Documentatie README | NEFACUT | Instalare yt-dlp, troubleshooting, Ollama |
 
