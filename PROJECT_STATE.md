@@ -211,6 +211,29 @@ Broader AI/Ollama surfaces remain unverified. Step-6E.1 remains DB-cache/status-
 
 `docs/ROADMAP_STATUS.md` (2026-04-30, in Romanian) is the most honest status doc and matches command evidence.
 
+## v1.0.0 Release Closure (2026-08-01)
+
+Tag `v1.0.0` pushed to `origin`, peeled to `RELEASE_SHA` on both the local repo and `origin`. `RELEASE_SHA = 830dce6e7c6846327ead6b5f5c9e75a2a0ac8b01`, `RELEASE_TREE = df79f325572149aa09f751f37d5148dd0af1c1e0`, parent `934808a82452fbcca8d7d5af328298a083251d3d`. This is the R17 release-closure mission (`R17-V1.0-EXACT-SHA-RELEASE-CLOSURE-V1`). Scope of the release commit relative to the prior baseline: 16 files — version bump to `1.0.0` across `package.json`/`package-lock.json`/`src-tauri/Cargo.toml`/`src-tauri/Cargo.lock`, doc updates (`README.md`, `docs/CHANGELOG.md`, `docs/ROADMAP_STATUS.md`, four `docs/FAZA_*`/`FEATURE_MATRIX`/`FINAL_STATUS`/`IMPLEMENTATION_SUMMARY` docs), one SettingsView.tsx change, and the R17 Phase G.1 uninstaller-data-deletion fix (`src-tauri/tauri.conf.json` + new `src-tauri/windows/installer-hooks.nsh`).
+
+**Gate counts on `RELEASE_SHA`:** frontend `npx tsc --noEmit` exit 0, `npm test` 62/62 PASS, `npm run build` PASS; Rust `cargo test` 87 passed / 0 failed; `cargo clippy` — pre-existing warnings only, no new findings from the release diff; `npm run tauri build` PASS. npm security classification: QUALIFIED — dev-only, 0 critical.
+
+**Release artifacts (product version 1.0.0):**
+- `src-tauri/target/release/ytm-free.exe` — 8,759,296 bytes — SHA-256 `258B1CB9A1F0EF177323EDD2386E8442ED3D40AF02FA6F6BE76A726EDC51877F`
+- `src-tauri/target/release/bundle/nsis/YTM Free_1.0.0_x64-setup.exe` — 2,802,927 bytes — SHA-256 `E32B5E669718A582D415BD7BA0D3CAE23B198067E105FEF65B029C8AA7FEA66E`
+- `src-tauri/target/release/bundle/msi/YTM Free_1.0.0_x64_en-US.msi` — 3,801,088 bytes — SHA-256 `435A5699D4D5A4F3A4E702C619FB3B282E88191B5BE889F26F8AA8C1EA713B09`
+
+**APPLICATION_ARTIFACT_EQUIVALENCE: NOT_BYTE_IDENTICAL** — the release-SHA rebuild is not byte-identical to any earlier validated build. Because of this, a full live Branch B core flow was executed against the installed NSIS artifact rather than reusing prior E2E evidence: search, playback, real download, playlist creation, application restart, and post-restart persistence all **PASS** (owner-driven UI, independently verified via filesystem/hash checks at each step). MSI was **not** runtime-tested in this pass (NSIS only). Installer cleanup **PASS** (install dir, Start Menu shortcut, registry uninstall entry all removed). Uninstaller configuration deletion **PASS** — the new `NSIS_HOOK_POSTUNINSTALL` hook resolved the correct data directory (respecting `YTM_FREE_DATA_DIR` when set, else the app's real `%APPDATA%\ytm-free`) and deleted only `ytm-free.db`/`-wal`/`-shm`, confirmed by the uninstaller's own runtime log output. Unrelated-data preservation **PASS** (sentinel file outside the DB untouched, hash-identical). Download preservation **PASS** (downloaded file and sentinel outside `YTM_FREE_DOWNLOAD_DIR` scope untouched, hash-identical). Final isolated validation data safety: **PASS**.
+
+**REAL_USER_DATA_INCIDENT: DETECTED_AND_RECOVERED.** During this validation pass, the installer's own post-install flow launched the app once outside the isolated test environment, which opened the real `%APPDATA%\ytm-free\ytm-free.db` and changed its content (same size, different bytes — consistent with an internal bookkeeping write on open, not any destructive action). This was detected from a screenshot, the modified file was preserved as forensic evidence (not deleted), and the real DB was restored from a pre-session backup verified by SHA-256. **Final real DB hash restored to baseline:** `8BB09DA704C253D88F41F50E163D0847B87371CB5BBBB8AB1636E9EB1AC254DD`, reconfirmed live in Phase H with no `-wal`/`-shm` files present. This incident is not to be read as "no validation incident occurred" — it is a recovered incident, on record.
+
+**R16.2 evidence:** ZIP SHA-256 `08F017B2305C050C510C576BF0CBE73E5B8723CCB885FCB87226081E7AD6E729`; addendum SHA-256 `D1D87FDCD75D207BC10809E85A1BF93C186F4EB5B57808E0653B35BB64078DD0`.
+
+**R17 evidence root:** `D:\YTM-Free-Evidence\R17-V1.0-FINAL\20260731-182511`. Phase G.1 manifest SHA-256 `935330d626c2fcede346355515b5d8aab18e9259389dbf14928ecf1b3fb9728d` (superseded by a regenerated final manifest once Phase K evidence closure completes).
+
+**Accepted limitations:** MSI was not runtime-tested in this R17 pass (NSIS only); exotic environment-variable propagation (UNC paths, elevated/reinstall flows) was not demonstrated for the data-dir override; optional AI/Ollama feature coverage remains representative only, not exhaustive — see the existing Ollama/semantic entries above, which this release does not extend. Source EXE and the installed EXE are **not** claimed byte-identical, and `APPLICATION_ARTIFACT_EQUIVALENCE` did not pass — see above.
+
+Full end-to-end app flow on prior `main` SHAs, broader AI/Ollama surfaces beyond the representative flows already recorded, and production-readiness beyond this release's own validated scope remain governed by the existing entries above; this section documents only the v1.0.0 release-closure scope itself.
+
 ## How to update this file
 
 Run `docs/VERIFICATION_PROTOCOL.md`, record results in an evidence ledger (`docs/EVIDENCE_LEDGER_TEMPLATE.md`), then update the tables above with new dates. Never mark something working without the command output in hand.
