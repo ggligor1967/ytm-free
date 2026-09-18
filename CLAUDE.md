@@ -16,9 +16,9 @@ npx tsc --noEmit -p tsconfig.json # 2026-09-19: PASS
 npm run typecheck:wdio           # 2026-09-19: PASS
 npm run build                    # tsc + vite build; not rerun in PR #26 mission
 npm run tauri dev                # full app; not rerun in PR #26 mission
-cargo check                      # 2026-09-19: PASS
-cargo test                       # 2026-09-19: 106 passed / 0 failed / 2 ignored
-cargo clippy --all-targets --all-features # 2026-09-19: exit 0 with warnings
+cargo check --manifest-path src-tauri/Cargo.toml # 2026-09-19: PASS
+cargo test --manifest-path src-tauri/Cargo.toml  # 2026-09-19: 106 passed / 0 failed / 2 ignored
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features # 2026-09-19: exit 0 with warnings
 ```
 
 ## Known traps (reconciled 2026-09-19 — re-verify environment-specific items)
