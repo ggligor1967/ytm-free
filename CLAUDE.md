@@ -5,24 +5,28 @@ Desktop music player (personal use): Tauri 2.x + React 18/TypeScript frontend, R
 ## Read first
 
 - `AGENT_BRIEF.md` — ground rules, trust order for docs, hard traps. Read before your first change.
-- `PROJECT_STATE.md` — dated, evidence-backed status. **The only status doc you may trust.** README and `docs/*COMPLETE*.md` contain stale "Production-Ready" claims — they describe intent, not reality.
+- `PROJECT_STATE.md` — dated, evidence-backed status. **The only status doc you may trust for current verification state.** README was reconciled after PR #26; several historical `docs/*COMPLETE*.md` files still contain stale "Production-Ready" language and should be treated as historical narrative.
 
 ## Commands
 
 ```
-npm test              # vitest run (frontend; src/__tests__/)
-npx tsc --noEmit      # typecheck
-npm run build         # tsc + vite build
-npm run tauri dev     # full app — BROKEN as of 2026-07-06 (Rust toolchain, see below)
-cargo test            # in src-tauri/ — works in normal PowerShell shells after the 2026-07-08 SDK 10.0.26100.0 env/profile bootstrap
+npm test                         # 2026-09-19: 67/67 PASS
+npm run lint                     # 2026-09-19: PASS
+npx tsc --noEmit -p tsconfig.json # 2026-09-19: PASS
+npm run typecheck:wdio           # 2026-09-19: PASS
+npm run build                    # tsc + vite build; not rerun in PR #26 mission
+npm run tauri dev                # full app; not rerun in PR #26 mission
+cargo check                      # 2026-09-19: PASS
+cargo test                       # 2026-09-19: 106 passed / 0 failed / 2 ignored
+cargo clippy --all-targets --all-features # 2026-09-19: exit 0 with warnings
 ```
 
-## Known traps (verified 2026-07-06 — re-verify before assuming still true)
+## Known traps (reconciled 2026-09-19 — re-verify environment-specific items)
 
-1. **Underlying Windows SDK defect still exists on this machine**: SDK 10.0.28000.0 is a partial install, so raw/unbootstrapped shells can still fail with `LNK1181: dbghelp.lib`. As of 2026-07-08, normal PowerShell shells are auto-bootstrapped to SDK 10.0.26100.0 via user env + PowerShell profile, and `cargo test` passes there without manual `vcvarsall`. OS-level cleanup guidance remains in `docs/RECOVERY_PLAN.md`.
-2. **GitHub default branch is wrong**: `origin/HEAD` → `phase-2-frontend-bugs` (stale). Trunk is `main`. Always branch from and PR into `main`.
-3. **Flaky test**: `LibraryView.test.tsx` › "handles 1000 tracks…" times out under full-suite load, passes in isolation. Verify with `npx vitest run src/__tests__/LibraryView.test.tsx -t "handles 1000 tracks"` before treating a red run as your fault (or as fine).
-4. `Cargo.lock` is gitignored (known debt). Rust dependency versions are not pinned — a clean clone may resolve different crates.
+1. **Toolchain is environment-sensitive, but the current normal PowerShell shell is healthy**: on 2026-09-19, `vswhere` found Visual Studio Build Tools 18, `cl.exe` was on PATH, Rust 1.94.1 targeted `x86_64-pc-windows-msvc`, and `cargo check` / `cargo test` passed without a manual `vcvarsall` step. If a different shell fails, inspect MSVC/SDK environment variables before changing source.
+2. **Canonical/default branch is `main`**: post-PR #26, `origin/HEAD -> origin/main`. Historical branches such as `phase-2-frontend-bugs` are not the trunk.
+3. **Flaky test**: `LibraryView.test.tsx` › "handles 1000 tracks…" has historically timed out under full-suite load but passed in the 2026-09-19 suite. Re-run it in isolation before attributing a future timeout to a patch.
+4. `src-tauri/Cargo.lock` is tracked and not ignored; the former reproducibility debt is closed.
 5. Docs and commit messages are partly Romanian ("Faza N" = phase N). `docs/ROADMAP_STATUS.md` is Romanian and is the most accurate roadmap.
 6. `.omx/` is agent-session state; `Spotify/` holds personal CSV exports. Don't commit the former, don't delete either.
 
@@ -36,5 +40,5 @@ cargo test            # in src-tauri/ — works in normal PowerShell shells afte
 ## Style
 
 - Conventional-commit style messages, imperative, scope prefixes as in `git log` (`fix(frontend): …`, `feat: Faza N — …`).
-- `src-tauri/src/lib.rs` is 3300+ lines of Tauri commands — make surgical edits, don't reformat or reorder it.
+- `src-tauri/src/lib.rs` is 6,931 lines with 113 Tauri command handlers — make surgical edits, don't reformat or reorder it.
 - Frontend: Zustand store in `src/store.ts`, API bindings in `src/api.ts`, types in `src/types.ts`. New Tauri commands need all three plus `lib.rs` registration.
