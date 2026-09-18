@@ -14,7 +14,7 @@ npm run lint                      # must exit 0
 npx tsc --noEmit -p tsconfig.json # must exit 0
 npm run typecheck:wdio            # must exit 0
 npm test                          # must be N/N; record the exact count
-npm run build                     # must produce dist/ and exit 0 when a build gate applies
+npm run build                     # REQUIRED before merge for TypeScript/React changes; must produce dist/ and exit 0
 ```
 
 The historical LibraryView 1000-tracks timeout has been flaky under load; if it is the only failure, rerun that test in isolation and report both results rather than masking it.
