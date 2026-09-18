@@ -117,9 +117,11 @@ function App() {
       } catch (err) {
         console.error("Initialization error:", err);
         setError(
-          err instanceof Error
-            ? err.message
-            : "Failed to initialize. Make sure yt-dlp is installed."
+          typeof err === "string"
+            ? err
+            : err instanceof Error
+              ? err.message
+              : "Failed to initialize. Make sure yt-dlp is installed."
         );
         setLoading(false);
       }
