@@ -20,7 +20,7 @@ Audience: any AI agent (Claude Code, Codex, Copilot, etc.) or human maintainer s
 
 1. **Never claim "production-ready", "all tests pass", or "done" without pasting the command output that proves it.** This repo's docs are already polluted with unverified success claims; do not add more.
 2. **Branch rule:** GitHub's default branch and canonical trunk are now `main` (confirmed post-PR #26). Base branches and PRs on `main` unless a mission explicitly says otherwise. Historical branches such as `phase-2-frontend-bugs` are not the trunk.
-3. **Do not assume every shell is healthy.** On this machine, PowerShell shells now auto-bootstrap SDK `10.0.26100.0`, but the partial SDK `10.0.28000.0` still exists on disk. If you are not in a normal PowerShell session, verify with `cargo test --no-run` before making claims; if it fails, say so instead of assuming Rust code compiles.
+3. **Do not assume every shell is healthy.** On this machine, PowerShell shells now auto-bootstrap SDK `10.0.26100.0`, but the partial SDK `10.0.28000.0` still exists on disk. If you are not in a normal PowerShell session, verify with `cargo test --manifest-path src-tauri/Cargo.toml --no-run` before making claims; if it fails, say so instead of assuming Rust code compiles.
 4. Do not commit `.omx/` (agent session state), `dist/`, logs, or anything already gitignored.
 5. Historical harnesses and old state notes may reference untracked GDPR drafts or `AGENTS.md`. The post-PR #26 canonical clone had a clean working tree and those paths were not present there. Do not assume they exist; if they reappear, do not modify or delete them without an explicit mission.
 6. One known-flaky test: `LibraryView.test.tsx` "handles 1000 tracks..." can time out (>5s) under full-suite load but passes in isolation. Re-run it in isolation before blaming your change; don't delete it and don't raise the global timeout to hide it.
@@ -34,9 +34,9 @@ npx tsc --noEmit -p tsconfig.json # 2026-09-19: PASS
 npm run typecheck:wdio           # 2026-09-19: PASS
 npm run build                    # tsc + vite build → dist/; historical release gate, not rerun in PR #26 mission
 npm run dev                      # vite only (frontend in browser, Tauri APIs unavailable)
-cargo check                      # 2026-09-19: PASS
-cargo test                       # 2026-09-19: 106 passed / 0 failed / 2 ignored
-cargo clippy --all-targets --all-features # 2026-09-19: exit 0 with warnings
+cargo check --manifest-path src-tauri/Cargo.toml # 2026-09-19: PASS
+cargo test --manifest-path src-tauri/Cargo.toml  # 2026-09-19: 106 passed / 0 failed / 2 ignored
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features # 2026-09-19: exit 0 with warnings
 ```
 
 ## Commands that can still fail in raw or unbootstrapped shells
@@ -47,7 +47,7 @@ npm run tauri build
 ./verify.sh           # depends on tauri dev
 ```
 
-If a shell bypasses the PowerShell bootstrap and the persisted user env fix, `cargo test` can still hit `LNK1181 dbghelp.lib`; see `docs/RECOVERY_PLAN.md`.
+If a shell bypasses the PowerShell bootstrap and the persisted user env fix, `cargo test --manifest-path src-tauri/Cargo.toml` can still hit `LNK1181 dbghelp.lib`; see `docs/RECOVERY_PLAN.md`.
 
 ## Where things live
 
