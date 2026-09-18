@@ -7,7 +7,7 @@ description: Use when creating, updating, or reviewing a pull request in ytm-fre
 
 ## Before creating the PR
 
-1. **Base branch = `main`. Always.** GitHub's default branch is the stale `phase-2-frontend-bugs`; `gh pr create` and the web UI will preselect it. Pass `--base main` explicitly. A PR against the wrong base silently diffs against 9-commits-old code.
+1. **Base branch = `main`.** GitHub's default branch and canonical trunk are now `main` (confirmed post-PR #26). Continue to pass `--base main` explicitly in scripted PR creation so the base is deterministic.
 2. Branch naming follows existing convention: `faza-N/short-description` or `fix/…`, `debt/…`.
 3. Run the applicable gates from .claude/skills/quality-gate/SKILL.md **on the final commit** (not an earlier state of the branch).
 4. `git status --short` — nothing unintended staged; never include `.omx/`, `dist/`, `*.log`, personal CSVs.
