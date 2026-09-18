@@ -182,7 +182,7 @@ ytm-free/
 │   └── App.tsx             # Main app + routing + Ollama health polling
 ├── src-tauri/              # Rust backend
 │   ├── src/
-│   │   ├── lib.rs          # Tauri commands (113 registered handlers)
+│   │   ├── lib.rs          # Tauri commands (112 registered logical handlers; 113 source annotations)
 │   │   ├── db.rs           # SQLite operations (46+ methods)
 │   │   ├── ytdlp.rs        # yt-dlp wrapper
 │   │   ├── server.rs       # HTTP streaming (Axum, port 3456)
