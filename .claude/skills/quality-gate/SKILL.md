@@ -21,7 +21,12 @@ The historical LibraryView 1000-tracks timeout has been flaky under load; if it 
 
 ## Gate B — any Rust (src-tauri) change
 
+Tauri's `generate_context!()` requires the configured `dist/` frontend directory even for
+Rust check/test builds. From a fresh checkout or after cleaning `dist/`, build the frontend
+first; do not treat the missing generated frontend artifact as a Rust-source failure.
+
 ```
+npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
