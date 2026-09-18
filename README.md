@@ -16,6 +16,11 @@ one of the ~110 AI functions is still **not** claimed by this document — see *
 Limitations** below and `PROJECT_STATE.md` in the repository for the dated, evidence-backed
 status of individual subsystems.
 
+Post-release playback hardening from PR #26 was merged to `main` on 2026-09-19. Its
+frontend/Rust static and unit gates passed on the reviewed commit (including 67/67 Vitest and
+106 passed / 0 failed / 2 ignored Rust tests), but a fresh full Tauri/WebView2 E2E run was
+**not** performed for that post-release change.
+
 ## ✨ Features
 
 ### Core
@@ -90,11 +95,14 @@ sudo apt install yt-dlp
 pip install yt-dlp
 ```
 
-**Verify the install** (required before search/stream/download will work):
+**Verify the install** (required before search/stream/download will work). YTM Free currently
+requires **yt-dlp 2026.08.19 or newer**:
 
 ```bash
 yt-dlp --version
 ```
+
+If the reported version is older than `2026.08.19`, update yt-dlp before starting the app.
 
 ### 2. Install Development Tools
 
@@ -168,13 +176,13 @@ ytm-free/
 │   ├── hooks/
 │   │   ├── useCommandExecutor.ts # Command execution hook
 │   │   └── useTriggerEngine.ts   # AI DJ trigger detection (FAZA 11)
-│   ├── api.ts              # Tauri API bindings (92+ functions)
+│   ├── api.ts              # Tauri API bindings (112 exported invoke wrappers)
 │   ├── store.ts            # Zustand state management
 │   ├── types.ts            # TypeScript types (95+ interfaces)
 │   └── App.tsx             # Main app + routing + Ollama health polling
 ├── src-tauri/              # Rust backend
 │   ├── src/
-│   │   ├── lib.rs          # Tauri commands (92 total: 89 previous + 3 DJ mode)
+│   │   ├── lib.rs          # Tauri commands (113 registered handlers)
 │   │   ├── db.rs           # SQLite operations (46+ methods)
 │   │   ├── ytdlp.rs        # yt-dlp wrapper
 │   │   ├── server.rs       # HTTP streaming (Axum, port 3456)
