@@ -11,7 +11,7 @@ Rules:
 
 ```
 node --version          # expect v22.x
-yt-dlp --version        # expect a version string; needed for runtime features
+yt-dlp --version        # PASS only if parsed date version is >= 2026.08.19; nightly suffixes are allowed
 git branch --show-current
 git status --short      # know what's dirty before you start
 ```
@@ -38,14 +38,19 @@ npm run build           # PASS = "built in Ns", dist/ produced, exit 0
 
 ## Level 3 — Rust (~2–10 min) — REQUIRED for any src-tauri change
 
+Tauri's `generate_context!()` requires the configured `dist/` directory during Rust
+compilation. Therefore Level 3 includes a frontend build prerequisite so it also works from a
+fresh checkout or after `dist/` was cleaned.
+
 ```
+npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
 ```
 
-PASS requires all four commands to complete successfully. Record exact exit codes, Rust test
+PASS requires the frontend prerequisite plus all four Rust commands to complete successfully. Record exact exit codes, Rust test
 counts, ignored tests, and Clippy warnings. On 2026-09-19 the normal PowerShell environment
 found Visual Studio Build Tools 18 / MSVC and Rust 1.94.1 and completed these Rust gates.
 If another shell fails before compilation, diagnose the MSVC/Windows SDK environment before
