@@ -1,5 +1,7 @@
 # RECOVERY_PLAN — restoring ytm-free to a fully buildable, verifiable state
 
+> **Privacy remediation note (2026-09-19):** historical sections below that mention repo-local `Spotify/` CSV fixtures describe the old repository state. Personal Spotify exports are being removed from the current tree and `Spotify/` is local-only/ignored. New verification must use synthetic or temporary CSV fixtures. Historical Git objects remain until the separately controlled history-rewrite phase is completed.
+
 Written 2026-07-06 from verified evidence (see PROJECT_STATE.md). Steps are ordered by risk reduction: each step unblocks the ones after it. Do them in order; record every result in an evidence ledger (docs/EVIDENCE_LEDGER_TEMPLATE.md).
 
 ## Step 1 — Repair the Rust toolchain (blocks everything native)

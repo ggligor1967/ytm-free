@@ -39,6 +39,9 @@ yarn-error.log*
 # Test coverage
 coverage/
 
+# Personal Spotify / Exportify imports (local-only; never commit)
+Spotify/
+
 # Build logs
 scripts/build_output*.txt
 scripts/dump_vcvars.bat

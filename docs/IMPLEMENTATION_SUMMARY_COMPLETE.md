@@ -285,8 +285,7 @@ ytm-free/
 │   ├── FINAL_STATUS_97_FUNCTIONS_COMPLETE.md
 │   └── (test plans)
 │
-└── Spotify/
-    └── (CSV export samples)
+└── (personal Spotify CSV imports are local-only and intentionally not tracked)
 ```
 
 ---
