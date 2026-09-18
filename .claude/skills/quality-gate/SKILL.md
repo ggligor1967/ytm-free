@@ -22,7 +22,7 @@ The historical LibraryView 1000-tracks timeout has been flaky under load; if it 
 ## Gate B — any Rust (src-tauri) change
 
 ```
-cargo fmt --check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
