@@ -40,5 +40,5 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features #
 ## Style
 
 - Conventional-commit style messages, imperative, scope prefixes as in `git log` (`fix(frontend): …`, `feat: Faza N — …`).
-- `src-tauri/src/lib.rs` is 6,931 lines with 112 registered logical Tauri commands and 113 `#[tauri::command]` annotations because `get_semantic_status` has mutually exclusive cfg implementations — make surgical edits, don't reformat or reorder it.
+- `src-tauri/src/lib.rs` is 6,930 lines with 112 registered logical Tauri commands and 113 `#[tauri::command]` annotations because `get_semantic_status` has mutually exclusive cfg implementations — make surgical edits, don't reformat or reorder it.
 - Frontend: Zustand store in `src/store.ts`, API bindings in `src/api.ts`, types in `src/types.ts`. New Tauri commands need all three plus `lib.rs` registration.
