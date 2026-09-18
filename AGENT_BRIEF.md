@@ -53,7 +53,7 @@ If a shell bypasses the PowerShell bootstrap and the persisted user env fix, `ca
 
 | What | Where |
 |---|---|
-| Tauri command surface | `src-tauri/src/lib.rs` (6,931 lines; 112 registered logical handlers / 113 `#[tauri::command]` annotations because `get_semantic_status` has mutually exclusive cfg implementations) |
+| Tauri command surface | `src-tauri/src/lib.rs` (6,930 lines; 112 registered logical handlers / 113 `#[tauri::command]` annotations because `get_semantic_status` has mutually exclusive cfg implementations) |
 | SQLite layer | `src-tauri/src/db.rs` |
 | yt-dlp wrapper / stream server | `src-tauri/src/ytdlp.rs`, `src-tauri/src/server.rs` (port 3456) |
 | Ollama client + 72 prompts | `src-tauri/src/ollama/` |
