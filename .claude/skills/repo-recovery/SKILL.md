@@ -7,7 +7,7 @@ description: Use when a build/test command in ytm-free fails for reasons that lo
 
 Principle: **when a command that "should work" fails, first prove whether the environment or the code is at fault.** Check out `main` (or `git stash`) and re-run the failing command. Same failure on clean main = environment/known issue; different = your diff.
 
-## Known failure signatures (verified 2026-07-06)
+## Known failure signatures (historical signatures; operational facts reconciled 2026-09-19)
 
 ### 1. `LNK1181: cannot open input file 'dbghelp.lib'` on any cargo build
 - **Cause (verified):** partial Windows SDK 10.0.28000.0 (`Lib\10.0.28000.0\um\x64` has ~115 libs, no dbghelp.lib; 10.0.26100.0 has 481 incl. dbghelp.lib). MSVC picks the newest SDK.
@@ -31,12 +31,12 @@ Principle: **when a command that "should work" fails, first prove whether the en
 - `npm run dev` already runs `scripts/cleanup-ports.mjs` first. If ports are still stuck, run `npm run cleanup` alone, then retry.
 
 ### 4. Working on / PRing against the wrong branch
-- Symptom: fresh clone or `gh pr create` defaults to `phase-2-frontend-bugs`.
-- Cause: GitHub default branch is stale (RECOVERY_PLAN.md Step 4.1). Real trunk = `main`.
-- Fix for your session: `git checkout main`, base branches on main, pass `--base main` to `gh pr create`.
+- Canonical trunk and GitHub default branch are `main` (confirmed post-PR #26: `origin/HEAD -> origin/main`).
+- If a stale local clone points elsewhere, run `git fetch origin`, switch to `main`, and confirm `origin/HEAD` before branching.
+- Continue to pass `--base main` explicitly for PRs when deterministic tooling behavior matters.
 
 ### 5. Runtime: search returns nothing / streaming fails
-- Check `yt-dlp --version` (must exist in PATH; 2026.02.04 known-good). Update with `yt-dlp -U`.
+- Check `yt-dlp --version` (must exist in PATH and be **2026.08.19 or newer**; the application now enforces this minimum). Update with `yt-dlp -U` or the package-manager equivalent.
 - Check stream server: `curl http://localhost:3456/health` while the app runs.
 - Ollama features degrade gracefully when Ollama is down — a dead brain icon is not a bug in your diff.
 
