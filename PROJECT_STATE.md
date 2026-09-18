@@ -214,9 +214,9 @@ Broader AI/Ollama surfaces remain unverified. Step-6E.1 remains DB-cache/status-
 
 | Doc | Stale claim | Reality |
 | --- | --- | --- |
-| `docs/FINAL_STATUS_97_FUNCTIONS_COMPLETE.md` (2026-02-14) | "Build Status: ✅ Production-Ready" | A production Tauri build and narrow isolated release/installer smokes were later verified, but the complete end-to-end user flow and production-ready status remain unverified. |
-| `docs/IMPLEMENTATION_SUMMARY_COMPLETE.md` (2026-02-14) | "Production-Ready" | A production Tauri build and narrow isolated release/installer smokes were later verified, but the complete end-to-end user flow and production-ready status remain unverified. |
-| `docs/CHANGELOG.md` (2026-02-14) | "Status: Production-Ready ✅" | A production Tauri build and narrow isolated release/installer smokes were later verified, but the complete end-to-end user flow and production-ready status remain unverified. |
+| `docs/FINAL_STATUS_97_FUNCTIONS_COMPLETE.md` (2026-02-14) | "Build Status: ✅ Production-Ready" | The exact tagged `v1.0.0` release later gained full-flow runtime proof, but this historical document's blanket "Production-Ready" label is not accepted as evidence for later repository states; post-PR #26 current-main full E2E is not rerun. |
+| `docs/IMPLEMENTATION_SUMMARY_COMPLETE.md` (2026-02-14) | "Production-Ready" | The exact tagged `v1.0.0` release later gained full-flow runtime proof, but this historical document's blanket "Production-Ready" label is not accepted as evidence for later repository states; post-PR #26 current-main full E2E is not rerun. |
+| `docs/CHANGELOG.md` (2026-02-14) | "Status: Production-Ready ✅" | The exact tagged `v1.0.0` release later gained full-flow runtime proof, but this historical document's blanket "Production-Ready" label is not accepted as evidence for later repository states; post-PR #26 current-main full E2E is not rerun. |
 | `.github/agents/GaborAI.agent.md` | — | Unfilled template, no content |
 
 `docs/ROADMAP_STATUS.md` (2026-04-30, in Romanian) is the most honest status doc and matches command evidence.
