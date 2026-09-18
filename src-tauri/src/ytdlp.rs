@@ -11,6 +11,8 @@ use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+const MIN_SUPPORTED_YTDLP_VERSION: (u32, u32, u32) = (2026, 8, 19);
+
 #[derive(Error, Debug)]
 pub enum YtdlpError {
     #[error("yt-dlp not found. Please install yt-dlp: https://github.com/yt-dlp/yt-dlp")]
@@ -23,6 +25,14 @@ pub enum YtdlpError {
     IoError(#[from] std::io::Error),
     #[error("Download failed: {0}")]
     DownloadError(String),
+    #[error(
+        "Unable to verify yt-dlp compatibility because its version output was not recognized."
+    )]
+    InvalidVersionOutput,
+    #[error("Unable to verify yt-dlp compatibility because the version check failed.")]
+    VersionCheckFailed,
+    #[error("yt-dlp {minimum} or newer is required. Found {found}. Please update yt-dlp.")]
+    UnsupportedVersion { minimum: String, found: String },
 }
 
 /// Check if yt-dlp is installed and return version
@@ -78,18 +88,52 @@ impl SearchCache {
 static SEARCH_CACHE: once_cell::sync::Lazy<Arc<RwLock<SearchCache>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(SearchCache::new())));
 
+fn parse_ytdlp_version(version_output: &str) -> Option<(u32, u32, u32)> {
+    let mut components = version_output.trim().split('.');
+    let year = components.next()?.parse().ok()?;
+    let month = components.next()?.parse().ok()?;
+    let day = components.next()?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    Some((year, month, day))
+}
+
+fn format_ytdlp_version((year, month, day): (u32, u32, u32)) -> String {
+    format!("{year:04}.{month:02}.{day:02}")
+}
+
 pub async fn check_installation() -> Result<String, YtdlpError> {
     let output = Command::new("yt-dlp")
         .arg("--version")
         .output()
         .await
-        .map_err(|_| YtdlpError::NotInstalled)?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                YtdlpError::NotInstalled
+            } else {
+                YtdlpError::VersionCheckFailed
+            }
+        })?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(YtdlpError::NotInstalled)
+    if !output.status.success() {
+        return Err(YtdlpError::VersionCheckFailed);
     }
+
+    let version_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let installed_version =
+        parse_ytdlp_version(&version_output).ok_or(YtdlpError::InvalidVersionOutput)?;
+
+    if installed_version < MIN_SUPPORTED_YTDLP_VERSION {
+        return Err(YtdlpError::UnsupportedVersion {
+            minimum: format_ytdlp_version(MIN_SUPPORTED_YTDLP_VERSION),
+            found: format_ytdlp_version(installed_version),
+        });
+    }
+
+    Ok(version_output)
 }
 
 /// Search YouTube for videos
@@ -529,6 +573,81 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     }
 
     Ok(filepath)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn is_supported(version_output: &str) -> Option<bool> {
+        parse_ytdlp_version(version_output).map(|version| version >= MIN_SUPPORTED_YTDLP_VERSION)
+    }
+
+    #[test]
+    fn exact_minimum_version_is_supported() {
+        assert_eq!(is_supported("2026.08.19"), Some(true));
+    }
+
+    #[test]
+    fn newer_stable_version_is_supported() {
+        assert_eq!(is_supported("2026.09.01"), Some(true));
+    }
+
+    #[test]
+    fn nightly_version_is_supported() {
+        assert_eq!(is_supported("2026.09.16.232951"), Some(true));
+    }
+
+    #[test]
+    fn nightly_dev_suffix_is_supported() {
+        assert_eq!(is_supported("2026.09.16.232951.dev0"), Some(true));
+    }
+
+    #[test]
+    fn immediately_older_version_is_unsupported() {
+        assert_eq!(is_supported("2026.08.18"), Some(false));
+    }
+
+    #[test]
+    fn known_failing_version_is_unsupported() {
+        assert_eq!(is_supported("2026.07.04"), Some(false));
+    }
+
+    #[test]
+    fn previous_year_version_is_unsupported() {
+        assert_eq!(is_supported("2025.12.31"), Some(false));
+    }
+
+    #[test]
+    fn malformed_version_is_rejected() {
+        assert_eq!(is_supported("garbage"), None);
+    }
+
+    #[test]
+    fn incomplete_version_is_rejected() {
+        assert_eq!(is_supported("2026.08"), None);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        assert_eq!(is_supported(" \r\n2026.08.19\r\n "), Some(true));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a controlled yt-dlp 2026.07.04 executable on PATH"]
+    async fn controlled_path_rejects_known_failing_version() {
+        let error = check_installation().await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "yt-dlp 2026.08.19 or newer is required. Found 2026.07.04. Please update yt-dlp."
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a controlled yt-dlp 2026.08.19 executable on PATH"]
+    async fn controlled_path_accepts_minimum_supported_version() {
+        assert_eq!(check_installation().await.unwrap(), "2026.08.19");
+    }
 }
 
 #[cfg(test)]

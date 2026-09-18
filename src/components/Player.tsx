@@ -24,6 +24,17 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 
+function getPlaybackErrorName(error: unknown): string | null {
+  const isError = error instanceof Error;
+  const isDomException =
+    typeof DOMException !== "undefined" && error instanceof DOMException;
+  return isError || isDomException ? error.name : null;
+}
+
+function isPlaybackAbortError(error: unknown): boolean {
+  return getPlaybackErrorName(error) === "AbortError";
+}
+
 export function Player() {
   const {
     currentTrack,
@@ -116,16 +127,32 @@ export function Player() {
     loadAudio();
   }, [videoId]);
 
+  const handlePlaybackFailure = useCallback((error?: unknown) => {
+    if (error) {
+      console.error("[Player] Audio playback failed:", error);
+    }
+    setIsPlaying(false);
+  }, [setIsPlaying]);
+
+  const handlePlayRejection = useCallback((error: unknown) => {
+    if (isPlaybackAbortError(error)) return;
+
+    handlePlaybackFailure({
+      type: "play-rejection",
+      errorName: getPlaybackErrorName(error),
+    });
+  }, [handlePlaybackFailure]);
+
   // Handle play/pause
   useEffect(() => {
     if (!audioRef.current || !audioUrl) return;
 
     if (isPlaying) {
-      audioRef.current.play().catch(console.error);
+      audioRef.current.play().catch(handlePlayRejection);
     } else {
       audioRef.current.pause();
     }
-  }, [isPlaying, audioUrl]);
+  }, [isPlaying, audioUrl, handlePlayRejection]);
 
   // Handle volume
   useEffect(() => {
@@ -545,6 +572,10 @@ export function Player() {
         onEnded={handleEnded}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
+        onError={(event) => handlePlaybackFailure({
+          type: event.type,
+          mediaErrorCode: event.currentTarget.error?.code ?? null,
+        })}
       />
 
       {/* Track Info */}

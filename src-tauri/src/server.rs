@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use futures_util::TryStreamExt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
@@ -38,6 +39,8 @@ use crate::ytdlp;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const UPSTREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+const AUDIO_URL_CACHE_TTL: Duration = Duration::from_secs(300);
+const AUDIO_RANGE_CHUNK_SIZE_BYTES: u64 = 1_048_576;
 
 /// Injectable timeout configuration. Production code always uses
 /// [`ProxyTimeouts::production`]; tests inject short values so resilience
@@ -203,48 +206,173 @@ async fn stream_handler(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
 
-    // Check cache first
-    let cached_url = {
-        let cache_read = state.audio_cache.read().await;
-        cache_read.get(&video_id).and_then(|cached| {
-            (cached.expires_at > std::time::Instant::now()).then(|| cached.url.clone())
-        })
+    stream_audio_with(
+        &state,
+        &video_id,
+        range,
+        |video_id| async move {
+            ytdlp::get_audio_url(&video_id)
+                .await
+                .map_err(|_| "Audio URL resolution failed".to_string())
+        },
+        |client, upstream_url, range, response_timeout| async move {
+            proxy_audio(&client, &upstream_url, range.as_deref(), response_timeout).await
+        },
+    )
+    .await
+}
+
+fn normalize_upstream_range(range: Option<&str>) -> Option<String> {
+    let range = range?;
+    let Some(start_text) = range
+        .strip_prefix("bytes=")
+        .and_then(|value| value.strip_suffix('-'))
+    else {
+        return Some(range.to_string());
     };
 
-    let url = match cached_url {
-        Some(url) => url,
-        None => match ytdlp::get_audio_url(&video_id).await {
-            Ok(url) => {
-                let cached = CachedUrl {
-                    url: url.clone(),
-                    expires_at: std::time::Instant::now() + std::time::Duration::from_secs(300),
-                };
-                let mut cache_write = state.audio_cache.write().await;
-                cache_write.insert(video_id, cached);
-                url
-            }
-            Err(e) => {
-                error!("Failed to get audio URL for {}: {}", video_id, e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to get audio: {}", e),
-                )
-                    .into_response();
-            }
+    if start_text.is_empty() || !start_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(range.to_string());
+    }
+
+    let Ok(start) = start_text.parse::<u64>() else {
+        return Some(range.to_string());
+    };
+    let end = start.saturating_add(AUDIO_RANGE_CHUNK_SIZE_BYTES - 1);
+    Some(format!("bytes={start}-{end}"))
+}
+
+async fn stream_audio_with<ResolveUrl, ResolveFuture, ProxyCandidate, ProxyFuture>(
+    state: &ServerAppState,
+    video_id: &str,
+    range: Option<String>,
+    mut resolve_url: ResolveUrl,
+    mut proxy_candidate: ProxyCandidate,
+) -> Response
+where
+    ResolveUrl: FnMut(String) -> ResolveFuture,
+    ResolveFuture: Future<Output = Result<String, String>>,
+    ProxyCandidate: FnMut(reqwest::Client, String, Option<String>, Duration) -> ProxyFuture,
+    ProxyFuture: Future<Output = Result<Response, ProxyError>>,
+{
+    let upstream_range = normalize_upstream_range(range.as_deref());
+    let cached_candidate = cached_audio_candidate(&state.audio_cache, video_id).await;
+    let (first_candidate, first_candidate_was_cached) = match cached_candidate {
+        Some(candidate) => (candidate, true),
+        None => match resolve_url(video_id.to_string()).await {
+            Ok(candidate) => (candidate, false),
+            Err(_) => return audio_url_resolution_error(video_id),
         },
     };
 
-    match proxy_audio(
-        &state.http_client,
-        &url,
-        range.as_deref(),
+    match proxy_candidate(
+        state.http_client.clone(),
+        first_candidate.clone(),
+        upstream_range.clone(),
         ProxyTimeouts::production().response,
     )
     .await
     {
-        Ok(response) => response,
-        Err(proxy_error) => proxy_error.into_response(),
+        Ok(response) => {
+            if !first_candidate_was_cached {
+                cache_healthy_audio_candidate(&state.audio_cache, video_id, first_candidate).await;
+            }
+            response
+        }
+        Err(error) if invalidates_audio_candidate(&error) => {
+            invalidate_cached_audio_candidate(&state.audio_cache, video_id, &first_candidate).await;
+
+            let retry_candidate = match resolve_url(video_id.to_string()).await {
+                Ok(candidate) => candidate,
+                Err(_) => return audio_url_resolution_error(video_id),
+            };
+
+            match proxy_candidate(
+                state.http_client.clone(),
+                retry_candidate.clone(),
+                upstream_range,
+                ProxyTimeouts::production().response,
+            )
+            .await
+            {
+                Ok(response) => {
+                    cache_healthy_audio_candidate(&state.audio_cache, video_id, retry_candidate)
+                        .await;
+                    response
+                }
+                Err(retry_error) => {
+                    if invalidates_audio_candidate(&retry_error) {
+                        invalidate_cached_audio_candidate(
+                            &state.audio_cache,
+                            video_id,
+                            &retry_candidate,
+                        )
+                        .await;
+                    }
+                    retry_error.into_response()
+                }
+            }
+        }
+        Err(error) => error.into_response(),
     }
+}
+
+async fn cached_audio_candidate(
+    cache: &RwLock<std::collections::HashMap<String, CachedUrl>>,
+    video_id: &str,
+) -> Option<String> {
+    let mut cache_write = cache.write().await;
+    match cache_write.get(video_id) {
+        Some(cached) if cached.expires_at > std::time::Instant::now() => Some(cached.url.clone()),
+        Some(_) => {
+            cache_write.remove(video_id);
+            None
+        }
+        None => None,
+    }
+}
+
+async fn cache_healthy_audio_candidate(
+    cache: &RwLock<std::collections::HashMap<String, CachedUrl>>,
+    video_id: &str,
+    url: String,
+) {
+    let cached = CachedUrl {
+        url,
+        expires_at: std::time::Instant::now() + AUDIO_URL_CACHE_TTL,
+    };
+    cache.write().await.insert(video_id.to_string(), cached);
+}
+
+async fn invalidate_cached_audio_candidate(
+    cache: &RwLock<std::collections::HashMap<String, CachedUrl>>,
+    video_id: &str,
+    failed_url: &str,
+) {
+    let mut cache_write = cache.write().await;
+    if cache_write
+        .get(video_id)
+        .is_some_and(|cached| cached.url == failed_url)
+    {
+        cache_write.remove(video_id);
+    }
+}
+
+fn invalidates_audio_candidate(error: &ProxyError) -> bool {
+    matches!(
+        error,
+        ProxyError::UpstreamStatus(status)
+            if *status == StatusCode::FORBIDDEN || *status == StatusCode::GONE
+    )
+}
+
+fn audio_url_resolution_error(video_id: &str) -> Response {
+    error!("Failed to get audio URL for {}", video_id);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to resolve upstream audio source",
+    )
+        .into_response()
 }
 
 /// Errors from the audio proxy path. Variants intentionally carry no
@@ -577,6 +705,8 @@ async fn tts_file_handler(Path(filename): Path<String>) -> Response {
 mod proxy_tests {
     use super::*;
     use axum::http::HeaderValue;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
     #[derive(Clone)]
@@ -623,6 +753,159 @@ mod proxy_tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{}/audio", addr), join)
+    }
+
+    fn test_server_state() -> ServerAppState {
+        ServerAppState {
+            audio_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            video_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    fn partial_content_response() -> Response {
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, "audio/webm")
+            .header(header::CONTENT_RANGE, "bytes 0-99/1000")
+            .header(header::CONTENT_LENGTH, "100")
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(axum::body::Body::from(vec![0; 100]))
+            .expect("static partial-content response should build")
+    }
+
+    #[test]
+    fn no_range_remains_absent() {
+        assert_eq!(normalize_upstream_range(None), None);
+    }
+
+    #[test]
+    fn bounded_single_range_is_unchanged() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=0-1023")).as_deref(),
+            Some("bytes=0-1023")
+        );
+    }
+
+    #[test]
+    fn open_ended_range_is_bounded_to_one_mib() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=0-")).as_deref(),
+            Some("bytes=0-1048575")
+        );
+    }
+
+    #[test]
+    fn nonzero_open_ended_range_is_bounded_to_one_mib() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=1048576-")).as_deref(),
+            Some("bytes=1048576-2097151")
+        );
+    }
+
+    #[test]
+    fn suffix_range_is_unchanged() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=-500")).as_deref(),
+            Some("bytes=-500")
+        );
+    }
+
+    #[test]
+    fn multi_range_is_unchanged() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=0-10,20-30")).as_deref(),
+            Some("bytes=0-10,20-30")
+        );
+    }
+
+    #[test]
+    fn open_ended_range_end_saturates_without_overflow() {
+        assert_eq!(
+            normalize_upstream_range(Some("bytes=18446744073709551615-")).as_deref(),
+            Some("bytes=18446744073709551615-18446744073709551615")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_path_normalizes_open_ended_range_before_proxying() {
+        let state = test_server_state();
+        let received_ranges = Arc::new(StdMutex::new(Vec::new()));
+
+        let response = stream_audio_with(
+            &state,
+            "open-ended-range-video",
+            Some("bytes=0-".to_string()),
+            |_| async { Ok("https://media.example/audio".to_string()) },
+            {
+                let received_ranges = received_ranges.clone();
+                move |_, _, range, _| {
+                    received_ranges.lock().unwrap().push(range);
+                    async { Ok(partial_content_response()) }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            *received_ranges.lock().unwrap(),
+            vec![Some("bytes=0-1048575".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_reuses_normalized_range_for_both_candidates() {
+        let state = test_server_state();
+        let candidates = Arc::new(StdMutex::new(VecDeque::from([
+            "https://media.example/first".to_string(),
+            "https://media.example/second".to_string(),
+        ])));
+        let proxy_attempts = Arc::new(AtomicUsize::new(0));
+        let received_ranges = Arc::new(StdMutex::new(Vec::new()));
+
+        let response = stream_audio_with(
+            &state,
+            "retry-range-video",
+            Some("bytes=0-".to_string()),
+            {
+                let candidates = candidates.clone();
+                move |_| {
+                    let candidate = candidates
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("retry must stop after the second candidate");
+                    async move { Ok(candidate) }
+                }
+            },
+            {
+                let proxy_attempts = proxy_attempts.clone();
+                let received_ranges = received_ranges.clone();
+                move |_, _, range, _| {
+                    received_ranges.lock().unwrap().push(range);
+                    let attempt = proxy_attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            Err(ProxyError::UpstreamStatus(StatusCode::FORBIDDEN))
+                        } else {
+                            Ok(partial_content_response())
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(proxy_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *received_ranges.lock().unwrap(),
+            vec![
+                Some("bytes=0-1048575".to_string()),
+                Some("bytes=0-1048575".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -733,7 +1016,7 @@ mod proxy_tests {
     }
 
     #[tokio::test]
-    async fn maps_upstream_failure_status_to_a_proxy_error_not_a_passthrough() {
+    async fn maps_upstream_failure_status_and_recovers_bounded_candidates() {
         let received_range = Arc::new(StdMutex::new(None));
         let config = TestUpstreamConfig {
             status: StatusCode::FORBIDDEN,
@@ -747,6 +1030,268 @@ mod proxy_tests {
 
         let err = result.expect_err("upstream 403 must not be treated as success");
         assert_eq!(err, ProxyError::UpstreamStatus(StatusCode::FORBIDDEN));
+
+        verify_healthy_cached_candidate_preserves_range_without_resolution().await;
+        verify_stale_cached_403_and_410_candidates_are_re_resolved_once().await;
+        verify_initial_fresh_403_candidate_is_not_cached_and_is_re_resolved_once().await;
+        verify_second_stale_candidate_failure_is_bounded_sanitized_and_not_cached().await;
+    }
+
+    async fn verify_healthy_cached_candidate_preserves_range_without_resolution() {
+        let state = test_server_state();
+        let cached_url = "https://media.example/cached?sig=CACHED".to_string();
+        cache_healthy_audio_candidate(&state.audio_cache, "cached-video", cached_url.clone()).await;
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let proxy_attempts = Arc::new(AtomicUsize::new(0));
+        let received_range = Arc::new(StdMutex::new(None));
+
+        let response = stream_audio_with(
+            &state,
+            "cached-video",
+            Some("bytes=0-99".to_string()),
+            {
+                let resolver_calls = resolver_calls.clone();
+                move |_| {
+                    resolver_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Err("resolver must not run".to_string()) }
+                }
+            },
+            {
+                let proxy_attempts = proxy_attempts.clone();
+                let received_range = received_range.clone();
+                move |_, upstream_url, range, _| {
+                    proxy_attempts.fetch_add(1, Ordering::SeqCst);
+                    *received_range.lock().unwrap() = range;
+                    let cached_url = cached_url.clone();
+                    async move {
+                        assert_eq!(upstream_url, cached_url);
+                        Ok(partial_content_response())
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 0-99/1000"
+        );
+        assert_eq!(
+            received_range.lock().unwrap().as_deref(),
+            Some("bytes=0-99")
+        );
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(proxy_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    async fn verify_stale_cached_403_and_410_candidates_are_re_resolved_once() {
+        for stale_status in [StatusCode::FORBIDDEN, StatusCode::GONE] {
+            let state = test_server_state();
+            let stale_url = format!("https://media.example/stale?status={stale_status}");
+            let fresh_url = format!("https://media.example/fresh?status={stale_status}");
+            cache_healthy_audio_candidate(
+                &state.audio_cache,
+                "stale-cached-video",
+                stale_url.clone(),
+            )
+            .await;
+            let resolver_calls = Arc::new(AtomicUsize::new(0));
+            let attempted_urls = Arc::new(StdMutex::new(Vec::new()));
+
+            let response = stream_audio_with(
+                &state,
+                "stale-cached-video",
+                None,
+                {
+                    let resolver_calls = resolver_calls.clone();
+                    let fresh_url = fresh_url.clone();
+                    move |_| {
+                        resolver_calls.fetch_add(1, Ordering::SeqCst);
+                        let fresh_url = fresh_url.clone();
+                        async move { Ok(fresh_url) }
+                    }
+                },
+                {
+                    let attempted_urls = attempted_urls.clone();
+                    let stale_url = stale_url.clone();
+                    let fresh_url = fresh_url.clone();
+                    move |_, upstream_url, _, _| {
+                        attempted_urls.lock().unwrap().push(upstream_url.clone());
+                        let stale_url = stale_url.clone();
+                        let fresh_url = fresh_url.clone();
+                        async move {
+                            if upstream_url == stale_url {
+                                Err(ProxyError::UpstreamStatus(stale_status))
+                            } else {
+                                assert_eq!(upstream_url, fresh_url);
+                                Ok(partial_content_response())
+                            }
+                        }
+                    }
+                },
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *attempted_urls.lock().unwrap(),
+                vec![stale_url.clone(), fresh_url.clone()]
+            );
+            let cache = state.audio_cache.read().await;
+            assert_eq!(
+                cache.get("stale-cached-video").map(|entry| &entry.url),
+                Some(&fresh_url)
+            );
+            assert_ne!(
+                cache.get("stale-cached-video").map(|entry| &entry.url),
+                Some(&stale_url)
+            );
+        }
+    }
+
+    async fn verify_initial_fresh_403_candidate_is_not_cached_and_is_re_resolved_once() {
+        let state = test_server_state();
+        let first_url = "https://media.example/first?sig=FIRST".to_string();
+        let second_url = "https://media.example/second?sig=SECOND".to_string();
+        let candidates = Arc::new(StdMutex::new(VecDeque::from([
+            first_url.clone(),
+            second_url.clone(),
+        ])));
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let cache_seen_by_proxy = state.audio_cache.clone();
+        let attempted_urls = Arc::new(StdMutex::new(Vec::new()));
+
+        let response = stream_audio_with(
+            &state,
+            "fresh-video",
+            None,
+            {
+                let candidates = candidates.clone();
+                let resolver_calls = resolver_calls.clone();
+                move |_| {
+                    resolver_calls.fetch_add(1, Ordering::SeqCst);
+                    let candidate = candidates
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("only two resolutions are permitted");
+                    async move { Ok(candidate) }
+                }
+            },
+            {
+                let cache = cache_seen_by_proxy.clone();
+                let attempted_urls = attempted_urls.clone();
+                let first_url = first_url.clone();
+                let second_url = second_url.clone();
+                move |_, upstream_url, _, _| {
+                    let cache = cache.clone();
+                    let attempted_urls = attempted_urls.clone();
+                    let first_url = first_url.clone();
+                    let second_url = second_url.clone();
+                    async move {
+                        assert!(
+                            cache.read().await.get("fresh-video").is_none(),
+                            "a candidate must not enter the healthy cache before a 200/206 response"
+                        );
+                        attempted_urls.lock().unwrap().push(upstream_url.clone());
+                        if upstream_url == first_url {
+                            Err(ProxyError::UpstreamStatus(StatusCode::FORBIDDEN))
+                        } else {
+                            assert_eq!(upstream_url, second_url);
+                            Ok(partial_content_response())
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *attempted_urls.lock().unwrap(),
+            vec![first_url.clone(), second_url.clone()]
+        );
+        assert_eq!(candidates.lock().unwrap().len(), 0);
+        let cache = state.audio_cache.read().await;
+        assert_eq!(
+            cache.get("fresh-video").map(|entry| &entry.url),
+            Some(&second_url)
+        );
+        assert_ne!(
+            cache.get("fresh-video").map(|entry| &entry.url),
+            Some(&first_url)
+        );
+    }
+
+    async fn verify_second_stale_candidate_failure_is_bounded_sanitized_and_not_cached() {
+        let state = test_server_state();
+        let first_marker = "SECRET_FIRST_SIGNED_QUERY";
+        let second_marker = "SECRET_SECOND_SIGNED_QUERY";
+        let candidates = Arc::new(StdMutex::new(VecDeque::from([
+            format!("https://media.example/first?sig={first_marker}"),
+            format!("https://media.example/second?sig={second_marker}"),
+        ])));
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let attempted_urls = Arc::new(StdMutex::new(Vec::new()));
+
+        let response = stream_audio_with(
+            &state,
+            "bounded-failure-video",
+            None,
+            {
+                let candidates = candidates.clone();
+                let resolver_calls = resolver_calls.clone();
+                move |_| {
+                    resolver_calls.fetch_add(1, Ordering::SeqCst);
+                    let candidate = candidates
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("retry must stop after the second candidate");
+                    async move { Ok(candidate) }
+                }
+            },
+            {
+                let attempted_urls = attempted_urls.clone();
+                move |_, upstream_url, _, _| {
+                    attempted_urls.lock().unwrap().push(upstream_url.clone());
+                    async move {
+                        if upstream_url.contains(first_marker) {
+                            Err(ProxyError::UpstreamStatus(StatusCode::FORBIDDEN))
+                        } else {
+                            assert!(upstream_url.contains(second_marker));
+                            Err(ProxyError::UpstreamStatus(StatusCode::GONE))
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(attempted_urls.lock().unwrap().len(), 2);
+        assert_eq!(candidates.lock().unwrap().len(), 0);
+        assert!(
+            state
+                .audio_cache
+                .read()
+                .await
+                .get("bounded-failure-video")
+                .is_none(),
+            "neither failed candidate may poison the healthy cache"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("sanitized proxy failure body should be readable");
+        let body_text = String::from_utf8(body.to_vec()).expect("failure body should be UTF-8");
+        assert_eq!(body_text, "Upstream audio source returned an error");
+        assert!(!body_text.contains(first_marker));
+        assert!(!body_text.contains(second_marker));
+        assert!(!body_text.contains("sig="));
     }
 
     #[tokio::test]
@@ -787,7 +1332,7 @@ mod proxy_tests {
     // behavior can be triggered deterministically. All local, synthetic,
     // 127.0.0.1-only; no network/YouTube/googlevideo access.
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Reads and discards an incoming HTTP request (up to the blank line
