@@ -28,7 +28,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features #
 3. **Flaky test**: `LibraryView.test.tsx` › "handles 1000 tracks…" has historically timed out under full-suite load but passed in the 2026-09-19 suite. Re-run it in isolation before attributing a future timeout to a patch.
 4. `src-tauri/Cargo.lock` is tracked and not ignored; the former reproducibility debt is closed.
 5. Docs and commit messages are partly Romanian ("Faza N" = phase N). `docs/ROADMAP_STATUS.md` is Romanian and is the most accurate roadmap.
-6. `.omx/` is agent-session state. `Spotify/` is local-only personal import data and is gitignored; never commit personal CSV exports. Tests and harnesses must use synthetic/temp CSV fixtures.
+6. `.omx/` is agent-session state. `Spotify/` is local-only personal import data and is gitignored; never commit personal CSV exports. Tests and harnesses must use synthetic/temp CSV fixtures. Final owner decision (2026-09-19): historical Spotify CSV objects are accepted as residual history; do not start a repository-history purge unless the owner explicitly reverses this decision.
 
 ## Workflow requirements
 
