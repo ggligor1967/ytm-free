@@ -73,6 +73,66 @@ describe("TrackCard - Download button", () => {
     });
   });
 
+  it("pauses the current track without invoking parent selection", () => {
+    const onPlay = vi.fn();
+    const setIsPlaying = vi.fn();
+    mockUseAppStore.mockReturnValue({
+      currentTrack: searchResult,
+      isPlaying: true,
+      setCurrentTrack: vi.fn(),
+      setIsPlaying,
+      addToQueue: vi.fn(),
+      setShowAddToPlaylist: vi.fn(),
+      settings: null,
+    });
+
+    render(<TrackCard track={searchResult} onPlay={onPlay} />);
+    fireEvent.click(screen.getByTestId("icon-pause").closest("button")!);
+
+    expect(setIsPlaying).toHaveBeenCalledWith(false);
+    expect(onPlay).not.toHaveBeenCalled();
+  });
+
+  it("resumes the current track without invoking parent selection", () => {
+    const onPlay = vi.fn();
+    const setIsPlaying = vi.fn();
+    mockUseAppStore.mockReturnValue({
+      currentTrack: searchResult,
+      isPlaying: false,
+      setCurrentTrack: vi.fn(),
+      setIsPlaying,
+      addToQueue: vi.fn(),
+      setShowAddToPlaylist: vi.fn(),
+      settings: null,
+    });
+
+    render(<TrackCard track={searchResult} onPlay={onPlay} />);
+    fireEvent.click(screen.getByTestId("icon-play").closest("button")!);
+
+    expect(setIsPlaying).toHaveBeenCalledWith(true);
+    expect(onPlay).not.toHaveBeenCalled();
+  });
+
+  it("invokes parent selection for a different track", () => {
+    const onPlay = vi.fn();
+    const setIsPlaying = vi.fn();
+    mockUseAppStore.mockReturnValue({
+      currentTrack: trackWithVideoId,
+      isPlaying: true,
+      setCurrentTrack: vi.fn(),
+      setIsPlaying,
+      addToQueue: vi.fn(),
+      setShowAddToPlaylist: vi.fn(),
+      settings: null,
+    });
+
+    render(<TrackCard track={searchResult} onPlay={onPlay} />);
+    fireEvent.click(screen.getByTestId("icon-play").closest("button")!);
+
+    expect(onPlay).toHaveBeenCalledTimes(1);
+    expect(setIsPlaying).not.toHaveBeenCalled();
+  });
+
   it("calls downloadTrack with video_id for Track type", async () => {
     const mockDownloadTrack = vi.mocked(api.downloadTrack);
     mockDownloadTrack.mockResolvedValueOnce({

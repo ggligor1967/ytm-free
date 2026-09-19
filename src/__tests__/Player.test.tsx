@@ -24,6 +24,7 @@ describe("Player playback state", () => {
   let pauseMock: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(api.getStreamUrl).mockResolvedValue("http://localhost:3456/stream/video-123");
     playMock = vi
       .spyOn(HTMLMediaElement.prototype, "play")
@@ -36,6 +37,7 @@ describe("Player playback state", () => {
       isPlaying: true,
       progress: 0,
       duration: 0,
+      playbackRestartRequestId: 0,
       settings: null,
       favorites: [],
       queue: [],
@@ -168,6 +170,61 @@ describe("Player playback state", () => {
       "[Player] Audio playback failed:",
       expect.anything()
     );
+  });
+
+  it("restarts the current media element when Previous emits a restart request", async () => {
+    useAppStore.setState({
+      queue: [playerTrack],
+      queueIndex: 0,
+      currentTrack: playerTrack,
+      isPlaying: true,
+      progress: 4,
+    });
+
+    const { container } = render(<Player />);
+    const audio = container.querySelector("audio");
+    expect(audio).not.toBeNull();
+    await waitFor(() => expect(playMock).toHaveBeenCalledOnce());
+
+    Object.defineProperty(audio!, "currentTime", {
+      configurable: true,
+      writable: true,
+      value: 12,
+    });
+    const sourceBeforeRestart = audio!.getAttribute("src");
+
+    act(() => {
+      useAppStore.getState().playPrevious();
+    });
+
+    await waitFor(() => expect(audio!.currentTime).toBe(0));
+    expect(useAppStore.getState().currentTrack).toBe(playerTrack);
+    expect(useAppStore.getState().queueIndex).toBe(0);
+    expect(useAppStore.getState().isPlaying).toBe(true);
+    expect(audio!.getAttribute("src")).toBe(sourceBeforeRestart);
+    expect(api.getStreamUrl).toHaveBeenCalledTimes(1);
+
+    audio!.currentTime = 0.75;
+    fireEvent.timeUpdate(audio!);
+
+    expect(useAppStore.getState().progress).toBe(0.75);
+  });
+
+  it("keeps the main player button synchronized with media pause and play", async () => {
+    const { container } = render(<Player />);
+    const playbackButton = container.querySelector<HTMLButtonElement>("button.w-12.h-12");
+    expect(playbackButton).not.toBeNull();
+    await waitFor(() => expect(playMock).toHaveBeenCalledOnce());
+
+    fireEvent.click(playbackButton!);
+
+    await waitFor(() => expect(pauseMock).toHaveBeenCalledOnce());
+    expect(useAppStore.getState().isPlaying).toBe(false);
+
+    fireEvent.click(playbackButton!);
+
+    await waitFor(() => expect(playMock).toHaveBeenCalledTimes(2));
+    expect(useAppStore.getState().isPlaying).toBe(true);
   });
 });
 

@@ -65,10 +65,10 @@ export function TrackCard({ track, index, showIndex, onPlay, onRemoveFromPlaylis
       isPlaying,
       trackTitle: track.title,
     });
-    if (onPlay) {
-      onPlay();
-    } else if (isCurrentTrack) {
+    if (isCurrentTrack) {
       setIsPlaying(!isPlaying);
+    } else if (onPlay) {
+      onPlay();
     } else {
       console.log("[TrackCard] Setting current track and playing");
       setCurrentTrack(track);

@@ -27,6 +27,7 @@ interface AppState {
   setProgress: (progress: number) => void;
   duration: number;
   setDuration: (duration: number) => void;
+  playbackRestartRequestId: number;
   isShuffle: boolean;
   toggleShuffle: () => void;
   repeatMode: RepeatMode;
@@ -170,6 +171,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setProgress: (progress) => set({ progress }),
   duration: 0,
   setDuration: (duration) => set({ duration }),
+  playbackRestartRequestId: 0,
   isShuffle: false,
   toggleShuffle: () => set((state) => ({ isShuffle: !state.isShuffle })),
   repeatMode: "none",
@@ -226,7 +228,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     // If more than 3 seconds in, restart current track
     if (progress > 3) {
-      set({ progress: 0 });
+      set((state) => ({
+        progress: 0,
+        playbackRestartRequestId: state.playbackRestartRequestId + 1,
+      }));
       return;
     }
 
