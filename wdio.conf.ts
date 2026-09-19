@@ -103,6 +103,19 @@ const evidenceRoot = requireEnvironment("EVIDENCE_ROOT");
 const embeddedPort = parsePort(process.env.WDIO_EMBEDDED_PORT?.trim() || "4445", "WDIO_EMBEDDED_PORT");
 const appBinaryPath = path.resolve("src-tauri", "target", "debug", "ytm-free.exe");
 
+const optionalRuntimeEnvironment = Object.fromEntries(
+  [
+    "YTM_FREE_DOWNLOAD_DIR",
+    "YTM_FREE_SPOTIFY_DIR",
+    "WEBVIEW2_USER_DATA_FOLDER",
+    "TEMP",
+    "TMP",
+    "E1_RUNTIME_PHASE",
+  ]
+    .map((name) => [name, process.env[name]?.trim()] as const)
+    .filter((entry): entry is readonly [string, string] => Boolean(entry[1])),
+);
+
 process.env.TAURI_WEBDRIVER_PORT = String(embeddedPort);
 
 // The config is loaded again inside WDIO workers. Only the launcher may perform
@@ -133,6 +146,7 @@ const serviceOptions: TauriServiceOptions = {
     EVIDENCE_ROOT: evidenceRoot,
     WDIO_EMBEDDED_PORT: String(embeddedPort),
     TAURI_WEBDRIVER_PORT: String(embeddedPort),
+    ...optionalRuntimeEnvironment,
   },
 };
 

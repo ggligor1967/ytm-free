@@ -3,7 +3,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -518,6 +518,41 @@ fn resolve_download_dir(
         .join("YTM-Free"))
 }
 
+fn parse_existing_download_path(stdout: &[u8]) -> Result<String, YtdlpError> {
+    let structured_output = std::str::from_utf8(stdout).map_err(|error| {
+        YtdlpError::DownloadError(format!(
+            "Download completed but the final file path was not valid UTF-8 JSON: {error}"
+        ))
+    })?;
+    let structured_output = structured_output.trim();
+
+    if structured_output.is_empty() {
+        return Err(YtdlpError::DownloadError(
+            "Download completed but no final file path was returned".to_string(),
+        ));
+    }
+
+    let filepath: String = serde_json::from_str(structured_output).map_err(|error| {
+        YtdlpError::DownloadError(format!(
+            "Download completed but the final file path could not be parsed: {error}"
+        ))
+    })?;
+
+    if filepath.trim().is_empty() {
+        return Err(YtdlpError::DownloadError(
+            "Download completed but the final file path was empty".to_string(),
+        ));
+    }
+
+    if !Path::new(&filepath).is_file() {
+        return Err(YtdlpError::DownloadError(format!(
+            "Download completed but the reported final file does not exist: {filepath}"
+        )));
+    }
+
+    Ok(filepath)
+}
+
 /// Download audio to local file
 pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
@@ -549,7 +584,7 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
             "-o",
             &output_template,
             "--print",
-            "after_move:filepath",
+            "after_move:%(filepath)j",
             "--no-warnings",
             &url,
         ])
@@ -564,15 +599,7 @@ pub async fn download(video_id: &str) -> Result<String, YtdlpError> {
         ));
     }
 
-    let filepath = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if filepath.is_empty() {
-        return Err(YtdlpError::DownloadError(
-            "Download completed but no file path returned".to_string(),
-        ));
-    }
-
-    Ok(filepath)
+    parse_existing_download_path(&output.stdout)
 }
 
 #[cfg(test)]
@@ -738,5 +765,80 @@ mod download_dir_tests {
         let resolved = resolve_download_dir(Some(override_path.as_os_str()), None, None).unwrap();
         assert_eq!(resolved, override_path);
         assert_ne!(resolved, override_path.join("YTM-Free"));
+    }
+}
+
+#[cfg(test)]
+mod download_path_tests {
+    use super::*;
+
+    fn assert_existing_path_round_trip(filename: &str) {
+        let test_root = std::env::temp_dir().join(format!(
+            "ytm-free-download-path-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&test_root).expect("Failed to create download path test root");
+        let actual_path = test_root.join(filename);
+        std::fs::write(&actual_path, b"synthetic media")
+            .expect("Failed to create synthetic downloaded file");
+
+        let actual_path_text = actual_path.to_string_lossy().into_owned();
+        let structured_output = serde_json::to_vec(&actual_path_text)
+            .expect("Failed to encode structured final-path output");
+        let persisted_path = parse_existing_download_path(&structured_output)
+            .expect("Existing structured final path should be accepted");
+
+        assert_eq!(PathBuf::from(&persisted_path), actual_path);
+        assert!(Path::new(&persisted_path).exists());
+
+        std::fs::remove_dir_all(&test_root).expect("Failed to remove download path test root");
+    }
+
+    #[test]
+    fn accepts_existing_clean_ascii_mp3_path() {
+        assert_existing_path_round_trip("Clean Title.mp3");
+    }
+
+    #[test]
+    fn accepts_existing_pipe_normalized_mp3_path() {
+        assert_existing_path_round_trip("Pipe ｜ Title.mp3");
+    }
+
+    #[test]
+    fn accepts_existing_windows_invalid_characters_normalized_path() {
+        assert_existing_path_round_trip("Invalid ＜ ＞ ： ＂ ／ ＼ ｜ ？ ＊.mp3");
+    }
+
+    #[test]
+    fn accepts_existing_unicode_mp3_path() {
+        assert_existing_path_round_trip("Björk 日本語 🎵.mp3");
+    }
+
+    #[test]
+    fn accepts_existing_trailing_dot_and_space_title_result() {
+        assert_existing_path_round_trip("Trailing. .mp3");
+    }
+
+    #[test]
+    fn preserves_post_processing_mp3_extension() {
+        assert_existing_path_round_trip("Converted Audio.mp3");
+    }
+
+    #[test]
+    fn rejects_nonexistent_reported_path() {
+        let missing_path = std::env::temp_dir()
+            .join(format!(
+                "ytm-free-missing-download-{}.mp3",
+                uuid::Uuid::new_v4()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        let structured_output = serde_json::to_vec(&missing_path).unwrap();
+
+        let error = parse_existing_download_path(&structured_output).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("reported final file does not exist"));
     }
 }
