@@ -233,13 +233,14 @@ async function waitForPlaylistNavigation(): Promise<void> {
 async function scrapeRenderedTracks(): Promise<TrackRow[]> {
   return (await browser.execute((trackIds: Record<string, string>) => {
     const rows = Array.from(
-      document.querySelectorAll<HTMLElement>("div.space-y-1 > div.group")
+      document.querySelectorAll<HTMLElement>("[data-testid^='playlist-track-']")
     );
 
     return rows.map((row) => {
       const title = row.querySelector<HTMLParagraphElement>("p.font-medium.truncate")?.textContent?.trim() ?? "";
       const artist = row.querySelector<HTMLParagraphElement>("p.text-sm.text-ytm-text-secondary.truncate")?.textContent?.trim() ?? "";
 
+      const renderedId = row.getAttribute("data-testid")?.replace(/^playlist-track-/, "") ?? "";
       if (!title) {
         throw new Error("Rendered playlist row is missing a track title");
       }
@@ -249,8 +250,11 @@ async function scrapeRenderedTracks(): Promise<TrackRow[]> {
         throw new Error(`Missing TRACK_IDS fixture mapping for rendered title: ${title}`);
       }
 
+      if (renderedId !== mappedId) {
+        throw new Error(`Rendered track ID ${renderedId || "<missing>"} does not match fixture ID ${mappedId}`);
+      }
       return {
-        id: mappedId,
+        id: renderedId,
         video_id: "",
         title,
         artist,
