@@ -313,7 +313,7 @@ export function SearchView() {
             <div>
               <h2 className="text-sm font-semibold">Semantic filters</h2>
               <p className="text-xs text-ytm-text-secondary mt-1">
-                Folosește valori separate prin virgulă. Dacă toate câmpurile sunt goale, căutarea semantică rămâne nefiltrată.
+                Use comma-separated values. If all fields are empty, semantic search remains unfiltered.
               </p>
             </div>
             {hasActiveSemanticFilters && (

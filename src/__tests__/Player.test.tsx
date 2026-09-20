@@ -53,6 +53,20 @@ describe("Player playback state", () => {
     useAppStore.setState({ currentTrack: null, isPlaying: false });
   });
 
+  it("uses English video toggle tooltips", async () => {
+    const { container } = render(<Player />);
+
+    expect(container.querySelector('[title="Watch video"]')).not.toBeNull();
+
+    act(() => useAppStore.setState({ isVideoMode: true }));
+
+    await waitFor(() => {
+      expect(container.querySelector('[title="Stop video"]')).not.toBeNull();
+    });
+    expect(container.querySelector('[title="Videoclip"]')).toBeNull();
+    expect(container.querySelector('[title="Oprește video"]')).toBeNull();
+  });
+
   it("ignores AbortError play rejections without forcing playback false", async () => {
     const diagnosticSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     playMock.mockRejectedValueOnce(

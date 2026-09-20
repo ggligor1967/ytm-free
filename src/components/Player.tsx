@@ -769,7 +769,7 @@ export function Player() {
                 ? "text-ytm-accent"
                 : "text-ytm-text-secondary hover:text-white"
             )}
-            title={isVideoMode ? "Opre\u0219te video" : "Videoclip"}
+            title={isVideoMode ? "Stop video" : "Watch video"}
           >
             {isWatchLoading ? (
               <Loader2 className="w-5 h-5 animate-spin" />

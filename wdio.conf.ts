@@ -159,6 +159,7 @@ const tauriCapability: TauriCapabilities = {
 
 export const config: WebdriverIO.Config = {
   runner: "local",
+  outputDir: path.join(evidenceRoot, "wdio-logs"),
   specs: ["./tests/e2e/**/*.spec.ts"],
   maxInstances: 1,
   services: [["@wdio/tauri-service", serviceOptions]],

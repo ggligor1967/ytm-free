@@ -28,11 +28,11 @@ interface GeneratedPlaylist {
 const NO_MATCHES_ERROR = "No matching tracks found. Try a different description.";
 
 const EXAMPLE_PROMPTS = [
-  "workout energic de 45 minute",
-  "muzică chill pentru citit",
-  "rock clasic de condus",
-  "ceva melancolic pentru seară",
-  "party cu prietenii",
+  "energetic 45-minute workout",
+  "chill music for reading",
+  "classic rock for driving",
+  "something melancholic for the evening",
+  "party with friends",
 ];
 
 // Mood-based color schemes
@@ -577,7 +577,7 @@ export function QuickSmartPlaylist() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && generatePlaylist()}
-          placeholder="e.g., workout energic de 45 minute..."
+          placeholder="e.g., energetic 45-minute workout..."
           disabled={isGenerating}
           className="w-full bg-ytm-bg border border-ytm-border rounded-xl px-4 py-3 pr-12 text-sm focus:outline-none focus:border-ytm-accent focus:ring-2 focus:ring-ytm-accent/20 placeholder:text-ytm-text-secondary/50 disabled:opacity-50 transition-all"
         />

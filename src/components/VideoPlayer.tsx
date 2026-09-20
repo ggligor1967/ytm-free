@@ -82,7 +82,7 @@ export function VideoPlayer() {
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setIsExpanded((v) => !v)}
             className="p-1 text-ytm-text-secondary hover:text-white transition-colors"
-            title={isExpanded ? "Micșorează" : "Mărește"}
+            title={isExpanded ? "Minimize" : "Expand"}
           >
             {isExpanded ? (
               <Minimize2 className="w-3.5 h-3.5" />
@@ -94,7 +94,7 @@ export function VideoPlayer() {
             onMouseDown={(e) => e.stopPropagation()}
             onClick={closeVideo}
             className="p-1 text-ytm-text-secondary hover:text-red-400 transition-colors"
-            title="Închide video"
+            title="Close video"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -126,7 +126,7 @@ export function VideoPlayer() {
             controls
             controlsList="nodownload noremoteplayback"
             className="w-full h-full object-contain"
-            onError={() => setVideoError("Nu s-a putut reda stream-ul video. Verifică dacă ffmpeg este instalat.")}
+            onError={() => setVideoError("Could not play the video stream. Check that FFmpeg is installed.")}
             onCanPlay={() => setVideoError(null)}
           />
         )}
