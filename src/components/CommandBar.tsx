@@ -88,7 +88,8 @@ function CommandPreview({ cmd }: { cmd: PlayerCommand }) {
 
 export function CommandBar({ isOpen, onClose }: CommandBarProps) {
   const [input, setInput] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
   const [parsedCommand, setParsedCommand] = useState<PlayerCommand | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [feedbackSuccess, setFeedbackSuccess] = useState(true);
@@ -98,23 +99,52 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const parseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusFrameRef = useRef<number | null>(null);
+  const inputRevisionRef = useRef(0);
+  const parsedRevisionRef = useRef(-1);
+  const executionInFlightRef = useRef(false);
 
   const { ollamaAvailable, settings } = useAppStore();
   const { executeCommand } = useCommandExecutor();
 
   const aiEnabled = settings?.ollama_enabled && ollamaAvailable;
+  const isProcessing = isParsing || isExecuting;
+
+  const updateInput = useCallback((value: string, index = -1) => {
+    inputRevisionRef.current += 1;
+    parsedRevisionRef.current = -1;
+    if (parseTimeoutRef.current) clearTimeout(parseTimeoutRef.current);
+    if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+    setInput(value);
+    setParsedCommand(null);
+    setFeedback(null);
+    setIsParsing(false);
+    setHistoryIndex(index);
+  }, []);
+
+  const restoreInputFocus = useCallback(() => {
+    if (focusFrameRef.current !== null) cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const selectExample = (example: string) => {
+    updateInput(example);
+    restoreInputFocus();
+  };
 
   // Focus input when opened
   useEffect(() => {
     if (isOpen) {
-      setInput('');
-      setParsedCommand(null);
-      setFeedback(null);
-      setHistoryIndex(-1);
-      // Small delay for animation
-      setTimeout(() => inputRef.current?.focus(), 50);
+      updateInput('');
+      restoreInputFocus();
     }
-  }, [isOpen]);
+    return () => {
+      inputRevisionRef.current += 1;
+      if (focusFrameRef.current !== null) cancelAnimationFrame(focusFrameRef.current);
+      if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+    };
+  }, [isOpen, updateInput, restoreInputFocus]);
 
   // Close on Escape
   useEffect(() => {
@@ -130,45 +160,58 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
 
   // Auto-parse with debounce when typing
   useEffect(() => {
-    if (!aiEnabled || input.trim().length < 2) {
+    if (!isOpen || !aiEnabled || input.trim().length < 2) {
       setParsedCommand(null);
+      setIsParsing(false);
       return;
     }
 
+    const revision = inputRevisionRef.current;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && revision === inputRevisionRef.current;
     if (parseTimeoutRef.current) clearTimeout(parseTimeoutRef.current);
     parseTimeoutRef.current = setTimeout(async () => {
-      setIsProcessing(true);
+      if (executionInFlightRef.current) return;
+      setIsParsing(true);
       try {
         const cmd = await api.ollamaParseCommand(input.trim());
-        if (cmd.command !== 'unknown') {
-          setParsedCommand(cmd);
-        } else {
-          setParsedCommand(null);
+        if (isCurrent()) {
+          parsedRevisionRef.current = revision;
+          setParsedCommand(cmd.command !== 'unknown' ? cmd : null);
         }
       } catch {
-        setParsedCommand(null);
+        if (isCurrent()) setParsedCommand(null);
       } finally {
-        setIsProcessing(false);
+        if (isCurrent()) setIsParsing(false);
       }
     }, 600);
 
     return () => {
+      cancelled = true;
       if (parseTimeoutRef.current) clearTimeout(parseTimeoutRef.current);
     };
-  }, [input, aiEnabled]);
+  }, [input, aiEnabled, isOpen]);
 
   const handleExecute = useCallback(async () => {
-    if (!input.trim()) return;
+    if (!isOpen || !aiEnabled || !input.trim() || executionInFlightRef.current) return;
 
-    setIsProcessing(true);
+    // Lock before the first await; React state alone leaves a duplicate-dispatch window.
+    executionInFlightRef.current = true;
+    const revision = inputRevisionRef.current;
+    if (parseTimeoutRef.current) clearTimeout(parseTimeoutRef.current);
+    if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+    setIsExecuting(true);
     setFeedback(null);
 
     try {
       // Parse if not already parsed
-      let cmd = parsedCommand;
+      let cmd = parsedRevisionRef.current === revision ? parsedCommand : null;
       if (!cmd && aiEnabled) {
         cmd = await api.ollamaParseCommand(input.trim());
       }
+
+      // The user may edit or close the bar while an execution-time parse is pending.
+      if (revision !== inputRevisionRef.current) return;
 
       if (!cmd || cmd.command === 'unknown') {
         setFeedback('❓ Could not understand the command');
@@ -178,8 +221,6 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
 
       // Execute
       const result = await executeCommand(cmd);
-      setFeedback(result.feedback);
-      setFeedbackSuccess(result.success);
 
       // Add to history
       const entry: CommandHistoryEntry = {
@@ -190,18 +231,25 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
       };
       setHistory(prev => [entry, ...prev].slice(0, 20));
 
+      if (revision !== inputRevisionRef.current) return;
+      setFeedback(result.feedback);
+      setFeedbackSuccess(result.success);
+
       // Auto-close after successful execution
       if (result.success) {
-        setTimeout(() => onClose(), 1200);
+        closeTimeoutRef.current = setTimeout(() => onClose(), 1200);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setFeedback(`❌ ${msg}`);
-      setFeedbackSuccess(false);
+      if (revision === inputRevisionRef.current) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setFeedback(`❌ ${msg}`);
+        setFeedbackSuccess(false);
+      }
     } finally {
-      setIsProcessing(false);
+      executionInFlightRef.current = false;
+      setIsExecuting(false);
     }
-  }, [input, parsedCommand, aiEnabled, executeCommand, onClose]);
+  }, [input, parsedCommand, aiEnabled, executeCommand, onClose, isOpen]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -211,18 +259,15 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
       e.preventDefault();
       if (history.length > 0) {
         const newIndex = Math.min(historyIndex + 1, history.length - 1);
-        setHistoryIndex(newIndex);
-        setInput(history[newIndex].input);
+        updateInput(history[newIndex].input, newIndex);
       }
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (historyIndex > 0) {
         const newIndex = historyIndex - 1;
-        setHistoryIndex(newIndex);
-        setInput(history[newIndex].input);
+        updateInput(history[newIndex].input, newIndex);
       } else {
-        setHistoryIndex(-1);
-        setInput('');
+        updateInput('');
       }
     }
   };
@@ -249,7 +294,7 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
             ref={inputRef}
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => updateInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={aiEnabled ? 'Type a command... (e.g. "play rock", "volume 50%", "search Metallica")' : 'AI commands require Ollama to be enabled'}
             disabled={!aiEnabled}
@@ -264,7 +309,7 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
           )}
           {input && !isProcessing && (
             <button
-              onClick={() => { setInput(''); setParsedCommand(null); setFeedback(null); }}
+              onClick={() => selectExample('')}
               className="text-ytm-text-secondary hover:text-ytm-text p-1"
               title="Clear input"
             >
@@ -281,9 +326,19 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
                 <Sparkles className="w-3.5 h-3.5 text-ytm-accent" />
                 <span className="text-xs text-ytm-accent font-medium">AI Parsed</span>
               </div>
-              <kbd className="text-[10px] px-1.5 py-0.5 bg-white/10 rounded text-ytm-text-secondary">
-                Enter to execute
-              </kbd>
+              <div className="flex items-center gap-2">
+                <kbd className="text-[10px] px-1.5 py-0.5 bg-white/10 rounded text-ytm-text-secondary">
+                  Enter to execute
+                </kbd>
+                <button
+                  type="button"
+                  onClick={handleExecute}
+                  disabled={isProcessing || !aiEnabled}
+                  className="px-3 py-1 text-xs font-medium rounded bg-ytm-accent text-white hover:bg-ytm-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Execute
+                </button>
+              </div>
             </div>
             <div className="mt-2">
               <CommandPreview cmd={parsedCommand} />
@@ -328,7 +383,7 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
             {history.slice(0, 5).map((entry, i) => (
               <button
                 key={i}
-                onClick={() => setInput(entry.input)}
+                onClick={() => selectExample(entry.input)}
                 title={`Re-run: ${entry.input}`}
                 className="w-full px-5 py-2 text-left hover:bg-white/5 transition-colors flex items-center gap-3"
               >
@@ -344,7 +399,7 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
             <p className="text-xs text-ytm-text-secondary mb-3">Quick examples:</p>
             <div className="grid grid-cols-2 gap-2">
               {[
-                'pune ceva rock',
+                'play some rock',
                 'volume 50%',
                 'search Metallica',
                 'add to favorites',
@@ -355,7 +410,7 @@ export function CommandBar({ isOpen, onClose }: CommandBarProps) {
               ].map((example) => (
                 <button
                   key={example}
-                  onClick={() => setInput(example)}
+                  onClick={() => selectExample(example)}
                   className="px-3 py-1.5 text-xs text-ytm-text-secondary hover:text-ytm-text bg-white/5 hover:bg-white/10 rounded-lg transition-colors text-left truncate"
                 >
                   "{example}"
