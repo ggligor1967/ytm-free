@@ -147,7 +147,7 @@ export function Header({ onOpenCommandBar }: { onOpenCommandBar?: () => void }) 
   };
 
   return (
-    <header className="h-16 px-6 flex items-center gap-4 border-b border-ytm-border bg-ytm-bg/80 backdrop-blur-sm">
+    <header className="h-16 shrink-0 px-6 flex items-center gap-4 border-b border-ytm-border bg-ytm-bg/80 backdrop-blur-sm">
       {/* Search Bar */}
       <div className="flex-1 max-w-2xl">
         <div className="relative">
