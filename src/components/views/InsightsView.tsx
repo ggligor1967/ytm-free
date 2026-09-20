@@ -177,10 +177,10 @@ export function InsightsView() {
     : 1;
 
   const tabs: { id: InsightsTab; label: string; icon: React.ReactNode }[] = [
-    { id: "overview", label: "Prezentare", icon: <BarChart3 size={16} /> },
-    { id: "profile", label: "Profil AI", icon: <User size={16} /> },
-    { id: "discover", label: "Descoperă", icon: <Sparkles size={16} /> },
-    { id: "explore", label: "Explorează", icon: <Globe size={16} /> },
+    { id: "overview", label: "Overview", icon: <BarChart3 size={16} /> },
+    { id: "profile", label: "AI Profile", icon: <User size={16} /> },
+    { id: "discover", label: "Discover", icon: <Sparkles size={16} /> },
+    { id: "explore", label: "Explore", icon: <Globe size={16} /> },
     { id: "wrapped", label: "Year in Review", icon: <Gift size={16} /> },
   ];
 

@@ -67,6 +67,33 @@ afterEach(() => {
 });
 
 describe("canonical Smart Playlist creation from PlaylistsView", () => {
+  it("renders English examples while preserving free-form multilingual input", () => {
+    render(<PlaylistsView />);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Smart Playlist" }));
+
+    const examples = [
+      "energetic 45-minute workout",
+      "chill music for reading",
+      "classic rock for driving",
+      "something melancholic for the evening",
+      "party with friends",
+    ];
+    examples.forEach((example) => {
+      expect(screen.getByRole("button", { name: example })).toBeVisible();
+    });
+    expect(screen.getByPlaceholderText("e.g., energetic 45-minute workout...")).toBeVisible();
+
+    [
+      "workout energic de 45 minute",
+      "muzică chill pentru citit",
+      "rock clasic de condus",
+      "ceva melancolic pentru seară",
+      "party cu prietenii",
+    ].forEach((oldExample) => {
+      expect(screen.queryByRole("button", { name: oldExample })).not.toBeInTheDocument();
+    });
+  });
+
   it.each(["Road Rage Hard Rock", "muzică rock pentru condus"])(
     "uses the canonical plan/match/search/preview/save workflow for %s", async (description) => {
       matchLibrary();

@@ -95,6 +95,19 @@ describe("SearchView semantic filtered consumer", () => {
     vi.mocked(api.ollamaEnhanceSearch).mockResolvedValue([]);
   });
 
+  it("renders English semantic-filter guidance", async () => {
+    render(<SearchView />);
+
+    fireEvent.click(screen.getByRole("button", { name: /semantic/i }));
+
+    expect(await screen.findByText(
+      "Use comma-separated values. If all fields are empty, semantic search remains unfiltered."
+    )).toBeVisible();
+    expect(screen.queryByText(
+      "Folosește valori separate prin virgulă. Dacă toate câmpurile sunt goale, căutarea semantică rămâne nefiltrată."
+    )).not.toBeInTheDocument();
+  });
+
   it("fără filtre active apelează semanticSearch", async () => {
     render(<SearchView />);
 
