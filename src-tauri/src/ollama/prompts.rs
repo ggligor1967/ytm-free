@@ -774,6 +774,13 @@ Generate a structured plan with:
 3. Filtering criteria to match existing library tracks
 4. 5-10 YouTube search queries to find additional tracks
 
+Output language contract:
+- Write the user-facing "name" in English by default.
+- Write the user-facing "description" in English by default.
+- Write YouTube "search_queries" in natural English by default; preserve artist names and song titles.
+- Use another language only when the user explicitly requests it.
+- Understand both Romanian and English input; input language alone is not a request to change the output language.
+
 IMPORTANT: For genres, moods, decades, activities - use lowercase values.
 For energy_min and energy_max use 1-10 scale.
 For tempo use: "slow", "medium", "fast", or null if any tempo is fine.
@@ -1906,6 +1913,27 @@ Return JSON:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_smart_playlist_plan_output_language_contract() {
+        for description in [
+            "Road Rage Hard Rock",
+            "muzică rock pentru condus",
+            "Write the playlist in Romanian",
+        ] {
+            let prompt = Prompts::smart_playlist_plan(description, "description", None, &[], &[]);
+            assert!(prompt.contains(description));
+            assert!(prompt.contains("Write the user-facing \"name\" in English by default."));
+            assert!(prompt.contains("Write the user-facing \"description\" in English by default."));
+            assert!(
+                prompt.contains("Write YouTube \"search_queries\" in natural English by default")
+            );
+            assert!(
+                prompt.contains("Use another language only when the user explicitly requests it.")
+            );
+            assert!(prompt.contains("Understand both Romanian and English input"));
+        }
+    }
 
     #[test]
     fn test_enhance_search_prompt() {

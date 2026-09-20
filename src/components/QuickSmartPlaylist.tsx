@@ -25,6 +25,8 @@ interface GeneratedPlaylist {
   coverUrl?: string;
 }
 
+const NO_MATCHES_ERROR = "No matching tracks found. Try a different description.";
+
 const EXAMPLE_PROMPTS = [
   "workout energic de 45 minute",
   "muzică chill pentru citit",
@@ -164,7 +166,6 @@ export function QuickSmartPlaylist() {
     setView,
     setPlaylists,
     setSelectedPlaylistId,
-    addPlaylist,
     setQueue,
     setQueueIndex,
     setCurrentTrack,
@@ -220,13 +221,16 @@ export function QuickSmartPlaylist() {
 
       // Step 3: Search YouTube for additional tracks
       const youtubeResults: Track[] = [];
+      const seenVideoIds = new Set(libraryMatches.map(match => match.track.video_id));
       const searchQueries = plan.search_queries?.slice(0, 3) || [];
       
       for (const query of searchQueries) {
         try {
           const results = await api.searchYoutube(query, 2);
           for (const result of results) {
+            if (seenVideoIds.has(result.id)) continue;
             const trackInfo = await api.getTrackInfo(result.id);
+            seenVideoIds.add(result.id);
             youtubeResults.push({
               id: `yt_${result.id}`,
               video_id: result.id,
@@ -243,6 +247,10 @@ export function QuickSmartPlaylist() {
         } catch {
           // Ignore search failures
         }
+      }
+
+      if (libraryMatches.length + youtubeResults.length === 0) {
+        setError(NO_MATCHES_ERROR);
       }
 
       // Step 4: Generate cover idea (fire and forget)
@@ -279,11 +287,20 @@ export function QuickSmartPlaylist() {
   }, [generated, generatePlaylist]);
 
   const handleSave = useCallback(async () => {
-    if (!generated) return;
+    if (!generated || saving) return;
+    if (generated.libraryMatches.length + generated.youtubeResults.length === 0) {
+      setError(NO_MATCHES_ERROR);
+      return;
+    }
 
+    setError(null);
     setSaving(true);
     try {
-      const trackIds = generated.libraryMatches.map(m => m.track.id);
+      // The backend links only trackIds; YouTube metadata alone does not add membership.
+      const trackIds = [
+        ...generated.libraryMatches.map(m => m.track.id),
+        ...generated.youtubeResults.map(t => t.video_id),
+      ];
       const youtubeTracks: [string, string, string, string][] = generated.youtubeResults.map(t => [
         t.video_id,
         t.title,
@@ -298,8 +315,8 @@ export function QuickSmartPlaylist() {
         youtubeTracks
       );
 
-      addPlaylist(playlist);
-      setPlaylists([...useAppStore.getState().playlists, playlist]);
+      const updated = await api.getPlaylists();
+      setPlaylists(updated);
       
       // Show confetti on success
       setShowConfetti(true);
@@ -313,7 +330,7 @@ export function QuickSmartPlaylist() {
     } finally {
       setSaving(false);
     }
-  }, [generated, addPlaylist, setPlaylists, setSelectedPlaylistId, setView]);
+  }, [generated, saving, setPlaylists, setSelectedPlaylistId, setView]);
 
   const handlePlayNow = useCallback(() => {
     if (!generated) return;
@@ -501,10 +518,17 @@ export function QuickSmartPlaylist() {
             </button>
           </div>
 
+          {error && (
+            <div role="alert" className="text-sm text-red-400 bg-red-500/10 rounded-lg px-3 py-2 mb-4">
+              {error}
+            </div>
+          )}
+
           {/* Main Actions */}
           <div className="flex gap-2">
             <button
               onClick={handlePlayNow}
+              disabled={totalTracks === 0}
               className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-ytm-accent text-black font-medium rounded-xl hover:bg-ytm-accent/90 transition-colors"
             >
               <Play className="w-4 h-4 fill-black" />
@@ -512,7 +536,7 @@ export function QuickSmartPlaylist() {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving}
+              disabled={saving || totalTracks === 0}
               className="flex items-center justify-center gap-2 px-4 py-2.5 bg-ytm-surface hover:bg-ytm-surface-hover rounded-xl transition-colors disabled:opacity-50"
             >
               {saving ? (
@@ -559,6 +583,7 @@ export function QuickSmartPlaylist() {
         />
         <button
           onClick={generatePlaylist}
+          aria-label="Generate"
           disabled={!input.trim() || isGenerating}
           className={clsx(
             "absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-all duration-200",

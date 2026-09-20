@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Track, Playlist, Settings, View, RepeatMode, SearchResult, PlaylistSuggestion, SmartQueueMode, InsightsStats, ChatMessage } from "./types";
+import type { Track, Playlist, Settings, View, RepeatMode, SearchResult, SmartQueueMode, InsightsStats, ChatMessage } from "./types";
 
 interface AppState {
   // Navigation
@@ -73,8 +73,6 @@ interface AppState {
   setIsAISearching: (loading: boolean) => void;
   aiSearchResults: string[];
   setAISearchResults: (results: string[]) => void;
-  aiPlaylistSuggestion: PlaylistSuggestion | null;
-  setAIPlaylistSuggestion: (suggestion: PlaylistSuggestion | null) => void;
   aiProcessing: boolean;
   setAiProcessing: (processing: boolean) => void;
   trackMetadata: Map<string, import('./types').TrackMetadataAI>;
@@ -276,8 +274,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setIsAISearching: (loading) => set({ isAISearching: loading }),
   aiSearchResults: [],
   setAISearchResults: (results) => set({ aiSearchResults: results }),
-  aiPlaylistSuggestion: null,
-  setAIPlaylistSuggestion: (suggestion) => set({ aiPlaylistSuggestion: suggestion }),
   aiProcessing: false,
   setAiProcessing: (processing) => set({ aiProcessing: processing }),
   trackMetadata: new Map(),
