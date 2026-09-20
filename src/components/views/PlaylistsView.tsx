@@ -4,6 +4,7 @@ import * as api from "../../api";
 import { Plus, ListMusic, MoreVertical, Trash2, Loader2, Sparkles } from "lucide-react";
 import clsx from "clsx";
 import { showToast } from "../../lib/toast";
+import { QuickSmartPlaylist } from "../QuickSmartPlaylist";
 
 export function PlaylistsView() {
   const {
@@ -13,8 +14,6 @@ export function PlaylistsView() {
     setSelectedPlaylistId,
     settings,
     ollamaAvailable,
-    aiPlaylistSuggestion,
-    setAIPlaylistSuggestion,
   } = useAppStore();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -22,8 +21,6 @@ export function PlaylistsView() {
   const [loading, setLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [showAIGen, setShowAIGen] = useState(false);
-  const [aiDescription, setAIDescription] = useState("");
-  const [generatingAI, setGeneratingAI] = useState(false);
   const [showSemantic, setShowSemantic] = useState(false);
   const [semanticQuery, setSemanticQuery] = useState("");
   const [semanticName, setSemanticName] = useState("");
@@ -65,40 +62,6 @@ export function PlaylistsView() {
   const openPlaylist = (id: string) => {
     setSelectedPlaylistId(id);
     setView("playlist");
-  };
-
-  const handleGenerateAI = async () => {
-    if (!aiDescription.trim()) return;
-
-    setGeneratingAI(true);
-    try {
-      const suggestion = await api.ollamaGeneratePlaylist(aiDescription);
-      setAIPlaylistSuggestion(suggestion);
-    } catch (error) {
-      console.error("Failed to generate AI playlist:", error);
-      showToast("Failed to generate AI playlist");
-    } finally {
-      setGeneratingAI(false);
-    }
-  };
-
-  const handleCreateFromAI = async () => {
-    if (!aiPlaylistSuggestion) return;
-
-    setLoading(true);
-    try {
-      await api.createPlaylist(aiPlaylistSuggestion.name, aiPlaylistSuggestion.description);
-      const updated = await api.getPlaylists();
-      setPlaylists(updated);
-      setShowAIGen(false);
-      setAIDescription("");
-      setAIPlaylistSuggestion(null);
-    } catch (error) {
-      console.error("Failed to create playlist:", error);
-      showToast("Failed to create playlist");
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleCreateSemanticPlaylist = async () => {
@@ -148,10 +111,7 @@ export function PlaylistsView() {
         <div className="flex gap-2">
           {settings?.ollama_enabled && ollamaAvailable && (
             <button
-              onClick={() => {
-                setShowAIGen(true);
-                setAIPlaylistSuggestion(null);
-              }}
+              onClick={() => setShowAIGen(true)}
               className="flex items-center gap-2 px-4 py-2 bg-ytm-accent/10 text-ytm-accent border border-ytm-accent rounded-full font-medium hover:bg-ytm-accent/20 transition-colors"
             >
               <Sparkles className="w-5 h-5" />
@@ -219,101 +179,15 @@ export function PlaylistsView() {
         </div>
       )}
 
-      {/* AI Generate Form */}
       {showAIGen && (
-        <div className="bg-ytm-surface p-4 rounded-xl space-y-4">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-ytm-accent" />
-            <h3 className="font-semibold">Generate Smart Playlist with AI</h3>
-          </div>
-
-          {!aiPlaylistSuggestion ? (
-            <>
-              <textarea
-                value={aiDescription}
-                onChange={(e) => setAIDescription(e.target.value)}
-                placeholder="Describe your ideal playlist... (e.g., 'upbeat rock songs for working out' or 'calm jazz for studying')"
-                rows={3}
-                className="w-full px-4 py-2 bg-ytm-bg border border-ytm-border rounded-lg focus:outline-none focus:border-ytm-accent resize-none"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    setShowAIGen(false);
-                    setAIDescription("");
-                  }}
-                  className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleGenerateAI}
-                  disabled={!aiDescription.trim() || generatingAI}
-                  className="px-4 py-2 bg-ytm-accent text-white rounded-lg hover:bg-ytm-accent-hover disabled:opacity-50 flex items-center gap-2"
-                >
-                  {generatingAI && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Generate
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-sm font-medium text-ytm-text-secondary">Suggested Name</label>
-                  <p className="text-lg font-semibold mt-1">{aiPlaylistSuggestion.name}</p>
-                </div>
-                <div>
-                  <label className="text-sm font-medium text-ytm-text-secondary">Description</label>
-                  <p className="mt-1">{aiPlaylistSuggestion.description}</p>
-                </div>
-                <div>
-                  <label className="text-sm font-medium text-ytm-text-secondary">Suggested Search Queries</label>
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {aiPlaylistSuggestion.search_queries.map((query, index) => (
-                      <span
-                        key={index}
-                        className={clsx(
-                          "px-3 py-1.5 rounded-full text-sm",
-                          "bg-ytm-bg border border-ytm-border"
-                        )}
-                      >
-                        {query}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    setAIPlaylistSuggestion(null);
-                  }}
-                  className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
-                >
-                  Regenerate
-                </button>
-                <button
-                  onClick={() => {
-                    setShowAIGen(false);
-                    setAIDescription("");
-                    setAIPlaylistSuggestion(null);
-                  }}
-                  className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleCreateFromAI}
-                  disabled={loading}
-                  className="px-4 py-2 bg-ytm-accent text-white rounded-lg hover:bg-ytm-accent-hover disabled:opacity-50 flex items-center gap-2"
-                >
-                  {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Create Playlist
-                </button>
-              </div>
-            </>
-          )}
+        <div className="space-y-2">
+          <QuickSmartPlaylist />
+          <button
+            onClick={() => setShowAIGen(false)}
+            className="px-4 py-2 border border-ytm-border rounded-lg hover:bg-ytm-surface-hover"
+          >
+            Close
+          </button>
         </div>
       )}
 

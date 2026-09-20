@@ -4,6 +4,33 @@
 > Every claim below is dated and backed by a command. When you re-verify, update the date and result — never leave a stale ✅.
 > If this file disagrees with any other doc (README, docs/FAZA_*, CHANGELOG), **this file wins**; update the other doc or flag it.
 
+## R1 Smart Playlist remediation (2026-09-20, local working tree)
+
+- Scope: `fix/r1-smart-playlist-population`, unchanged baseline HEAD `fe05a398a91096387145be4744c8946c8e4e44f5`; admission verified clean. These results apply to the uncommitted R1 working tree, not the baseline release executable. No commit, push, merge, or PR.
+- `PlaylistsView` now reuses `QuickSmartPlaylist`. Normal manual and semantic creation remain covered by regression tests. Removed unused legacy suggestion UI/store state; backend/API compatibility functions remain.
+- Empty resolution displays an English error and disables Save/Play Now; the save handler also rejects zero matches. YouTube results are deduplicated by video ID, including against library matches. Save sends library UUIDs plus YouTube video IDs in `trackIds`, and YouTube metadata in `youtubeTracks`: the existing backend links membership from `trackIds` only.
+- Successful save refreshes `getPlaylists()` and replaces Zustand state once, avoiding the former synchronous `addPlaylist()` plus append duplication.
+- `smart_playlist_plan` requires English names/descriptions and natural-English search queries by default, with another language only on explicit request. Romanian and English input support remains.
+
+| Command executed | Exit | Observed result |
+| --- | --- | --- |
+| `npm test` | 0 | `Test Files 14 passed (14)`; `Tests 84 passed (84)` |
+| `npm run build` | 0 | Production `dist/` generated |
+| `npx tsc --noEmit` and `npx tsc --noEmit -p tsconfig.json` | 0 each | No diagnostics |
+| `npm run lint` | 0 | No diagnostics |
+| `npm run typecheck:wdio` | 0 | No diagnostics |
+| `cargo fmt --check` (in `src-tauri`) | 0 | No differences |
+| `cargo check` (in `src-tauri`) | 0 | 9 warnings |
+| `cargo test` (in `src-tauri`) | 0 | `114 passed; 0 failed; 2 ignored` |
+| `cargo clippy --all-targets --all-features` (in `src-tauri`) | 0 | Library: 40 warnings; library tests: 47 warnings, with compiler-reported overlap |
+| `npm run harness:build` | 0 | Built the current working tree with the existing WDIO feature |
+| `npx wdio run wdio.conf.ts --spec logs/r1/runtime.spec.ts` | 0 | `1 passed, 1 total (100% completed)` |
+
+- Added 10 frontend cases exercising actual components and Zustand with mocked API calls, plus one Rust prompt-contract test. Existing tests were retained; only two unused fields were removed from an existing test fixture. The two ignored Rust tests require controlled yt-dlp version executables. Initial new-test typing and Rust formatting failures were corrected before the successful gates above.
+- **Real runtime (separate from mocked tests): PASS for this R1 flow.** Real Tauri/WebView2, Ollama `deepseek-v4.1-flash:cloud`, yt-dlp `2026.08.19`, and isolated SQLite. Entered `Road Rage Hard Rock` through Playlists → Generate Smart Playlist → Generate → Save. Generated `Road Rage Riffs` and an English description, resolved 15 YouTube tracks from an empty library, saved `track_count = 15`, and observed exactly one playlist card. API read-back found 15 unique video IDs; a read-only SQLite reopen after app shutdown found one playlist and 15 distinct memberships. Ports 3456/4445 had no listeners after harness cleanup.
+- Local, gitignored evidence: `logs/r1/verification.md`, per-gate logs, `logs/r1/runtime.spec.ts`, and `logs/r1/runtime/{preview.json,preview.png,saved.json,saved.png,final-playlists.json,persistence.json}`. Runtime database, downloads, Spotify input, WebView profile, and temporary paths were isolated under `logs/r1/runtime`.
+- Qualifications: this is a debug WDIO build of the working tree, not a rebuilt release/installer or full-product E2E certification. Cloud-model output and YouTube availability vary. The WDIO service emitted a Windows executable-mode diagnostic and an after-session mock-cleanup warning; the actual UI assertions, persistence checks, and runner exit succeeded. No dependencies were added.
+
 ## Current reconciliation snapshot (2026-09-19, post-PR #26)
 
 - Canonical branch: `main`. Post-merge canonical HEAD: `5e7c6e9782c2284db9dd0c3770429f4f7a31edb6` (merge commit for PR #26).

@@ -47,8 +47,6 @@ describe("PlaylistsView selectors", () => {
       setSelectedPlaylistId: vi.fn(),
       settings: null,
       ollamaAvailable: false,
-      aiPlaylistSuggestion: null,
-      setAIPlaylistSuggestion: vi.fn(),
     });
   });
 
