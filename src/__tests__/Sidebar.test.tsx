@@ -88,6 +88,27 @@ describe("Sidebar", () => {
     expect(screen.getByText("yt-dlp 2024.1.1")).toBeDefined();
   });
 
+  it("keeps navigation and playlists in the intentional scroll region while the logo and footer stay fixed", () => {
+    render(<Sidebar ytdlpVersion="2024.1.1" />);
+
+    const sidebar = screen.getByTestId("sidebar");
+    const logo = screen.getByTestId("sidebar-logo");
+    const scrollRegion = screen.getByTestId("sidebar-scroll-region");
+    const footer = screen.getByTestId("sidebar-footer");
+
+    expect(sidebar.className).toContain("min-h-0");
+    expect(logo.className).toContain("shrink-0");
+    expect(scrollRegion.className).toContain("min-h-0");
+    expect(scrollRegion.className).toContain("overflow-y-auto");
+    expect(scrollRegion).toContainElement(screen.getByText("Home"));
+    expect(scrollRegion).toContainElement(screen.getByText("Library"));
+    expect(scrollRegion).toContainElement(screen.getByText("Chill Vibes"));
+    expect(footer.className).toContain("shrink-0");
+    expect(footer).toContainElement(screen.getByText("Settings"));
+    expect(footer).toContainElement(screen.getByText("yt-dlp 2024.1.1"));
+    expect(scrollRegion).not.toContainElement(footer);
+  });
+
   it("does not show yt-dlp version when null", () => {
     render(<Sidebar ytdlpVersion={null} />);
 

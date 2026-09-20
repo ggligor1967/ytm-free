@@ -63,9 +63,9 @@ export function Sidebar({ ytdlpVersion }: SidebarProps) {
   };
 
   return (
-    <aside className="w-64 bg-ytm-bg border-r border-ytm-border flex flex-col">
+    <aside data-testid="sidebar" className="w-64 min-h-0 shrink-0 bg-ytm-bg border-r border-ytm-border flex flex-col">
       {/* Logo */}
-      <div className="p-4 flex items-center gap-3">
+      <div data-testid="sidebar-logo" className="shrink-0 p-4 flex items-center gap-3">
         <div className="w-10 h-10 bg-ytm-accent rounded-lg flex items-center justify-center">
           <Music2 className="w-6 h-6 text-white" />
         </div>
@@ -93,70 +93,72 @@ export function Sidebar({ ytdlpVersion }: SidebarProps) {
         )}
       </div>
 
-      {/* Main Navigation */}
-      <nav className="px-2 py-4">
-        {mainNav.map((item) => (
-          <NavButton
-            key={item.id}
-            item={item}
-            isActive={view === item.id}
-            onClick={() => handleNavClick(item.id)}
-          />
-        ))}
-      </nav>
+      <div data-testid="sidebar-scroll-region" className="min-h-0 flex-1 overflow-y-auto">
+        {/* Main Navigation */}
+        <nav className="px-2 py-4">
+          {mainNav.map((item) => (
+            <NavButton
+              key={item.id}
+              item={item}
+              isActive={view === item.id}
+              onClick={() => handleNavClick(item.id)}
+            />
+          ))}
+        </nav>
 
-      {/* Divider */}
-      <div className="mx-4 h-px bg-ytm-border" />
+        {/* Divider */}
+        <div className="mx-4 h-px bg-ytm-border" />
 
-      {/* Library Navigation */}
-      <nav className="px-2 py-4">
-        <p className="px-3 mb-2 text-xs font-semibold text-ytm-text-secondary uppercase tracking-wider">
-          Your Library
-        </p>
-        {libraryNav.map((item) => (
-          <NavButton
-            key={item.id}
-            item={item}
-            isActive={view === item.id}
-            onClick={() => handleNavClick(item.id)}
-          />
-        ))}
-      </nav>
+        {/* Library Navigation */}
+        <nav className="px-2 py-4">
+          <p className="px-3 mb-2 text-xs font-semibold text-ytm-text-secondary uppercase tracking-wider">
+            Your Library
+          </p>
+          {libraryNav.map((item) => (
+            <NavButton
+              key={item.id}
+              item={item}
+              isActive={view === item.id}
+              onClick={() => handleNavClick(item.id)}
+            />
+          ))}
+        </nav>
 
-      {/* Divider */}
-      <div className="mx-4 h-px bg-ytm-border" />
+        {/* Divider */}
+        <div className="mx-4 h-px bg-ytm-border" />
 
-      {/* Playlists */}
-      <div className="flex-1 overflow-y-auto px-2 py-4">
-        <p className="px-3 mb-2 text-xs font-semibold text-ytm-text-secondary uppercase tracking-wider">
-          Playlists
-        </p>
-        {playlists.length === 0 ? (
-          <p className="px-3 text-sm text-ytm-text-secondary">No playlists yet</p>
-        ) : (
-          <div className="space-y-1">
-            {playlists.map((playlist) => (
-              <button
-                key={playlist.id}
-                onClick={() => handlePlaylistClick(playlist.id)}
-                className={clsx(
-                  "w-full px-3 py-2 rounded-lg text-left text-sm transition-colors",
-                  "hover:bg-ytm-surface-hover",
-                  view === "playlist" && playlist.id === selectedPlaylistId
-                    ? "bg-ytm-surface text-white"
-                    : "text-ytm-text-secondary"
-                )}
-              >
-                <span className="truncate block">{playlist.name}</span>
-                <span className="text-xs opacity-60">{playlist.track_count} tracks</span>
-              </button>
-            ))}
-          </div>
-        )}
+        {/* Playlists */}
+        <div className="px-2 py-4">
+          <p className="px-3 mb-2 text-xs font-semibold text-ytm-text-secondary uppercase tracking-wider">
+            Playlists
+          </p>
+          {playlists.length === 0 ? (
+            <p className="px-3 text-sm text-ytm-text-secondary">No playlists yet</p>
+          ) : (
+            <div className="space-y-1">
+              {playlists.map((playlist) => (
+                <button
+                  key={playlist.id}
+                  onClick={() => handlePlaylistClick(playlist.id)}
+                  className={clsx(
+                    "w-full px-3 py-2 rounded-lg text-left text-sm transition-colors",
+                    "hover:bg-ytm-surface-hover",
+                    view === "playlist" && playlist.id === selectedPlaylistId
+                      ? "bg-ytm-surface text-white"
+                      : "text-ytm-text-secondary"
+                  )}
+                >
+                  <span className="truncate block">{playlist.name}</span>
+                  <span className="text-xs opacity-60">{playlist.track_count} tracks</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Settings & Version */}
-      <div className="p-2 border-t border-ytm-border">
+      <div data-testid="sidebar-footer" className="shrink-0 p-2 border-t border-ytm-border">
         <NavButton
           item={{ id: "settings", label: "Settings", icon: Settings }}
           isActive={view === "settings"}

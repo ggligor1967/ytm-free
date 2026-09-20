@@ -168,7 +168,7 @@ export function SmartQueueView() {
   const isEnabled = settings?.smart_queue_enabled && settings?.ollama_enabled;
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
+    <div>
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <div className="w-10 h-10 bg-ytm-accent/20 rounded-lg flex items-center justify-center">

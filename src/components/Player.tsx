@@ -566,14 +566,14 @@ export function Player() {
 
   if (!currentTrack) {
     return (
-      <div className="h-24 bg-ytm-surface border-t border-ytm-border flex items-center justify-center">
+      <div className="h-24 shrink-0 bg-ytm-surface border-t border-ytm-border flex items-center justify-center">
         <p className="text-ytm-text-secondary">No track selected</p>
       </div>
     );
   }
 
   return (
-    <div className="h-24 bg-ytm-surface border-t border-ytm-border px-4 flex items-center gap-4">
+    <div className="h-24 shrink-0 bg-ytm-surface border-t border-ytm-border px-4 flex items-center gap-4">
       {/* Hidden audio element */}
       <audio
         ref={audioRef}

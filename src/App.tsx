@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useAppStore } from "./store";
 import * as api from "./api";
 import { Sidebar } from "./components/Sidebar";
@@ -46,9 +46,16 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [ytdlpVersion, setYtdlpVersion] = useState<string | null>(null);
   const [commandBarOpen, setCommandBarOpen] = useState(false);
+  const mainScrollRef = useRef<HTMLElement>(null);
 
   const openCommandBar = useCallback(() => setCommandBarOpen(true), []);
   const closeCommandBar = useCallback(() => setCommandBarOpen(false), []);
+
+  useEffect(() => {
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollTop = 0;
+    }
+  }, [view]);
 
   // Global keyboard shortcut: Ctrl+K or / to open command bar
   useEffect(() => {
@@ -257,19 +264,19 @@ function App() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-ytm-bg">
+    <div className="h-full min-h-0 flex flex-col bg-ytm-bg">
       {/* Main content area */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Sidebar */}
         <Sidebar ytdlpVersion={ytdlpVersion} />
 
         {/* Main content */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
           {/* Header */}
           <Header onOpenCommandBar={openCommandBar} />
 
           {/* Content */}
-          <main className="flex-1 overflow-y-auto p-6">
+          <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto p-6">
             {renderView()}
           </main>
         </div>
