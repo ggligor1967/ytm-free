@@ -46,6 +46,7 @@ export function Player() {
     setProgress,
     duration,
     setDuration,
+    playbackRestartRequestId,
     isShuffle,
     toggleShuffle,
     repeatMode,
@@ -73,6 +74,7 @@ export function Player() {
   } = useAppStore();
 
   const audioRef = useRef<HTMLAudioElement>(null);
+  const handledPlaybackRestartRequestIdRef = useRef(playbackRestartRequestId);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -153,6 +155,15 @@ export function Player() {
       audioRef.current.pause();
     }
   }, [isPlaying, audioUrl, handlePlayRejection]);
+
+  useEffect(() => {
+    if (handledPlaybackRestartRequestIdRef.current === playbackRestartRequestId) return;
+
+    handledPlaybackRestartRequestIdRef.current = playbackRestartRequestId;
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+    }
+  }, [playbackRestartRequestId]);
 
   // Handle volume
   useEffect(() => {
