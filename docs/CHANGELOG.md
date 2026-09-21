@@ -1,13 +1,31 @@
 # YTM-Free Changelog & Version History
 
-**Current Version**: 1.0.0
-**Last Updated**: July 31, 2026
+**Current Version**: 1.0.1
+**Last Updated**: September 21, 2026
 **Status**: See `PROJECT_STATE.md` for the dated, evidence-backed status of individual
 subsystems — this file is a changelog, not a status claim.
 
 ---
 
-## Version 1.0.0 (Current)
+## Version 1.0.1 (Current)
+
+SOURCE PREPARATION: This patch release contains the verified post-v1.0.0 stabilization
+already present on `main` at `36102332966aed7b5356c418dc56ff2bc6ac317b`:
+
+- Smart Playlist generation and persistence hardening.
+- Command Bar execution and focus stabilization.
+- Sidebar/layout and navigation scroll stability.
+- English UI consistency remediation.
+- Strengthened runtime and release verification, with post-R4 forensic status
+  `FORENSIC_PASS_WITH_QUALIFICATIONS` for that baseline.
+
+This preparation aligns version metadata and current release text only. The official
+v1.0.1 release build is valid only when produced from the exact merged `main` SHA after
+independent review. Build verification, artifact hashes, tag status, and publication
+status are separate release evidence and are not established by this source-preparation
+entry.
+
+## Version 1.0.0 (Previous)
 
 First tagged release, `v1.0.0` (`RELEASE_SHA` `830dce6e7c6846327ead6b5f5c9e75a2a0ac8b01`). The
 release commit touches 16 files — a version-manifest bump plus a real bugfix and a display
