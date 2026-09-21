@@ -2,11 +2,11 @@
 
 A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **Rust**. Stream music for free using yt-dlp as the backend - no subscriptions needed!
 
-![YTM Free](https://img.shields.io/badge/version-1.0.0-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-orange) ![License](https://img.shields.io/badge/license-Personal%20Use-green)
+![YTM Free](https://img.shields.io/badge/version-1.0.1-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-orange) ![License](https://img.shields.io/badge/license-Personal%20Use-green)
 
 ## 📌 Status
 
-This is a personal-use v1.0.0 release. Core playback (search, stream, download, playlists,
+This is a personal-use v1.0.1 release. Core playback (search, stream, download, playlists,
 favorites, import) and the AI features below are implemented and covered by unit/integration
 tests and quality gates passed on the exact v1.0.0 release commit. Full end-to-end runtime proof — a single continuous
 search → playback → real download → organize into a playlist → close → restart → persistence
