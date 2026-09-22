@@ -4,6 +4,19 @@
 > Every claim below is dated and backed by a command. When you re-verify, update the date and result — never leave a stale ✅.
 > If this file disagrees with any other doc (README, docs/FAZA_*, CHANGELOG), **this file wins**; update the other doc or flag it.
 
+## Current CI and repository-governance snapshot (2026-09-22, post-PR #34)
+
+- Canonical branch: `main`. Current verified baseline after PR #34: `c2cf1772fdc0c4fdbe265a3fb7c5c72a624e43e1`.
+- PR #34 (`ci: add Windows quality gates`) was squash-merged from reviewed head `8386e1ccaed4f747076b3011cdcab616b1aa93ba`. The reviewed PR tree and final squash tree were both `9162c227f4a84e7798e39c7649a2ff4873823208`.
+- `.github/workflows/ci.yml` runs GitHub Actions on pull requests to `main`, pushes to `main`, and manual dispatch. Runner: `windows-latest`; Node `22.22.2`; npm `12.0.2`; Rust `1.94.1`.
+- CI Quality Gates: ESLint; TypeScript; WDIO typecheck; frontend Vitest; production frontend build plus `dist/` assertion; `cargo fmt --check`; `cargo check`; `cargo test`; Clippy; `git diff --check`; final clean-worktree assertion.
+- First pull-request CI proof: GitHub Actions run `35667467266` on PR head `8386e1ccaed4f747076b3011cdcab616b1aa93ba` — `Quality Gates` SUCCESS.
+- First push-to-main CI proof: GitHub Actions run `35714516689` on `main@c2cf1772fdc0c4fdbe265a3fb7c5c72a624e43e1` — `Quality Gates` SUCCESS.
+- `main` branch protection is enabled. Required status check: `Quality Gates`; strict/up-to-date mode enabled; protection applies to admins; force-push and branch deletion are disabled.
+- The remote and local `ci/quality-gates-v1.0.1` branches were deleted only after the push CI on merged `main` passed. The canonical local checkout was then fast-forwarded to `c2cf1772...` and verified clean.
+- CI proves the configured static/unit/build gates only. It does not upgrade historical runtime evidence into a fresh full-product E2E proof; current-main full-product Tauri/WebView2 E2E remains a separate verification level.
+- GitHub emitted a non-blocking annotation that `actions/checkout@v4` and `actions/setup-node@v4` target the deprecated Node.js 20 action runtime and are currently forced onto Node.js 24. CI passed; action-version hardening remains follow-up work.
+
 ## R1 Smart Playlist remediation (2026-09-20, local working tree)
 
 - Scope: `fix/r1-smart-playlist-population`, unchanged baseline HEAD `fe05a398a91096387145be4744c8946c8e4e44f5`; admission verified clean. These results apply to the uncommitted R1 working tree, not the baseline release executable. No commit, push, merge, or PR.
@@ -31,7 +44,9 @@
 - Local, gitignored evidence: `logs/r1/verification.md`, per-gate logs, `logs/r1/runtime.spec.ts`, and `logs/r1/runtime/{preview.json,preview.png,saved.json,saved.png,final-playlists.json,persistence.json}`. Runtime database, downloads, Spotify input, WebView profile, and temporary paths were isolated under `logs/r1/runtime`.
 - Qualifications: this is a debug WDIO build of the working tree, not a rebuilt release/installer or full-product E2E certification. Cloud-model output and YouTube availability vary. The WDIO service emitted a Windows executable-mode diagnostic and an after-session mock-cleanup warning; the actual UI assertions, persistence checks, and runner exit succeeded. No dependencies were added.
 
-## Current reconciliation snapshot (2026-09-19, post-PR #26)
+## Historical reconciliation snapshot (2026-09-19, post-PR #26)
+
+> Superseded for current CI/governance facts by the 2026-09-22 snapshot above; retained as dated historical evidence.
 
 - Canonical branch: `main`. Post-merge canonical HEAD: `5e7c6e9782c2284db9dd0c3770429f4f7a31edb6` (merge commit for PR #26).
 - PR #26 integrated verified head `83143e96ac5b6f108995d9ca39471265052a13c3` (`fix(playback): harden audio proxy and yt-dlp compatibility`). GitHub comparison from the verified PR head to the merge commit has no file delta; the feature branch was deleted locally and on `origin` after merge.

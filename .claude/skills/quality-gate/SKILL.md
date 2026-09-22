@@ -5,7 +5,7 @@ description: Use before claiming any ytm-free work is complete, fixed, or passin
 
 # Quality Gate — ytm-free
 
-Run the gate that matches what you touched. Paste real output into your report using docs/EVIDENCE_LEDGER_TEMPLATE.md. There is no CI; this gate is the only thing standing between a bug and `main`.
+Run the gate that matches what you touched. Paste real output into your report using docs/EVIDENCE_LEDGER_TEMPLATE.md. GitHub Actions runs these `Quality Gates` on pull requests and pushes to protected `main`, but local execution remains required before PR creation and CI does not substitute for runtime/E2E evidence.
 
 ## Gate A — any TypeScript/React change
 
