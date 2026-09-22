@@ -6,7 +6,7 @@
 
 ## Current CI, Release Gate, and repository-governance snapshot (2026-09-22, post-PR #37)
 
-- Canonical branch: `main`. Current verified baseline after PR #37: `1e4d51baa150e692e0289480e979ac1bd8fb8d23`.
+- Canonical branch: `main`. PR #37 established the verified CI/Release Gate infrastructure baseline at `1e4d51baa150e692e0289480e979ac1bd8fb8d23`. Read the live repository tip directly from Git; later documentation-only commits do not change the PR #37 release-artifact evidence identity.
 - PR #34 introduced `.github/workflows/ci.yml` and the Windows-hosted `Quality Gates` workflow. The workflow runs on pull requests to `main`, pushes to `main`, and manual dispatch.
 - CI uses project Node `22.22.2`, npm `12.0.2`, and Rust `1.94.1`. Its gates cover ESLint, TypeScript, WDIO typecheck, frontend Vitest, frontend production build plus `dist/` assertion, `cargo fmt --check`, `cargo check`, `cargo test`, Clippy, `git diff --check`, and a final clean-worktree assertion.
 - PR #36 completed GitHub Actions runtime hardening: `actions/checkout` v7.0.1 is pinned to `3d3c42e5aac5ba805825da76410c181273ba90b1` and `actions/setup-node` v7.0.0 is pinned to `820762786026740c76f36085b0efc47a31fe5020`. The application/project Node version remains `22.22.2`. The former Node.js 20 action-runtime deprecation annotation is no longer present on the verified PR/main runs.

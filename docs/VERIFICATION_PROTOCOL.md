@@ -79,7 +79,7 @@ npm run tauri build      # build portion PASS = release bundle(s) generated from
 
 The hosted Windows `Release Gate` automates the production-build artifact portion of this level: it binds execution to an exact source SHA, verifies version metadata and `Cargo.toml`/`Cargo.lock` consistency, runs `npm run tauri build`, requires the standalone EXE plus MSI and NSIS bundles, and records file sizes and SHA-256 hashes in an evidence artifact.
 
-A successful `Release Gate` is therefore evidence that production bundles were generated and inventoried from the exact commit. It does **not** launch or install those artifacts and does not execute Level 4. Current `main` has fresh Release Gate build/artifact-integrity evidence, but it does **not** yet have a fresh complete Level 5 runtime qualification. Do not infer `production-ready` from Release Gate success alone.
+A successful `Release Gate` is therefore evidence that production bundles were generated and inventoried from the exact commit. It does **not** launch or install those artifacts and does not execute Level 4. PR #37 has fresh Release Gate build/artifact-integrity evidence bound to its exact merged SHA. A later docs-only commit does not receive a new exact-SHA release artifact unless Release Gate is explicitly run for that commit. Do not infer a complete Level 5 or `production-ready` claim from Release Gate success alone.
 
 Historical release/runtime evidence remains bound to the exact SHA on which it was recorded; see `PROJECT_STATE.md`.
 

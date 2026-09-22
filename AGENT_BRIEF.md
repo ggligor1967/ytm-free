@@ -5,8 +5,8 @@ Audience: any AI agent (Claude Code, Codex, Copilot, etc.) or human maintainer s
 ## 30-second orientation
 
 - Desktop music player, personal use only. Tauri 2.x + React/TS frontend (`src/`) + Rust backend (`src-tauri/src/`). npm is the package manager. Docs are mixed English/Romanian (`Faza` = `Phase`).
-- The exact tagged `v1.0.0` release has a recorded historical full-flow runtime proof, but later commits do not inherit that proof automatically. Current canonical `main` after PR #37 is `1e4d51baa150e692e0289480e979ac1bd8fb8d23`. Fresh full-product Tauri/WebView2 E2E on this current `main` is still **NOT RUN**. Current truth: `PROJECT_STATE.md`.
-- GitHub Actions `Quality Gates` run on pull requests and pushes to protected `main`. The current main push run is green.
+- The exact tagged `v1.0.0` release has a recorded historical full-flow runtime proof, but later commits do not inherit that proof automatically. PR #37 established the CI/Release Gate infrastructure baseline at `1e4d51baa150e692e0289480e979ac1bd8fb8d23`; read the live repository tip directly from Git. Fresh full-product Tauri/WebView2 E2E on the repository tip remains **NOT RUN**. Current truth: `PROJECT_STATE.md`.
+- GitHub Actions `Quality Gates` run on pull requests and pushes to protected `main`. PR #37 has green main-push Quality Gates and Release Gate evidence; later documentation-only merges must still pass their applicable Quality Gates.
 - A separate Windows `Release Gate` validates exact source/version metadata and production bundle generation (standalone EXE + MSI + NSIS with size/SHA-256 inventory). It does **not** install/run those artifacts and does not replace runtime/E2E verification.
 - The normal PowerShell environment exposes Visual Studio Build Tools 18 / MSVC and Rust `1.94.1` successfully.
 
