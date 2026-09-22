@@ -1,6 +1,6 @@
 # VERIFICATION_PROTOCOL — how to establish what actually works
 
-Run this whenever you (a) start significant work, (b) are about to claim something is done, or (c) need to update PROJECT_STATE.md. Record outputs in a ledger (see EVIDENCE_LEDGER_TEMPLATE.md). GitHub Actions now enforces the static/unit/build `Quality Gates` on pull requests and pushes to protected `main`; this protocol remains authoritative for environment, runtime, E2E, installer, and evidence-level verification beyond CI.
+Run this whenever you (a) start significant work, (b) are about to claim something is done, or (c) need to update PROJECT_STATE.md. Record outputs in a ledger (see EVIDENCE_LEDGER_TEMPLATE.md). GitHub Actions enforces the static/unit/build `Quality Gates` on pull requests and pushes to protected `main`. A separate path-filtered Windows `Release Gate` verifies exact-source production-bundle generation and artifact integrity. This protocol remains authoritative for environment, runtime, E2E, installer, and evidence-level claims that hosted build workflows do not establish.
 
 Rules:
 - A check "passes" only if you ran it in this session and saw the output. Cached knowledge, doc claims, and previous sessions don't count.
@@ -64,21 +64,24 @@ curl http://localhost:3456/health        # stream server responds
 ```
 Then manually: search → play → download → add to playlist → restart → data persisted.
 The exact tagged `v1.0.0` release has a recorded unified full-flow runtime proof. That
-historical proof does **not** automatically transfer to later commits: a fresh full-flow
-Tauri/WebView2 run on post-PR #26 current `main` is **NOT RUN**. Multiple narrower runtime
-harnesses also prove individual subsystems on their recorded SHAs; see `PROJECT_STATE.md`
+historical proof does **not** automatically transfer to later commits. A fresh full-flow
+Tauri/WebView2 run on the current `main` baseline is **NOT RUN**. Multiple narrower runtime
+harnesses prove individual subsystems only on their recorded SHAs; see `PROJECT_STATE.md`
 for the evidence lineage and current-main qualifications.
 
 ## Level 5 — Production build — REQUIRED before any release/"production-ready" claim
 
 ```
-npm run tauri build      # PASS = bundle in src-tauri/target/release/ AND the
-                         # built exe passes the Level 4 manual smoke
+npm run tauri build      # build portion PASS = release bundle(s) generated from the
+                         # exact source being claimed; complete Level 5 also requires
+                         # the resulting executable to satisfy the Level 4 runtime smoke
 ```
-The exact tagged `v1.0.0` release has recorded build + installed-runtime/full-flow evidence.
-Do not reuse that result for later commits: current post-PR #26 `main` has not had a fresh
-Level 5 rerun. Any release/"production-ready" claim must bind the Level 5 evidence to the
-exact commit being claimed; see `PROJECT_STATE.md`.
+
+The hosted Windows `Release Gate` automates the production-build artifact portion of this level: it binds execution to an exact source SHA, verifies version metadata and `Cargo.toml`/`Cargo.lock` consistency, runs `npm run tauri build`, requires the standalone EXE plus MSI and NSIS bundles, and records file sizes and SHA-256 hashes in an evidence artifact.
+
+A successful `Release Gate` is therefore evidence that production bundles were generated and inventoried from the exact commit. It does **not** launch or install those artifacts and does not execute Level 4. Current `main` has fresh Release Gate build/artifact-integrity evidence, but it does **not** yet have a fresh complete Level 5 runtime qualification. Do not infer `production-ready` from Release Gate success alone.
+
+Historical release/runtime evidence remains bound to the exact SHA on which it was recorded; see `PROJECT_STATE.md`.
 
 ## Reporting matrix
 
