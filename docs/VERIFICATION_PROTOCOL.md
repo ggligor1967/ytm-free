@@ -1,6 +1,6 @@
 # VERIFICATION_PROTOCOL — how to establish what actually works
 
-Run this whenever you (a) start significant work, (b) are about to claim something is done, or (c) need to update PROJECT_STATE.md. Record outputs in a ledger (see EVIDENCE_LEDGER_TEMPLATE.md). There is no CI — this protocol is the CI.
+Run this whenever you (a) start significant work, (b) are about to claim something is done, or (c) need to update PROJECT_STATE.md. Record outputs in a ledger (see EVIDENCE_LEDGER_TEMPLATE.md). GitHub Actions now enforces the static/unit/build `Quality Gates` on pull requests and pushes to protected `main`; this protocol remains authoritative for environment, runtime, E2E, installer, and evidence-level verification beyond CI.
 
 Rules:
 - A check "passes" only if you ran it in this session and saw the output. Cached knowledge, doc claims, and previous sessions don't count.

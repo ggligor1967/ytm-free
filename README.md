@@ -327,8 +327,9 @@ at startup, not from a config file).
   environment; this was detected, the modified file preserved as evidence, and the real database
   restored from a SHA-256-verified backup. See `PROJECT_STATE.md` for the full record — this is
   not to be read as "no incident occurred."
-- There is no CI. Quality gates (typecheck, lint, unit/integration tests, `cargo fmt`/`clippy`)
-  are run manually before each release; nothing enforces them automatically on every commit.
+- GitHub Actions CI runs the repository Quality Gates on pull requests and pushes to `main`.
+  The protected `main` branch requires the `Quality Gates` status check and enforces it for admins.
+  Runtime/E2E and installer claims still require the evidence levels documented in `docs/VERIFICATION_PROTOCOL.md`.
 
 ## 🐛 Troubleshooting
 

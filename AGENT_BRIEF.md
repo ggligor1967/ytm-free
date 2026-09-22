@@ -6,7 +6,7 @@ Audience: any AI agent (Claude Code, Codex, Copilot, etc.) or human maintainer s
 
 - Desktop music player, personal use only. Tauri 2.x + React/TS frontend (`src/`) + Rust backend (`src-tauri/src/`). npm is the package manager. Docs are mixed English/Romanian ("Faza" = "Phase").
 - The exact tagged `v1.0.0` release has a recorded full-flow runtime proof, but later product changes do not inherit that proof automatically. After PR #26, static/unit gates are green while a fresh full Tauri/WebView2 E2E on current `main` is **NOT RUN**. The current PowerShell environment exposes Visual Studio Build Tools 18 / MSVC and Rust 1.94.1 successfully. Current truth: `PROJECT_STATE.md`.
-- There is **no CI**. Nothing checks your work except you. Run the checks in `docs/VERIFICATION_PROTOCOL.md` yourself.
+- GitHub Actions CI runs `Quality Gates` on pull requests and pushes to protected `main`. Run the applicable local gates before opening a PR; use `docs/VERIFICATION_PROTOCOL.md` for runtime/E2E evidence that CI does not establish.
 
 ## Trust order for documentation
 
