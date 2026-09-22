@@ -50,6 +50,9 @@ jobs:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       EXPECTED_VERSION: ${{ inputs.expected_version || '' }}
       EXPECTED_SHA: ${{ inputs.expected_sha || '' }}
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
 
     steps:
       - name: Checkout exact source
@@ -57,6 +60,16 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
+
+      - name: Verify Git checkout mode
+        shell: pwsh
+        run: |
+          $autocrlf = (git config --get core.autocrlf).Trim()
+          Write-Host "CORE_AUTOCRLF=$autocrlf"
+
+          if ($autocrlf -ne "false") {
+            throw "Release Gate requires core.autocrlf=false."
+          }
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -201,6 +214,18 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "VERSION_CONSISTENCY=PASS"
 
+      - name: Verify clean source before release build
+        shell: pwsh
+        run: |
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+
+          if ($status.Count -ne 0) {
+            $status
+            throw "Source is dirty before release build."
+          }
+
+          Write-Host "PRE_BUILD_WORKTREE=CLEAN"
+
       - name: Build production Tauri bundles
         run: npm run tauri build
 
@@ -312,9 +337,16 @@ jobs:
           $status = @(git status --porcelain=v1 --untracked-files=all)
 
           if ($status.Count -ne 0) {
+            Write-Host "=== POST-BUILD GIT STATUS ==="
             $status
+
+            Write-Host "=== POST-BUILD GIT DIFF ==="
+            git diff --
+
             throw "Release build changed the worktree."
           }
+
+          Write-Host "POST_BUILD_WORKTREE=CLEAN"
 
       - name: Upload release-gate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
