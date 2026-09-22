@@ -1,0 +1,326 @@
+name: Release Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-gate.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/windows/installer-hooks.nsh"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-gate.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/windows/installer-hooks.nsh"
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: "Expected application version, for example 1.0.1"
+        required: false
+        type: string
+      expected_sha:
+        description: "Optional exact commit SHA to bind the release gate"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    name: Release Gate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      EXPECTED_VERSION: ${{ inputs.expected_version || '' }}
+      EXPECTED_SHA: ${{ inputs.expected_sha || '' }}
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Pin npm
+        shell: pwsh
+        run: npm install --global npm@12.0.2
+
+      - name: Setup Rust 1.94.1
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.1-x86_64-pc-windows-msvc --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup install failed." }
+
+          rustup default 1.94.1-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed." }
+
+          $rustc = rustc --version
+          $cargo = cargo --version
+
+          Write-Host $rustc
+          Write-Host $cargo
+
+          if ($rustc -notmatch "^rustc 1\.94\.1 ") {
+            throw "Unexpected rustc version: $rustc"
+          }
+
+          if ($cargo -notmatch "^cargo 1\.94\.1 ") {
+            throw "Unexpected cargo version: $cargo"
+          }
+
+      - name: Verify exact source identity
+        id: identity
+        shell: pwsh
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+
+          Write-Host "HEAD=$head"
+          Write-Host "SOURCE_SHA=$env:SOURCE_SHA"
+
+          if ($head -ne $env:SOURCE_SHA) {
+            throw "Checkout SHA does not match SOURCE_SHA."
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:EXPECTED_SHA)) {
+            if ($head -ne $env:EXPECTED_SHA) {
+              throw "HEAD does not match expected_sha."
+            }
+          }
+
+          "source_sha=$head" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify version consistency
+        id: versions
+        shell: pwsh
+        run: |
+          $packageVersion = (
+            node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read package.json version with Node."
+          }
+
+          $lockVersion = (
+            node -p "JSON.parse(require('fs').readFileSync('package-lock.json','utf8')).version"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read package-lock.json top-level version with Node."
+          }
+
+          $lockRootVersion = (
+            node -p "JSON.parse(require('fs').readFileSync('package-lock.json','utf8')).packages[''].version"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read package-lock.json root package version with Node."
+          }
+
+          $tauriVersion = (
+            node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read tauri.conf.json version with Node."
+          }
+
+          $cargoMetadataJson = cargo metadata `
+            --manifest-path src-tauri/Cargo.toml `
+            --format-version 1 `
+            --no-deps `
+            --locked
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata --locked failed; Cargo.toml/Cargo.lock are inconsistent."
+          }
+
+          $cargoMetadata = $cargoMetadataJson | ConvertFrom-Json
+
+          $cargoPackages = @(
+            $cargoMetadata.packages |
+            Where-Object { $_.name -eq "ytm-free" }
+          )
+
+          if ($cargoPackages.Count -ne 1) {
+            throw "Expected exactly one ytm-free Cargo package."
+          }
+
+          $cargoVersion = [string]$cargoPackages[0].version
+
+          Write-Host "PACKAGE_VERSION=$packageVersion"
+          Write-Host "PACKAGE_LOCK_VERSION=$lockVersion"
+          Write-Host "PACKAGE_LOCK_ROOT_VERSION=$lockRootVersion"
+          Write-Host "CARGO_VERSION=$cargoVersion"
+          Write-Host "TAURI_VERSION=$tauriVersion"
+
+          $versions = @(
+            $packageVersion,
+            $lockVersion,
+            $lockRootVersion,
+            $cargoVersion,
+            $tauriVersion
+          )
+
+          $distinct = @($versions | Select-Object -Unique)
+
+          if ($distinct.Count -ne 1) {
+            throw "Release version metadata is inconsistent: $($distinct -join ', ')."
+          }
+
+          $version = $distinct[0]
+
+          if (-not [string]::IsNullOrWhiteSpace($env:EXPECTED_VERSION)) {
+            if ($version -ne $env:EXPECTED_VERSION) {
+              throw "Version $version does not match expected_version $env:EXPECTED_VERSION."
+            }
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "VERSION_CONSISTENCY=PASS"
+
+      - name: Build production Tauri bundles
+        run: npm run tauri build
+
+      - name: Verify and inventory release artifacts
+        id: artifacts
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.versions.outputs.version }}
+          VERIFIED_SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target\release"
+          $standalonePath = Join-Path $releaseDir "ytm-free.exe"
+          $msiDir = Join-Path $releaseDir "bundle\msi"
+          $nsisDir = Join-Path $releaseDir "bundle\nsis"
+
+          if (-not (Test-Path -LiteralPath $standalonePath -PathType Leaf)) {
+            throw "Standalone executable missing: $standalonePath"
+          }
+
+          $msiFiles = @(Get-ChildItem -LiteralPath $msiDir -Filter "*.msi" -File)
+          $nsisFiles = @(Get-ChildItem -LiteralPath $nsisDir -Filter "*.exe" -File)
+
+          if ($msiFiles.Count -ne 1) {
+            throw "Expected exactly one MSI; found $($msiFiles.Count)."
+          }
+
+          if ($nsisFiles.Count -ne 1) {
+            throw "Expected exactly one NSIS installer; found $($nsisFiles.Count)."
+          }
+
+          if ($msiFiles[0].Name -notlike "*$env:APP_VERSION*.msi") {
+            throw "MSI filename does not contain version $env:APP_VERSION."
+          }
+
+          if ($nsisFiles[0].Name -notlike "*$env:APP_VERSION*.exe") {
+            throw "NSIS filename does not contain version $env:APP_VERSION."
+          }
+
+          $stage = Join-Path $env:RUNNER_TEMP "ytm-free-release-gate"
+
+          if (Test-Path -LiteralPath $stage) {
+            Remove-Item -LiteralPath $stage -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          $artifactSpecs = @(
+            [pscustomobject]@{ Type = "standalone"; Path = $standalonePath },
+            [pscustomobject]@{ Type = "msi"; Path = $msiFiles[0].FullName },
+            [pscustomobject]@{ Type = "nsis"; Path = $nsisFiles[0].FullName }
+          )
+
+          $inventory = @()
+
+          foreach ($spec in $artifactSpecs) {
+            $item = Get-Item -LiteralPath $spec.Path
+            $hash = Get-FileHash -LiteralPath $spec.Path -Algorithm SHA256
+
+            Copy-Item -LiteralPath $spec.Path -Destination $stage
+
+            $inventory += [pscustomobject]@{
+              type = $spec.Type
+              file = $item.Name
+              bytes = $item.Length
+              sha256 = $hash.Hash.ToUpperInvariant()
+            }
+          }
+
+          $hashLines = @(
+            $inventory | ForEach-Object {
+              "$($_.sha256)  $($_.file)"
+            }
+          )
+
+          $hashPath = Join-Path $stage "SHA256SUMS.txt"
+          $inventoryPath = Join-Path $stage "artifact-inventory.json"
+          $metadataPath = Join-Path $stage "release-gate-metadata.json"
+
+          [System.IO.File]::WriteAllLines(
+            $hashPath,
+            $hashLines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $inventory |
+            ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath $inventoryPath -Encoding utf8NoBOM
+
+          [ordered]@{
+            version = $env:APP_VERSION
+            source_sha = $env:VERIFIED_SOURCE_SHA
+            workflow_run_id = $env:GITHUB_RUN_ID
+            artifacts = $inventory
+          } |
+            ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath $metadataPath -Encoding utf8NoBOM
+
+          Write-Host "=== RELEASE ARTIFACT INVENTORY ==="
+          $inventory | Format-Table -AutoSize
+
+          Write-Host "=== SHA256SUMS ==="
+          Get-Content -LiteralPath $hashPath
+
+          Write-Host "ARTIFACT_INVENTORY=PASS"
+
+      - name: Verify clean tracked worktree
+        shell: pwsh
+        run: |
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+
+          if ($status.Count -ne 0) {
+            $status
+            throw "Release build changed the worktree."
+          }
+
+      - name: Upload release-gate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ytm-free-release-gate-${{ github.run_id }}
+          path: ${{ runner.temp }}/ytm-free-release-gate
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
