@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    name: Quality Gates
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Pin npm
+        shell: pwsh
+        run: npm install --global npm@12.0.2
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: TypeScript
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: WDIO typecheck
+        run: npm run typecheck:wdio
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Frontend production build
+        run: npm run build
+
+      - name: Verify dist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "dist")) {
+            throw "Frontend build exited successfully but dist/ is absent."
+          }
+
+      - name: Rustfmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+
+      - name: Git diff check
+        run: git diff --check
+
+      - name: Verify clean worktree
+        shell: pwsh
+        run: |
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($status.Count -ne 0) {
+            $status
+            throw "CI commands changed the worktree."
+          }
