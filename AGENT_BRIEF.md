@@ -4,9 +4,11 @@ Audience: any AI agent (Claude Code, Codex, Copilot, etc.) or human maintainer s
 
 ## 30-second orientation
 
-- Desktop music player, personal use only. Tauri 2.x + React/TS frontend (`src/`) + Rust backend (`src-tauri/src/`). npm is the package manager. Docs are mixed English/Romanian ("Faza" = "Phase").
-- The exact tagged `v1.0.0` release has a recorded full-flow runtime proof, but later product changes do not inherit that proof automatically. After PR #26, static/unit gates are green while a fresh full Tauri/WebView2 E2E on current `main` is **NOT RUN**. The current PowerShell environment exposes Visual Studio Build Tools 18 / MSVC and Rust 1.94.1 successfully. Current truth: `PROJECT_STATE.md`.
-- GitHub Actions CI runs `Quality Gates` on pull requests and pushes to protected `main`. Run the applicable local gates before opening a PR; use `docs/VERIFICATION_PROTOCOL.md` for runtime/E2E evidence that CI does not establish.
+- Desktop music player, personal use only. Tauri 2.x + React/TS frontend (`src/`) + Rust backend (`src-tauri/src/`). npm is the package manager. Docs are mixed English/Romanian (`Faza` = `Phase`).
+- The exact tagged `v1.0.0` release has a recorded historical full-flow runtime proof, but later commits do not inherit that proof automatically. PR #37 established the CI/Release Gate infrastructure baseline at `1e4d51baa150e692e0289480e979ac1bd8fb8d23`; read the live repository tip directly from Git. Fresh full-product Tauri/WebView2 E2E on the repository tip remains **NOT RUN**. Current truth: `PROJECT_STATE.md`.
+- GitHub Actions `Quality Gates` run on pull requests and pushes to protected `main`. PR #37 has green main-push Quality Gates and Release Gate evidence; later documentation-only merges must still pass their applicable Quality Gates.
+- A separate Windows `Release Gate` validates exact source/version metadata and production bundle generation (standalone EXE + MSI + NSIS with size/SHA-256 inventory). It does **not** install/run those artifacts and does not replace runtime/E2E verification.
+- The normal PowerShell environment exposes Visual Studio Build Tools 18 / MSVC and Rust `1.94.1` successfully.
 
 ## Trust order for documentation
 
@@ -32,7 +34,7 @@ npm test                         # 2026-09-19: 67/67 PASS
 npm run lint                     # 2026-09-19: PASS
 npx tsc --noEmit -p tsconfig.json # 2026-09-19: PASS
 npm run typecheck:wdio           # 2026-09-19: PASS
-npm run build                    # tsc + vite build → dist/; historical release gate, not rerun in PR #26 mission
+npm run build                    # frontend production build; hosted Release Gate separately runs npm run tauri build
 npm run dev                      # vite only (frontend in browser, Tauri APIs unavailable)
 cargo check --manifest-path src-tauri/Cargo.toml # 2026-09-19: PASS
 cargo test --manifest-path src-tauri/Cargo.toml  # 2026-09-19: 106 passed / 0 failed / 2 ignored

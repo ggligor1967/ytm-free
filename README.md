@@ -6,20 +6,9 @@ A personal YouTube Music alternative built with **Tauri 2.x**, **React**, and **
 
 ## 📌 Status
 
-This is a personal-use v1.0.1 release. Core playback (search, stream, download, playlists,
-favorites, import) and the AI features below are implemented and covered by unit/integration
-tests and quality gates passed on the exact v1.0.0 release commit. Full end-to-end runtime proof — a single continuous
-search → playback → real download → organize into a playlist → close → restart → persistence
-pass, plus NSIS install/uninstall and application-config deletion — has been demonstrated
-against the exact tagged `v1.0.0` build. Exhaustive per-feature runtime verification of every
-one of the ~110 AI functions is still **not** claimed by this document — see **Known
-Limitations** below and `PROJECT_STATE.md` in the repository for the dated, evidence-backed
-status of individual subsystems.
+This is a personal-use v1.0.1 release. Current `main` is protected by GitHub Actions `Quality Gates`. A separate Windows `Release Gate` verifies exact source-SHA and version consistency, runs `npm run tauri build`, requires a standalone EXE plus one MSI and one NSIS installer, and records file sizes and SHA-256 hashes in an uploaded workflow artifact.
 
-Post-release playback hardening from PR #26 was merged to `main` on 2026-09-19. Its
-frontend/Rust static and unit gates passed on the reviewed commit (including 67/67 Vitest and
-106 passed / 0 failed / 2 ignored Rust tests), but a fresh full Tauri/WebView2 E2E run was
-**not** performed for that post-release change.
+Those hosted gates establish compilation/test/build and release-artifact integrity, not installed-runtime behavior. They do not by themselves prove installer install/uninstall behavior or a fresh continuous search → playback → real download → playlist → restart → persistence E2E flow on current `main`. Historical runtime evidence remains bound to the exact SHAs on which it was recorded; see `PROJECT_STATE.md` and `docs/VERIFICATION_PROTOCOL.md` for the current evidence boundary.
 
 ## ✨ Features
 
@@ -327,9 +316,11 @@ at startup, not from a config file).
   environment; this was detected, the modified file preserved as evidence, and the real database
   restored from a SHA-256-verified backup. See `PROJECT_STATE.md` for the full record — this is
   not to be read as "no incident occurred."
-- GitHub Actions CI runs the repository Quality Gates on pull requests and pushes to `main`.
-  The protected `main` branch requires the `Quality Gates` status check and enforces it for admins.
-  Runtime/E2E and installer claims still require the evidence levels documented in `docs/VERIFICATION_PROTOCOL.md`.
+- GitHub Actions `Quality Gates` run on pull requests and pushes to protected `main`.
+  A separate path-filtered Windows `Release Gate` validates exact source/version metadata,
+  builds the standalone EXE + MSI + NSIS artifacts, and records size/SHA-256 evidence.
+  It does not create tags/releases and does not replace installed-runtime, installer, or
+  full-product E2E verification required by `docs/VERIFICATION_PROTOCOL.md`.
 
 ## 🐛 Troubleshooting
 

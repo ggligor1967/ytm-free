@@ -5,7 +5,7 @@ description: Use before claiming any ytm-free work is complete, fixed, or passin
 
 # Quality Gate — ytm-free
 
-Run the gate that matches what you touched. Paste real output into your report using docs/EVIDENCE_LEDGER_TEMPLATE.md. GitHub Actions runs these `Quality Gates` on pull requests and pushes to protected `main`, but local execution remains required before PR creation and CI does not substitute for runtime/E2E evidence.
+Run the gate that matches what you touched. Paste real output into your report using docs/EVIDENCE_LEDGER_TEMPLATE.md. GitHub Actions runs `Quality Gates` on pull requests and pushes to protected `main`. Release-relevant workflow/version/bundle metadata is additionally covered by the Windows `Release Gate`. Local execution remains required before PR creation where applicable, and hosted build workflows do not substitute for runtime/E2E evidence.
 
 ## Gate A — any TypeScript/React change
 
@@ -47,6 +47,12 @@ Then Gate A + Gate B both apply.
 ## Gate D — "the feature works" claims
 
 Gates A–C prove compilation and unit behavior only. Claiming user-visible behavior requires VERIFICATION_PROTOCOL.md Level 4 (run `npm run tauri dev`, exercise the actual flow, describe what you saw). If Level 4 is unreachable, the claim is "implemented and unit-tested, not exercised in the running app".
+
+## Gate E — release workflow / release metadata / bundle configuration
+
+For a change that triggers `.github/workflows/release-gate.yml`, the hosted `Release Gate` must pass on the exact commit being reviewed. Verify that it binds to the intended source SHA, version metadata is consistent, `cargo metadata --locked` succeeds, the production Tauri build emits standalone EXE + MSI + NSIS artifacts, and the uploaded inventory contains file sizes and SHA-256 hashes.
+
+A green `Release Gate` proves production-bundle generation and artifact integrity only. It does not prove installed runtime behavior, installer install/uninstall, Level 4 user-visible behavior, or a complete Level 5/"production-ready" claim.
 
 ## Honest-reporting rules
 
